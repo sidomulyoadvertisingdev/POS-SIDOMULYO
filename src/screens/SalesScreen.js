@@ -956,6 +956,19 @@ const normalizeMaterialRow = (row) => ({
     row?.sku ||
     '',
   ).trim(),
+  stock: Number(
+    row?.stock ||
+    row?.stock_m2 ||
+    row?.available_decimal ||
+    row?.available_main ||
+    0,
+  ) || 0,
+  min_stock: Number(
+    row?.min_stock ||
+    row?.minimum_stock ||
+    row?.low_stock_threshold ||
+    0,
+  ) || 0,
 });
 const normalizeCustomerRow = (row) => ({
   ...row,
@@ -1338,12 +1351,10 @@ const resolveUsedMaterialInfoFromPricing = (pricing, fallbackMaterialInfo, mater
     pricing?.selected_material?.id,
     pricing?.selected_material_product_id,
   );
-
   const selectedRows = []
     .concat(Array.isArray(pricing?.materials) ? pricing.materials : [])
     .concat(Array.isArray(pricing?.material_products) ? pricing.material_products : [])
     .filter((row) => row && (row.is_selected || row.selected || row.is_default));
-
   const selectedRowIds = collectMaterialIds(
     ...selectedRows.map((row) => row?.id || row?.material_id || row?.material_product_id),
   );
@@ -1358,7 +1369,6 @@ const resolveUsedMaterialInfoFromPricing = (pricing, fallbackMaterialInfo, mater
         row?.sku,
     ),
   );
-
   const resolvedIds = directIds.length > 0
     ? directIds
     : (selectedRowIds.length > 0 ? selectedRowIds : (fallbackMaterialInfo?.materialIds || []));
@@ -1379,23 +1389,80 @@ const resolveUsedMaterialInfoFromPricing = (pricing, fallbackMaterialInfo, mater
     ...resolvedIds.map((id) => catalogMaterialNameMap?.[id]),
     ...materialRows.map((row) => row?.name),
   );
-
   const selectedWidthM = Number(
     pricing?.rule?.selected_width_m ||
     pricing?.price_breakdown?.sticker_selected_roll_width_m ||
     0,
   );
   const widthText = Number.isFinite(selectedWidthM) && selectedWidthM > 0
-    ? `Roll ${selectedWidthM.toFixed(2)} m`
+    ? ('Roll ' + selectedWidthM.toFixed(2) + ' m')
     : '';
   const materialName = String(names[0] || fallbackMaterialInfo?.displayText || '').trim();
   const displayText = [materialName, widthText].filter(Boolean).join(' | ');
-
+  const primaryRow = materialRows[0] || null;
+  const materialStock = Number(
+    pricing?.rule?.selected_material_stock ??
+    pricing?.note?.material_stock ??
+    primaryRow?.stock ??
+    primaryRow?.stock_m2 ??
+    primaryRow?.available_decimal ??
+    primaryRow?.available_main ??
+    0,
+  ) || 0;
+  const materialMinStock = Number(
+    pricing?.rule?.selected_material_min_stock ??
+    pricing?.note?.material_min_stock ??
+    primaryRow?.min_stock ??
+    primaryRow?.minimum_stock ??
+    primaryRow?.low_stock_threshold ??
+    0,
+  ) || 0;
   return {
     materialIds: resolvedIds,
     primaryMaterialId: resolvedIds[0] || fallbackMaterialInfo?.primaryMaterialId || null,
     displayText: displayText || '-',
+    materialName: materialName || '-',
+    materialStock,
+    materialMinStock,
   };
+};
+const buildSelectedMaterialStockMessage = (usedMaterialInfo, productName = '') => {
+  const materialName = String(
+    usedMaterialInfo?.materialName ||
+    usedMaterialInfo?.displayText ||
+    'material',
+  ).trim();
+  const targetProduct = String(productName || '').trim();
+  const stock = Number(usedMaterialInfo?.materialStock || 0) || 0;
+  const minStock = Number(usedMaterialInfo?.materialMinStock || 0) || 0;
+  const lines = [];
+  if (stock <= 0) {
+    lines.push('Stok material tidak tersedia, item tidak bisa disimpan.');
+  } else {
+    lines.push('Stok material sudah menyentuh batas minimum, item belum boleh disimpan.');
+  }
+  if (targetProduct) {
+    lines.push('Produk: ' + targetProduct + '.');
+  }
+  if (materialName) {
+    lines.push('Material: ' + materialName + '.');
+  }
+  lines.push('Stok saat ini: ' + formatMeterNumber(stock) + '.');
+  if (minStock > 0) {
+    lines.push('Batas minimum: ' + formatMeterNumber(minStock) + '.');
+  }
+  return lines.join('\n');
+};
+const validateSelectedMaterialStock = (usedMaterialInfo, productName = '') => {
+  const stock = Number(usedMaterialInfo?.materialStock || 0) || 0;
+  const minStock = Number(usedMaterialInfo?.materialMinStock || 0) || 0;
+  if (stock <= 0) {
+    return buildSelectedMaterialStockMessage(usedMaterialInfo, productName);
+  }
+  if (minStock > 0 && stock <= minStock) {
+    return buildSelectedMaterialStockMessage(usedMaterialInfo, productName);
+  }
+  return '';
 };
 const PAYMENT_METHOD_LABELS = ['Cash', 'Transfer', 'QRIS', 'Card'];
 
@@ -1662,6 +1729,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
   const [lastPayloadPreview, setLastPayloadPreview] = useState(null);
   const [itemFinalPrice, setItemFinalPrice] = useState(0);
   const [previewMaterialDisplay, setPreviewMaterialDisplay] = useState('');
+  const [previewMaterialError, setPreviewMaterialError] = useState('');
   const [mataAyamIssueBadge, setMataAyamIssueBadge] = useState({
     visible: false,
     message: '',
@@ -2820,6 +2888,23 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     const selectedId = Number(selectedProductId || 0);
     return Boolean(selectedId) && !productDetails[selectedId];
   }, [selectedProductId, productDetails]);
+  const resolvedPreviewMaterialDisplay = useMemo(() => {
+    const previewText = String(previewMaterialDisplay || '').trim();
+    if (previewText) {
+      return previewText;
+    }
+
+    if (isMaterialLoading) {
+      return 'Memuat material produk...';
+    }
+
+    const fallbackText = String(selectedProductMaterialInfo?.displayText || '').trim();
+    if (fallbackText) {
+      return fallbackText;
+    }
+
+    return 'Material akan dipilih otomatis sesuai hitung backend';
+  }, [previewMaterialDisplay, isMaterialLoading, selectedProductMaterialInfo]);
 
   const resolveCustomerId = async () => {
     if (!selectedCustomerId) {
@@ -3154,6 +3239,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       setSizeWidthMeter('');
       setSizeLengthMeter('');
       setPreviewMaterialDisplay('');
+      setPreviewMaterialError('');
       setSelectedFinishingIds([]);
       setSelectedFinishingMataAyamQtyById({});
       setMataAyamIssueBadge({ visible: false, message: '' });
@@ -3255,6 +3341,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       setSizeWidthMeter('');
       setSizeLengthMeter('');
       setPreviewMaterialDisplay('');
+      setPreviewMaterialError('');
       setSelectedFinishingIds([]);
       setSelectedFinishingMataAyamQtyById({});
       setMataAyamIssueBadge({ visible: false, message: '' });
@@ -3369,6 +3456,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     setMataAyamIssueBadge({ visible: false, message: '' });
     setSelectedLbMaxProductId(null);
     setPreviewMaterialDisplay('');
+    setPreviewMaterialError('');
     if (productId) {
       fetchPosProductDetail(productId)
         .then((detail) => {
@@ -3546,6 +3634,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     if (!backendReady || !selectedProductRow) {
       setItemFinalPrice(0);
       setPreviewMaterialDisplay('');
+      setPreviewMaterialError('');
       return undefined;
     }
 
@@ -3555,6 +3644,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     if (qtyNumber < 1 || widthMeter <= 0 || lengthMeter <= 0) {
       setItemFinalPrice(0);
       setPreviewMaterialDisplay('');
+      setPreviewMaterialError('');
       return undefined;
     }
 
@@ -3568,11 +3658,13 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         if (!cancelled && previewRequestRef.current === requestId) {
           setItemFinalPrice(nextTotal);
           setPreviewMaterialDisplay(String(usedMaterialInfo?.displayText || '').trim());
+          setPreviewMaterialError('');
         }
       } catch (error) {
         if (!cancelled && previewRequestRef.current === requestId) {
           setItemFinalPrice(0);
           setPreviewMaterialDisplay('');
+          setPreviewMaterialError(String(error?.message || 'Preview bahan gagal dihitung.'));
         }
       }
     }, 350);
@@ -3612,6 +3704,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     setSizeWidthMeter('');
     setSizeLengthMeter('');
     setPreviewMaterialDisplay('');
+    setPreviewMaterialError('');
     setSelectedFinishingIds([]);
     setSelectedFinishingMataAyamQtyById({});
     setMataAyamIssueBadge({ visible: false, message: '' });
@@ -3722,6 +3815,12 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     try {
       const customerId = await resolveCustomerId();
       const { pricing, pricingPayload, productDetail, materialInfo, usedMaterialInfo, size } = await computePricingFromBackend(product, customerId);
+      const targetProduct = String(buildSelectedProductLabel(product) || product?.name || productName || '').trim();
+      const materialStockMessage = validateSelectedMaterialStock(usedMaterialInfo, targetProduct);
+      if (materialStockMessage) {
+        openNotice('Stok Material', materialStockMessage);
+        return;
+      }
       const sourceMeta = toSourceMeta(productDetail || product);
       const itemId = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
       const pageNumber = Math.max(Number(pages) || 1, 1);
@@ -4903,11 +5002,8 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                 showPagesInput={selectedProductType === 'book'}
                 pages={pages}
                 onChangePages={(value) => setPages(sanitizeNumericInput(value))}
-                materialDisplay={
-                  isMaterialLoading
-                    ? 'Memuat material produk...'
-                    : (previewMaterialDisplay || 'Material akan dipilih otomatis sesuai hitung backend')
-                }
+                materialDisplay={resolvedPreviewMaterialDisplay}
+                materialError={previewMaterialError}
                 mataAyamIssueBadge={mergedMataAyamIssueBadge}
                 onValidateProduct={handleValidateProduct}
                 onAddToCart={handleAddToCart}
@@ -6064,6 +6160,15 @@ const styles = StyleSheet.create({
 });
 
 export default SalesScreen;
+
+
+
+
+
+
+
+
+
 
 
 

@@ -27,6 +27,7 @@ const ProductForm = ({
   pages,
   onChangePages,
   materialDisplay,
+  materialError,
   mataAyamIssueBadge,
   onValidateProduct,
   onAddToCart,
@@ -306,6 +307,11 @@ const ProductForm = ({
           <View style={styles.readOnlyBox}>
             <Text style={styles.readOnlyText}>{materialDisplay || '-'}</Text>
           </View>
+          {materialError ? (
+            <View style={styles.materialErrorBadge}>
+              <Text style={styles.materialErrorBadgeText}>{String(materialError)}</Text>
+            </View>
+          ) : null}
         </View>
       </View>
 
@@ -786,6 +792,19 @@ const styles = StyleSheet.create({
   mataAyamBadgeText: {
     fontSize: 11,
     color: '#8f1f1f',
+    fontWeight: '700',
+  },
+  materialErrorBadge: {
+    marginTop: 5,
+    borderWidth: 1,
+    borderColor: '#d28b26',
+    backgroundColor: '#fff4dd',
+    paddingHorizontal: 8,
+    paddingVertical: 6,
+  },
+  materialErrorBadgeText: {
+    fontSize: 11,
+    color: '#8a5a12',
     fontWeight: '700',
   },
   clearLbMaxButton: {
