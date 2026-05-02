@@ -1,18 +1,23 @@
+import Constants from 'expo-constants';
+
 const resolveDefaultApiBaseUrl = () => {
   const webHost = typeof globalThis !== 'undefined' && globalThis.location
     ? String(globalThis.location.hostname || '').trim().toLowerCase()
     : '';
-  if (webHost === 'localhost') {
-    return 'http://localhost:8000/api';
+  if (webHost && webHost !== 'localhost' && webHost !== '127.0.0.1') {
+    return `http://${webHost}:8000/api`;
   }
   return 'http://127.0.0.1:8000/api';
 };
 
-const API_BASE_URL = process.env.EXPO_PUBLIC_ERP_API_BASE_URL || resolveDefaultApiBaseUrl();
-const API_EMAIL = process.env.EXPO_PUBLIC_ERP_EMAIL || '';
-const API_PASSWORD = process.env.EXPO_PUBLIC_ERP_PASSWORD || '';
+const extra = Constants.expoConfig?.extra || {};
 
-let authToken = '';
+const API_BASE_URL = String(extra.erpApiBaseUrl || '').trim() || resolveDefaultApiBaseUrl();
+const API_EMAIL = String(extra.erpEmail || '').trim();
+const API_PASSWORD = String(extra.erpPassword || '');
+const API_TOKEN = String(extra.erpToken || '').trim();
+
+let authToken = String(API_TOKEN || '').trim();
 let sessionEmail = '';
 let sessionPassword = '';
 let refreshInProgress = null;
@@ -227,6 +232,9 @@ export const getDefaultLoginEmail = () => API_EMAIL;
 export const hasDefaultLoginPassword = () => Boolean(API_PASSWORD);
 
 export const useDefaultLoginCredentials = async () => {
+  if (authToken) {
+    return { access_token: authToken };
+  }
   if (!API_EMAIL || !API_PASSWORD) {
     throw new Error('Default kredensial belum diisi pada file .env');
   }

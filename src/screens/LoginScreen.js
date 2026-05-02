@@ -4,7 +4,9 @@ import {
   fetchAuthMe,
   getApiBaseUrl,
   getDefaultLoginEmail,
+  hasDefaultLoginPassword,
   loginPosUser,
+  useDefaultLoginCredentials,
 } from '../services/erpApi';
 
 const LoginScreen = ({ onLoginSuccess }) => {
@@ -14,6 +16,7 @@ const LoginScreen = ({ onLoginSuccess }) => {
   const [errorMessage, setErrorMessage] = useState('');
 
   const baseUrl = useMemo(() => getApiBaseUrl(), []);
+  const canUseQuickLogin = useMemo(() => hasDefaultLoginPassword(), []);
 
   const handleSubmit = async () => {
     if (isSubmitting) {
@@ -33,6 +36,24 @@ const LoginScreen = ({ onLoginSuccess }) => {
       onLoginSuccess?.(me || loginResponse?.user || null);
     } catch (error) {
       setErrorMessage(error?.message || 'Login gagal, periksa kredensial backend.');
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const handleQuickLogin = async () => {
+    if (isSubmitting) {
+      return;
+    }
+
+    try {
+      setIsSubmitting(true);
+      setErrorMessage('');
+      const loginResponse = await useDefaultLoginCredentials();
+      const me = await fetchAuthMe();
+      onLoginSuccess?.(me || loginResponse?.user || null);
+    } catch (error) {
+      setErrorMessage(error?.message || 'Login cepat gagal, periksa konfigurasi .env backend.');
     } finally {
       setIsSubmitting(false);
     }
@@ -87,6 +108,16 @@ const LoginScreen = ({ onLoginSuccess }) => {
                 <Text style={styles.buttonText}>Masuk</Text>
               )}
             </Pressable>
+
+            {canUseQuickLogin ? (
+              <Pressable
+                style={[styles.secondaryButton, isSubmitting ? styles.buttonDisabled : null]}
+                onPress={handleQuickLogin}
+                disabled={isSubmitting}
+              >
+                <Text style={styles.secondaryButtonText}>Masuk Cepat dari .env</Text>
+              </Pressable>
+            ) : null}
 
             <Text style={styles.metaText}>API: {baseUrl}</Text>
           </View>
@@ -186,6 +217,20 @@ const styles = StyleSheet.create({
   },
   buttonText: {
     color: '#ffffff',
+    fontSize: 13,
+    fontWeight: '800',
+  },
+  secondaryButton: {
+    marginTop: 8,
+    backgroundColor: '#ffffff',
+    borderWidth: 1,
+    borderColor: '#2f64ef',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 10,
+  },
+  secondaryButtonText: {
+    color: '#2f64ef',
     fontSize: 13,
     fontWeight: '800',
   },

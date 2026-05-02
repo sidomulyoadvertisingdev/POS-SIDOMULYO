@@ -1,6 +1,8 @@
-﻿import { useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import { Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { formatRupiah } from '../utils/currency';
+
+const normalizeText = (value) => String(value || '').trim().toLowerCase();
 
 const ProductForm = ({
   productName,
@@ -8,14 +10,22 @@ const ProductForm = ({
   onSelectProductVariant,
   qty,
   onChangeQty,
+  negotiatedPriceInput,
+  onChangeNegotiatedPrice,
   sizeWidthMeter,
   onChangeSizeWidthMeter,
   sizeLengthMeter,
   onChangeSizeLengthMeter,
+  isFixedSizeProduct,
+  fixedSizeLabel,
+  fixedSizeHint,
+  hideFinishingField,
   selectedFinishingIds,
   finishingSummary,
   finishingOptions,
+  finishingAvailabilityMessage,
   isPrintingFinishingMode,
+  isStrictStickerFinishingMode,
   onSaveSelectedFinishings,
   selectedFinishingMataAyamQtyById,
   onSaveSelectedFinishingMataAyamQtyById,
@@ -28,10 +38,13 @@ const ProductForm = ({
   onChangePages,
   materialDisplay,
   materialError,
+  materialWarning,
   mataAyamIssueBadge,
   onValidateProduct,
   onAddToCart,
   itemFinalPrice,
+  pricingSummary,
+  negotiationNotice,
   onCancelItem,
   onClearCart,
 }) => {
@@ -40,6 +53,7 @@ const ProductForm = ({
   const [selectedSubCategoryKey, setSelectedSubCategoryKey] = useState('');
   const [selectedProductKey, setSelectedProductKey] = useState('');
   const [selectedVariantKey, setSelectedVariantKey] = useState('');
+  const [pickerSearch, setPickerSearch] = useState('');
   const [selectedVariantRow, setSelectedVariantRow] = useState(null);
   const [isFinishingPickerOpen, setIsFinishingPickerOpen] = useState(false);
   const [finishingDraftIds, setFinishingDraftIds] = useState([]);
@@ -69,6 +83,37 @@ const ProductForm = ({
     () => selectedSubCategory?.products?.find((item) => item.key === selectedProductKey) || null,
     [selectedSubCategory, selectedProductKey],
   );
+  const formatProductOptionLabel = (product) => {
+    const name = String(product?.name || '').trim() || 'Produk';
+    const variants = Array.isArray(product?.variants) ? product.variants : [];
+    const uniqueNames = Array.from(
+      new Set(
+        variants
+          .map((variant) => String(variant?.name || '').trim())
+          .filter(Boolean),
+      ),
+    );
+    const uniqueSkus = Array.from(
+      new Set(
+        variants
+          .map((variant) => String(variant?.row?.sku || variant?.sku || '').trim())
+          .filter(Boolean),
+      ),
+    );
+    const skuLabel = uniqueSkus.length === 1 ? uniqueSkus[0] : '';
+    if (uniqueNames.length > 1) {
+      return skuLabel ? `${name} [${skuLabel}] (${uniqueNames.length} varian)` : `${name} (${uniqueNames.length} varian)`;
+    }
+    return skuLabel ? `${name} [${skuLabel}]` : name;
+  };
+  const formatVariantOptionLabel = (variant) => {
+    const name = String(variant?.name || '').trim() || 'Varian';
+    const sku = String(variant?.row?.sku || variant?.sku || '').trim();
+    if (!selectedProduct || !selectedProductHasVariants) {
+      return sku ? `${name} [${sku}]` : name;
+    }
+    return sku ? `${name} [${sku}]` : name;
+  };
   const hasVariantOptions = (product) => {
     const variants = Array.isArray(product?.variants) ? product.variants : [];
     if (variants.length <= 1) {
@@ -132,6 +177,10 @@ const ProductForm = ({
     all_sides: 'Finishing pada grup ini memakai kombinasi sisi horizontal dan vertikal. Pilih salah satu saja.',
     sambungan: 'Pilih salah satu finishing khusus sambungan. Grup ini dipisahkan dari finishing sisi lainnya.',
   };
+  const stickerFinishingRows = useMemo(
+    () => finishings.filter((item) => Number(item?.id || 0) > 0),
+    [finishings],
+  );
   const getFinishingPrice = (item) => {
     const amount = Number(
       item?.price ||
@@ -144,6 +193,21 @@ const ProductForm = ({
     );
     return formatRupiah(amount);
   };
+  const formatFinishingLabel = (item) => {
+    const name = String(item?.name || '').trim();
+    const unitHint = String(item?.unit_hint || '').trim().toUpperCase();
+    if (!name) {
+      return '-';
+    }
+    if (!unitHint) {
+      return name;
+    }
+    const compactName = name.toUpperCase();
+    if (compactName.includes(unitHint)) {
+      return name;
+    }
+    return `${name} (${unitHint})`;
+  };
 
   const pickerStep = useMemo(() => {
     if (!selectedCategoryKey) return 'category';
@@ -151,12 +215,65 @@ const ProductForm = ({
     if (!selectedProductKey) return 'product';
     return selectedProductHasVariants ? 'variant' : 'product';
   }, [selectedCategoryKey, selectedSubCategoryKey, selectedProductKey, selectedProductHasVariants]);
+  const pickerTitle = useMemo(() => {
+    return 'Pilih Produk';
+  }, []);
+  const pickerSubtitle = useMemo(() => {
+    if (pickerStep === 'category') {
+      return '1. Pilih kategori utama';
+    }
+    if (pickerStep === 'subcategory') {
+      return `2. Pilih sub kategori dari ${selectedCategory?.name || 'kategori terpilih'}`;
+    }
+    if (pickerStep === 'product') {
+      return `3. Pilih produk dari ${selectedSubCategory?.name || 'sub kategori terpilih'}`;
+    }
+    return `4. Pilih varian dari ${selectedProduct?.name || 'produk terpilih'}`;
+  }, [pickerStep, selectedCategory, selectedSubCategory, selectedProduct]);
+  const pickerSearchPlaceholder = useMemo(() => {
+    if (pickerStep === 'category') return 'Cari kategori...';
+    if (pickerStep === 'subcategory') return 'Cari sub kategori...';
+    if (pickerStep === 'product') return 'Cari produk...';
+    return 'Cari varian...';
+  }, [pickerStep]);
+  const filteredCategories = useMemo(() => {
+    if (!pickerSearch.trim()) {
+      return categories;
+    }
+    const keyword = normalizeText(pickerSearch);
+    return categories.filter((item) => normalizeText(item?.name).includes(keyword));
+  }, [categories, pickerSearch]);
+  const filteredSubcategories = useMemo(() => {
+    const rows = Array.isArray(selectedCategory?.subcategories) ? selectedCategory.subcategories : [];
+    if (!pickerSearch.trim()) {
+      return rows;
+    }
+    const keyword = normalizeText(pickerSearch);
+    return rows.filter((item) => normalizeText(item?.name).includes(keyword));
+  }, [selectedCategory, pickerSearch]);
+  const filteredProducts = useMemo(() => {
+    const rows = Array.isArray(selectedSubCategory?.products) ? selectedSubCategory.products : [];
+    if (!pickerSearch.trim()) {
+      return rows;
+    }
+    const keyword = normalizeText(pickerSearch);
+    return rows.filter((item) => normalizeText(formatProductOptionLabel(item)).includes(keyword));
+  }, [selectedSubCategory, pickerSearch]);
+  const filteredVariants = useMemo(() => {
+    const rows = Array.isArray(selectedProduct?.variants) ? selectedProduct.variants : [];
+    if (!pickerSearch.trim()) {
+      return rows;
+    }
+    const keyword = normalizeText(pickerSearch);
+    return rows.filter((item) => normalizeText(formatVariantOptionLabel(item)).includes(keyword));
+  }, [selectedProduct, pickerSearch]);
 
   const openPicker = () => {
     setSelectedCategoryKey('');
     setSelectedSubCategoryKey('');
     setSelectedProductKey('');
     setSelectedVariantKey('');
+    setPickerSearch('');
     setSelectedVariantRow(null);
     setIsPickerOpen(true);
   };
@@ -165,21 +282,25 @@ const ProductForm = ({
     if (pickerStep === 'variant') {
       setSelectedProductKey('');
       setSelectedVariantKey('');
+      setPickerSearch('');
       setSelectedVariantRow(null);
       return;
     }
     if (pickerStep === 'product') {
       setSelectedSubCategoryKey('');
       setSelectedVariantKey('');
+      setPickerSearch('');
       setSelectedVariantRow(null);
       return;
     }
     if (pickerStep === 'subcategory') {
       setSelectedCategoryKey('');
       setSelectedVariantKey('');
+      setPickerSearch('');
       setSelectedVariantRow(null);
       return;
     }
+    setPickerSearch('');
     setIsPickerOpen(false);
   };
 
@@ -188,11 +309,11 @@ const ProductForm = ({
       <View style={styles.labelsRow}>
         <Text style={[styles.label, styles.codeCol, styles.leftLabel]}>Produk</Text>
         <Text style={[styles.label, styles.stockCol]}>Qty</Text>
-        <Text style={[styles.label, styles.sizeCol]}>L Mater (m)</Text>
-        <Text style={[styles.label, styles.sizeCol]}>P Mater (m)</Text>
-        <Text style={[styles.label, styles.priceCol]}>Finishing</Text>
+        <Text style={[styles.label, styles.sizeCol]}>{isFixedSizeProduct ? 'Mode' : 'L Mater (m)'}</Text>
+        <Text style={[styles.label, styles.sizeCol]}>{isFixedSizeProduct ? 'Ukuran' : 'P Mater (m)'}</Text>
+        {!hideFinishingField ? <Text style={[styles.label, styles.priceCol]}>Finishing</Text> : null}
         {showPagesInput ? <Text style={[styles.label, styles.qtyCol]}>Halaman</Text> : null}
-        <Text style={[styles.label, styles.totalCol]}>Bahan / Material</Text>
+        <Text style={[styles.label, styles.totalCol, hideFinishingField ? styles.totalColWide : null]}>Bahan / Material</Text>
       </View>
 
       <View style={styles.inputsRow}>
@@ -215,81 +336,102 @@ const ProductForm = ({
         </View>
 
         <View style={styles.sizeCol}>
-          <TextInput
-            value={sizeWidthMeter}
-            onChangeText={onChangeSizeWidthMeter}
-            placeholder="0.00"
-            keyboardType="decimal-pad"
-            style={[styles.input, styles.alignCenter]}
-          />
+          {isFixedSizeProduct ? (
+            <View style={[styles.readOnlyBox, styles.fixedSizeBox]}>
+              <Text style={[styles.readOnlyText, styles.fixedSizeValueText]}>{fixedSizeLabel || 'A3+'}</Text>
+            </View>
+          ) : (
+            <TextInput
+              value={sizeWidthMeter}
+              onChangeText={onChangeSizeWidthMeter}
+              placeholder="0.00"
+              keyboardType="decimal-pad"
+              style={[styles.input, styles.alignCenter]}
+            />
+          )}
         </View>
 
         <View style={styles.sizeCol}>
-          <TextInput
-            value={sizeLengthMeter}
-            onChangeText={onChangeSizeLengthMeter}
-            placeholder="0.00"
-            keyboardType="decimal-pad"
-            style={[styles.input, styles.alignCenter]}
-          />
+          {isFixedSizeProduct ? (
+            <View style={[styles.readOnlyBox, styles.fixedSizeBox]}>
+              <Text style={[styles.readOnlyText, styles.fixedSizeMetaText]}>Ukuran Tetap</Text>
+            </View>
+          ) : (
+            <TextInput
+              value={sizeLengthMeter}
+              onChangeText={onChangeSizeLengthMeter}
+              placeholder="0.00"
+              keyboardType="decimal-pad"
+              style={[styles.input, styles.alignCenter]}
+            />
+          )}
         </View>
 
-        <View style={styles.priceCol}>
-          <Pressable
-            style={styles.selector}
-            onPress={() => {
-              setFinishingDraftIds(Array.isArray(selectedFinishingIds) ? selectedFinishingIds : []);
-              setFinishingDraftMataAyamQtyById(
-                selectedFinishingMataAyamQtyById && typeof selectedFinishingMataAyamQtyById === 'object'
-                  ? selectedFinishingMataAyamQtyById
-                  : {},
-              );
-              setCollapsedGroups({
-                right_left: false,
-                top_bottom: true,
-                all_sides: true,
-                sambungan: true,
-              });
-              setIsFinishingPickerOpen(true);
-            }}
-            disabled={finishings.length === 0}
-          >
-            <Text style={styles.selectorText} numberOfLines={1} ellipsizeMode="tail">
-              {finishingSummary || (finishings.length > 0 ? 'Pilih finishing...' : 'Pilih produk dulu')}
-            </Text>
-          </Pressable>
-          {mataAyamIssueBadge?.visible ? (
-            <View style={styles.mataAyamBadge}>
-              <Text style={styles.mataAyamBadgeText}>
-                {String(mataAyamIssueBadge?.message || 'Mata ayam bermasalah')}
+        {!hideFinishingField ? (
+          <View style={styles.priceCol}>
+            <Pressable
+              style={styles.selector}
+              onPress={() => {
+                setFinishingDraftIds(Array.isArray(selectedFinishingIds) ? selectedFinishingIds : []);
+                setFinishingDraftMataAyamQtyById(
+                  selectedFinishingMataAyamQtyById && typeof selectedFinishingMataAyamQtyById === 'object'
+                    ? selectedFinishingMataAyamQtyById
+                    : {},
+                );
+                setCollapsedGroups({
+                  right_left: false,
+                  top_bottom: true,
+                  all_sides: true,
+                  sambungan: true,
+                });
+                setIsFinishingPickerOpen(true);
+              }}
+              disabled={finishings.length === 0}
+            >
+              <Text style={styles.selectorText} numberOfLines={1} ellipsizeMode="tail">
+                {finishingSummary || (finishings.length > 0 ? 'Pilih finishing...' : 'Finishing belum siap')}
               </Text>
-            </View>
-          ) : null}
-          {isPrintingFinishingMode ? (
-            <View style={styles.lbMaxRow}>
-              <Pressable
-                style={[styles.selector, styles.lbMaxSelector]}
-                onPress={() => {
-                  setLbMaxDraftProductId(Number(selectedLbMaxProductId || 0) || null);
-                  setIsLbMaxPickerOpen(true);
-                }}
-                disabled={lbMaxFinishings.length === 0}
-              >
-                <Text style={styles.selectorText} numberOfLines={1} ellipsizeMode="tail">
-                  {lbMaxSummary || (lbMaxFinishings.length > 0 ? 'Pilih LB Max...' : 'LB Max tidak tersedia')}
+            </Pressable>
+            {!finishingSummary && finishings.length === 0 && finishingAvailabilityMessage ? (
+              <View style={styles.finishingHelpBadge}>
+                <Text style={styles.finishingHelpBadgeText}>
+                  {String(finishingAvailabilityMessage)}
                 </Text>
-              </Pressable>
-              {selectedLbMaxProductId ? (
+              </View>
+            ) : null}
+            {mataAyamIssueBadge?.visible ? (
+              <View style={styles.mataAyamBadge}>
+                <Text style={styles.mataAyamBadgeText}>
+                  {String(mataAyamIssueBadge?.message || 'Mata ayam bermasalah')}
+                </Text>
+              </View>
+            ) : null}
+            {isPrintingFinishingMode ? (
+              <View style={styles.lbMaxRow}>
                 <Pressable
-                  style={styles.clearLbMaxButton}
-                  onPress={() => onSaveSelectedLbMax?.(null)}
+                  style={[styles.selector, styles.lbMaxSelector]}
+                  onPress={() => {
+                    setLbMaxDraftProductId(Number(selectedLbMaxProductId || 0) || null);
+                    setIsLbMaxPickerOpen(true);
+                  }}
+                  disabled={lbMaxFinishings.length === 0}
                 >
-                  <Text style={styles.clearLbMaxText}>Hapus LB</Text>
+                  <Text style={styles.selectorText} numberOfLines={1} ellipsizeMode="tail">
+                    {lbMaxSummary || (lbMaxFinishings.length > 0 ? 'Pilih LB Max...' : 'LB Max tidak tersedia')}
+                  </Text>
                 </Pressable>
-              ) : null}
-            </View>
-          ) : null}
-        </View>
+                {selectedLbMaxProductId ? (
+                  <Pressable
+                    style={styles.clearLbMaxButton}
+                    onPress={() => onSaveSelectedLbMax?.(null)}
+                  >
+                    <Text style={styles.clearLbMaxText}>Hapus LB</Text>
+                  </Pressable>
+                ) : null}
+              </View>
+            ) : null}
+          </View>
+        ) : null}
 
         {showPagesInput ? (
           <View style={styles.qtyCol}>
@@ -303,7 +445,7 @@ const ProductForm = ({
           </View>
         ) : null}
 
-        <View style={styles.totalCol}>
+        <View style={[styles.totalCol, hideFinishingField ? styles.totalColWide : null]}>
           <View style={styles.readOnlyBox}>
             <Text style={styles.readOnlyText}>{materialDisplay || '-'}</Text>
           </View>
@@ -312,8 +454,40 @@ const ProductForm = ({
               <Text style={styles.materialErrorBadgeText}>{String(materialError)}</Text>
             </View>
           ) : null}
+          {!materialError && materialWarning ? (
+            <View style={styles.materialWarningBadge}>
+              <Text style={styles.materialWarningBadgeText}>{String(materialWarning)}</Text>
+            </View>
+          ) : null}
         </View>
       </View>
+
+      {isFixedSizeProduct && fixedSizeHint ? (
+        <View style={styles.fixedSizeHintCard}>
+          <Text style={styles.fixedSizeHintText}>{String(fixedSizeHint)}</Text>
+        </View>
+      ) : null}
+
+      {negotiationNotice?.visible ? (
+        <View
+          style={[
+            styles.negotiationCard,
+            negotiationNotice?.tone === 'error' ? styles.negotiationCardError : null,
+            negotiationNotice?.tone === 'warning' ? styles.negotiationCardWarning : null,
+            negotiationNotice?.tone === 'success' ? styles.negotiationCardSuccess : null,
+          ]}
+        >
+          <Text style={styles.negotiationTitle}>Negosiasi A3+</Text>
+          <TextInput
+            value={String(negotiatedPriceInput || '')}
+            onChangeText={onChangeNegotiatedPrice}
+            placeholder="Isi harga negosiasi"
+            keyboardType="numeric"
+            style={styles.negotiationInput}
+          />
+          <Text style={styles.negotiationMessage}>{String(negotiationNotice?.message || '')}</Text>
+        </View>
+      ) : null}
 
       <View style={styles.actionRow}>
         <Pressable onPress={onValidateProduct} style={[styles.button, styles.searchButton]}>
@@ -334,6 +508,45 @@ const ProductForm = ({
       </View>
 
       <Text style={styles.previewText}>Estimasi Total Item: {formatRupiah(itemFinalPrice)}</Text>
+      {pricingSummary ? (
+        <View style={styles.previewSummaryCard}>
+          <Text style={styles.previewSummaryLine}>Cetak: {formatRupiah(pricingSummary.subtotal || 0)}</Text>
+          {pricingSummary?.isNegotiated ? (
+            <Text style={styles.previewSummaryLine}>
+              Cetak Nego: {formatRupiah(pricingSummary.negotiatedSubtotal || 0)}
+            </Text>
+          ) : null}
+          {pricingSummary?.bundleActive ? (
+            <>
+              <Text style={styles.previewSummaryLine}>
+                Finishing: {formatRupiah(pricingSummary.finishingBeforeDiscount || 0)}
+              </Text>
+              <Text style={styles.previewSummaryLine}>
+                Diskon Bundle: {formatRupiah(pricingSummary.bundleDiscount || 0)}
+              </Text>
+              <Text style={styles.previewSummaryLine}>
+                Finishing Final: {formatRupiah(pricingSummary.finishingFinal || 0)}
+              </Text>
+              <Text style={styles.previewSummaryLine}>
+                Total Final: {formatRupiah(pricingSummary.printSubtotal || 0)} + {formatRupiah(pricingSummary.finishingBeforeDiscount || 0)} - {formatRupiah(pricingSummary.bundleDiscount || 0)} = {formatRupiah(pricingSummary.grandTotal || 0)}
+              </Text>
+            </>
+          ) : (
+            <Text style={styles.previewSummaryLine}>
+              Finishing Final: {formatRupiah(pricingSummary.finishingFinal || 0)}
+            </Text>
+          )}
+          {pricingSummary.billingGroup ? (
+            <Text style={styles.previewSummaryLine}>
+              Rule Sticker: {pricingSummary.billingGroup}
+              {Number(pricingSummary.rollWidth || 0) > 0 ? ` | Lebar Roll ${pricingSummary.rollWidth} m` : ''}
+            </Text>
+          ) : null}
+          {pricingSummary?.stickerNotice ? (
+            <Text style={styles.previewWarningLine}>{pricingSummary.stickerNotice}</Text>
+          ) : null}
+        </View>
+      ) : null}
 
       <Modal
         visible={isPickerOpen}
@@ -343,20 +556,40 @@ const ProductForm = ({
       >
         <View style={styles.modalBackdrop}>
           <View style={styles.modalCard}>
-            <Text style={styles.modalTitle}>Pilih Produk</Text>
-            <Text style={styles.modalSubTitle}>
-              {!selectedCategory ? '1. Pilih kategori utama' :
-                !selectedSubCategory ? `2. Pilih sub kategori dari ${selectedCategory.name}` :
-                  !selectedProduct ? `3. Pilih produk dari ${selectedSubCategory.name}` :
-                    (selectedProductHasVariants ? `4. Pilih varian dari ${selectedProduct.name}` : `3. ${selectedSubCategory.name} -> ${selectedProduct.name}`)}
-            </Text>
-
+            <Text style={styles.modalTitle}>{pickerTitle}</Text>
+            <Text style={styles.modalSubTitle}>{pickerSubtitle}</Text>
+            <View style={styles.searchSection}>
+              <Text style={styles.searchSectionLabel}>Pencarian</Text>
+              <View style={styles.searchRow}>
+                <TextInput
+                  value={pickerSearch}
+                  onChangeText={setPickerSearch}
+                  placeholder={pickerSearchPlaceholder}
+                  placeholderTextColor="#777777"
+                  style={[styles.modalInput, styles.searchInput]}
+                />
+                <Pressable
+                  style={[styles.searchClearButton, !pickerSearch.trim() ? styles.searchClearButtonDisabled : null]}
+                  onPress={() => setPickerSearch('')}
+                  disabled={!pickerSearch.trim()}
+                >
+                  <Text style={styles.searchClearButtonText}>Bersihkan</Text>
+                </Pressable>
+              </View>
+            </View>
             <ScrollView style={styles.listWrap}>
-              {pickerStep === 'category' && categories.map((item) => (
+              {pickerStep === 'category' && filteredCategories.map((item) => (
                 <Pressable
                   key={item.key}
                   style={[styles.listItem, selectedCategoryKey === item.key ? styles.listItemActiveRed : null]}
-                  onPress={() => setSelectedCategoryKey(item.key)}
+                  onPress={() => {
+                    setSelectedCategoryKey(item.key);
+                    setSelectedSubCategoryKey('');
+                    setSelectedProductKey('');
+                    setSelectedVariantKey('');
+                    setPickerSearch('');
+                    setSelectedVariantRow(null);
+                  }}
                 >
                   <Text style={[styles.listItemText, selectedCategoryKey === item.key ? styles.listItemTextActiveRed : null]}>
                     {item.name}
@@ -364,13 +597,15 @@ const ProductForm = ({
                 </Pressable>
               ))}
 
-              {pickerStep === 'subcategory' && (selectedCategory?.subcategories || []).map((item) => (
+              {pickerStep === 'subcategory' && filteredSubcategories.map((item) => (
                 <Pressable
                   key={item.key}
                   style={[styles.listItem, selectedSubCategoryKey === item.key ? styles.listItemActiveRed : null]}
                   onPress={() => {
                     setSelectedSubCategoryKey(item.key);
+                    setSelectedProductKey('');
                     setSelectedVariantKey('');
+                    setPickerSearch('');
                     setSelectedVariantRow(null);
                   }}
                 >
@@ -380,13 +615,14 @@ const ProductForm = ({
                 </Pressable>
               ))}
 
-              {pickerStep === 'product' && (selectedSubCategory?.products || []).map((item) => (
+              {pickerStep === 'product' && filteredProducts.map((item) => (
                 <Pressable
                   key={item.key}
                   style={[styles.listItem, selectedProductKey === item.key ? styles.listItemActiveRed : null]}
                   onPress={() => {
                     setSelectedProductKey(item.key);
                     setSelectedVariantKey('');
+                    setPickerSearch('');
                     setSelectedVariantRow(
                       hasVariantOptions(item)
                         ? null
@@ -395,12 +631,12 @@ const ProductForm = ({
                   }}
                 >
                   <Text style={[styles.listItemText, selectedProductKey === item.key ? styles.listItemTextActiveRed : null]}>
-                    {item.name}
+                    {formatProductOptionLabel(item)}
                   </Text>
                 </Pressable>
               ))}
 
-              {pickerStep === 'variant' && (selectedProduct?.variants || []).map((item) => (
+              {pickerStep === 'variant' && filteredVariants.map((item) => (
                 <Pressable
                   key={item.key}
                   style={[styles.listItem, selectedVariantKey === item.key ? styles.listItemActiveRed : null]}
@@ -410,10 +646,22 @@ const ProductForm = ({
                   }}
                 >
                   <Text style={[styles.listItemText, selectedVariantKey === item.key ? styles.listItemTextActiveRed : null]}>
-                    {item.name}
+                    {formatVariantOptionLabel(item)}
                   </Text>
                 </Pressable>
               ))}
+              {pickerStep === 'category' && filteredCategories.length === 0 ? (
+                <Text style={styles.emptyText}>Kategori tidak ditemukan.</Text>
+              ) : null}
+              {pickerStep === 'subcategory' && filteredSubcategories.length === 0 ? (
+                <Text style={styles.emptyText}>Sub kategori tidak ditemukan.</Text>
+              ) : null}
+              {pickerStep === 'product' && filteredProducts.length === 0 ? (
+                <Text style={styles.emptyText}>Produk tidak ditemukan.</Text>
+              ) : null}
+              {pickerStep === 'variant' && filteredVariants.length === 0 ? (
+                <Text style={styles.emptyText}>Varian tidak ditemukan.</Text>
+              ) : null}
 
               {categories.length === 0 ? (
                 <Text style={styles.emptyText}>Data produk backend belum tersedia.</Text>
@@ -478,10 +726,14 @@ const ProductForm = ({
                 return (
                   <Pressable
                     key={String(id || item.name)}
-                    style={[styles.listItem, isSelected ? styles.listItemActive : null]}
-                    onPress={() => setLbMaxDraftProductId(isSelected ? null : id)}
+                    style={[styles.listItem, isSelected ? styles.listItemActiveRed : null]}
+                    onPress={() => {
+                      const nextId = isSelected ? null : id;
+                      setLbMaxDraftProductId(nextId);
+                      onSaveSelectedLbMax?.(nextId);
+                    }}
                   >
-                    <Text style={styles.listItemText}>
+                    <Text style={[styles.listItemText, isSelected ? styles.listItemTextActiveRed : null]}>
                       {`${item.name || 'LB Max'}${extraWidthCm > 0 ? ` (+${extraWidthCm} cm)` : ''}`}
                     </Text>
                   </Pressable>
@@ -527,9 +779,64 @@ const ProductForm = ({
         <View style={styles.modalBackdrop}>
           <View style={[styles.modalCard, styles.finishingModalCard]}>
             <Text style={styles.modalTitle}>Pilih Finishing</Text>
-            <Text style={styles.modalSubTitle}>List finishing sesuai aturan backend produk terpilih</Text>
+            <Text style={styles.modalSubTitle}>
+              {isStrictStickerFinishingMode
+                ? 'Produk sticker bisa memilih beberapa finishing aktif sekaligus.'
+                : 'List finishing sesuai aturan backend produk terpilih'}
+            </Text>
             <ScrollView style={styles.listWrap}>
-              {groupOrder.map((groupKey) => {
+              {isStrictStickerFinishingMode ? (
+                <View style={styles.finishingGroupCard}>
+                  <View style={styles.finishingGroupHeader}>
+                    <Text style={styles.finishingGroupTitle}>Finishing Sticker Aktif</Text>
+                  </View>
+                  <View style={styles.finishingGroupBody}>
+                    <Text style={styles.finishingGroupNote}>
+                      Pilih satu atau beberapa finishing sticker yang aktif sesuai kebutuhan pelanggan.
+                    </Text>
+                    {stickerFinishingRows.map((item) => (
+                      <Pressable
+                        key={String(item.id || item.name)}
+                        style={styles.finishingItemRow}
+                        onPress={() => {
+                          const id = Number(item.id || 0);
+                          if (id <= 0) return;
+                          setFinishingDraftIds((prev) => {
+                            const currentIds = Array.isArray(prev) ? prev : [];
+                            const isSelected = currentIds.some((rowId) => Number(rowId) === id);
+                            if (isSelected) {
+                              setFinishingDraftMataAyamQtyById((prevMap) => {
+                                const nextMap = { ...(prevMap || {}) };
+                                delete nextMap[id];
+                                return nextMap;
+                              });
+                              return currentIds.filter((rowId) => Number(rowId) !== id);
+                            }
+                            if (item?.requires_mata_ayam === true) {
+                              setFinishingDraftMataAyamQtyById((prevMap) => ({
+                                ...(prevMap || {}),
+                                [id]: String(prevMap?.[id] ?? '0'),
+                              }));
+                            }
+                            return [...currentIds, id];
+                          });
+                        }}
+                      >
+                        <View style={styles.finishingItemLeft}>
+                          <Text style={styles.checkboxText}>
+                            {finishingDraftIds.some((rowId) => Number(rowId) === Number(item.id || 0)) ? '[x]' : '[ ]'}
+                          </Text>
+                          <Text style={styles.finishingItemText}>{formatFinishingLabel(item)}</Text>
+                        </View>
+                        <View style={styles.finishingItemRight}>
+                          <Text style={styles.finishingPriceText}>{getFinishingPrice(item)}</Text>
+                          <Text style={styles.finishingTagText}>/STICKER</Text>
+                        </View>
+                      </Pressable>
+                    ))}
+                  </View>
+                </View>
+              ) : groupOrder.map((groupKey) => {
                 const rows = groupedFinishings[groupKey] || [];
                 if (rows.length === 0) {
                   return null;
@@ -596,7 +903,7 @@ const ProductForm = ({
                               <Text style={styles.checkboxText}>
                                 {finishingDraftIds.some((rowId) => Number(rowId) === Number(item.id || 0)) ? '[x]' : '[ ]'}
                               </Text>
-                              <Text style={styles.finishingItemText}>{item.name || '-'}</Text>
+                              <Text style={styles.finishingItemText}>{formatFinishingLabel(item)}</Text>
                             </View>
                             <View style={styles.finishingItemRight}>
                               <Text style={styles.finishingPriceText}>{getFinishingPrice(item)}</Text>
@@ -738,6 +1045,10 @@ const styles = StyleSheet.create({
     flex: 1.35,
     minWidth: 130,
   },
+  totalColWide: {
+    flex: 1.7,
+    minWidth: 180,
+  },
   selector: {
     borderWidth: 1,
     borderColor: '#b7b7b7',
@@ -772,6 +1083,18 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     flexShrink: 1,
   },
+  fixedSizeBox: {
+    backgroundColor: '#eef7ff',
+    borderColor: '#9ec5f8',
+  },
+  fixedSizeValueText: {
+    color: '#0b4f8a',
+    textAlign: 'center',
+  },
+  fixedSizeMetaText: {
+    color: '#14532d',
+    textAlign: 'center',
+  },
   lbMaxRow: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -780,6 +1103,19 @@ const styles = StyleSheet.create({
   },
   lbMaxSelector: {
     flex: 1,
+  },
+  finishingHelpBadge: {
+    marginTop: 5,
+    borderWidth: 1,
+    borderColor: '#d8a742',
+    backgroundColor: '#fff8e6',
+    paddingHorizontal: 8,
+    paddingVertical: 6,
+  },
+  finishingHelpBadgeText: {
+    fontSize: 11,
+    color: '#8a6512',
+    fontWeight: '700',
   },
   mataAyamBadge: {
     marginTop: 5,
@@ -805,6 +1141,19 @@ const styles = StyleSheet.create({
   materialErrorBadgeText: {
     fontSize: 11,
     color: '#8a5a12',
+    fontWeight: '700',
+  },
+  materialWarningBadge: {
+    marginTop: 5,
+    borderWidth: 1,
+    borderColor: '#d8a742',
+    backgroundColor: '#fff8e6',
+    paddingHorizontal: 8,
+    paddingVertical: 6,
+  },
+  materialWarningBadgeText: {
+    fontSize: 11,
+    color: '#8a6512',
     fontWeight: '700',
   },
   clearLbMaxButton: {
@@ -851,10 +1200,82 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: '700',
   },
+  fixedSizeHintCard: {
+    marginTop: 8,
+    borderWidth: 1,
+    borderColor: '#c9ddf7',
+    backgroundColor: '#f4f9ff',
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+  },
+  fixedSizeHintText: {
+    fontSize: 12,
+    color: '#24507a',
+    fontWeight: '500',
+  },
+  negotiationCard: {
+    marginTop: 8,
+    borderWidth: 1,
+    borderColor: '#c9ddf7',
+    backgroundColor: '#f4f9ff',
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    gap: 6,
+  },
+  negotiationCardError: {
+    borderColor: '#d95c5c',
+    backgroundColor: '#fff1f1',
+  },
+  negotiationCardWarning: {
+    borderColor: '#d8a742',
+    backgroundColor: '#fff8e6',
+  },
+  negotiationCardSuccess: {
+    borderColor: '#79b38b',
+    backgroundColor: '#eefaf1',
+  },
+  negotiationTitle: {
+    fontSize: 12,
+    color: '#184a7a',
+    fontWeight: '800',
+  },
+  negotiationInput: {
+    borderWidth: 1,
+    borderColor: '#b7b7b7',
+    backgroundColor: '#ffffff',
+    paddingVertical: 6,
+    paddingHorizontal: 8,
+    fontSize: 12,
+    color: '#1f1f1f',
+  },
+  negotiationMessage: {
+    fontSize: 11,
+    color: '#324b68',
+    fontWeight: '600',
+  },
   previewText: {
     marginTop: 6,
     fontSize: 12,
     color: '#444444',
+  },
+  previewSummaryCard: {
+    marginTop: 6,
+    borderWidth: 1,
+    borderColor: '#d6deea',
+    backgroundColor: '#f7faff',
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    gap: 3,
+  },
+  previewSummaryLine: {
+    fontSize: 11,
+    color: '#29405f',
+    fontWeight: '600',
+  },
+  previewWarningLine: {
+    fontSize: 11,
+    color: '#8a6512',
+    fontWeight: '700',
   },
   modalBackdrop: {
     flex: 1,
@@ -884,6 +1305,42 @@ const styles = StyleSheet.create({
     fontSize: 12,
     color: '#303030',
     marginBottom: 8,
+  },
+  searchSection: {
+    marginBottom: 8,
+    gap: 4,
+  },
+  searchSectionLabel: {
+    fontSize: 11,
+    color: '#36527d',
+    fontWeight: '700',
+  },
+  searchRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  searchInput: {
+    flex: 1,
+    marginBottom: 0,
+  },
+  searchClearButton: {
+    minWidth: 88,
+    borderWidth: 1,
+    borderColor: '#9ea9bc',
+    backgroundColor: '#eef3fb',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 10,
+    paddingVertical: 9,
+  },
+  searchClearButtonDisabled: {
+    opacity: 0.55,
+  },
+  searchClearButtonText: {
+    fontSize: 11,
+    color: '#23426f',
+    fontWeight: '700',
   },
   listWrap: {
     maxHeight: 300,
@@ -1104,5 +1561,13 @@ const styles = StyleSheet.create({
 });
 
 export default ProductForm;
+
+
+
+
+
+
+
+
 
 

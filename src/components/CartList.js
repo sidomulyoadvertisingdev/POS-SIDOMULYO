@@ -1,16 +1,44 @@
-import { FlatList, Pressable, StyleSheet, Text, View } from 'react-native';
+﻿import { FlatList, Pressable, StyleSheet, Text, View } from 'react-native';
 
 const asCurrency = (value) => `Rp ${Number(value || 0).toLocaleString('id-ID')}`;
 
 const CartRow = ({ item, index, onDeleteItem }) => {
+  const pricingSummary = item?.pricingSummary && typeof item.pricingSummary === 'object' ? item.pricingSummary : null;
   return (
     <View style={styles.row}>
-      <Text style={[styles.cell, styles.codeCell]}>{item.product}</Text>
+      <View style={styles.codeCell}>
+        <Text style={[styles.cell, styles.codeCellText]}>{item.product}</Text>
+        {pricingSummary?.isNegotiated ? (
+          <Text style={styles.negotiationText} numberOfLines={2}>
+            Nego {asCurrency(pricingSummary.negotiatedSubtotal || 0)}
+          </Text>
+        ) : null}
+        {pricingSummary?.billingGroup ? (
+          <Text style={styles.metaText} numberOfLines={2}>
+            Rule {pricingSummary.billingGroup}{Number(pricingSummary.rollWidth || 0) > 0 ? ` | Roll ${pricingSummary.rollWidth} m` : ''}
+          </Text>
+        ) : null}
+        {pricingSummary?.stickerNotice ? (
+          <Text style={styles.warningText} numberOfLines={3}>
+            {pricingSummary.stickerNotice}
+          </Text>
+        ) : null}
+      </View>
       <Text style={[styles.cell, styles.qtyCell]}>{item.qty}</Text>
       <Text style={[styles.cell, styles.nameCell]} numberOfLines={1}>
         {item.size}
       </Text>
-      <Text style={[styles.cell, styles.priceCell]}>{item.finishing}</Text>
+      <View style={styles.priceCell}>
+        <Text style={[styles.cell, styles.priceCellText]}>{item.finishing}</Text>
+        {pricingSummary?.bundleActive ? (
+          <Text style={styles.bundleDiscountText} numberOfLines={4}>
+            Finishing: {asCurrency(pricingSummary.finishingBeforeDiscount || 0)}{'\n'}
+            Diskon Bundle: {asCurrency(pricingSummary.bundleDiscount || 0)}{'\n'}
+            Finishing Final: {asCurrency(pricingSummary.finishingFinal || 0)}{'\n'}
+            Total Final: {asCurrency(pricingSummary.printSubtotal || 0)} + {asCurrency(pricingSummary.finishingBeforeDiscount || 0)} - {asCurrency(pricingSummary.bundleDiscount || 0)} = {asCurrency(item.total || pricingSummary.grandTotal || 0)}
+          </Text>
+        ) : null}
+      </View>
       <Text style={[styles.cell, styles.lbMaxCell]}>{item.lbMax || '-'}</Text>
       <Text style={[styles.cell, styles.totalCell]}>{item.material}</Text>
       <Text style={[styles.cell, styles.subtotalCell]}>{asCurrency(item.total)}</Text>
@@ -93,6 +121,8 @@ const styles = StyleSheet.create({
   },
   codeCell: {
     width: 130,
+  },
+  codeCellText: {
     textAlign: 'left',
   },
   qtyCell: {
@@ -105,6 +135,8 @@ const styles = StyleSheet.create({
   },
   priceCell: {
     width: 220,
+  },
+  priceCellText: {
     textAlign: 'left',
   },
   lbMaxCell: {
@@ -137,6 +169,33 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     fontSize: 12,
   },
+  metaText: {
+    marginTop: 2,
+    fontSize: 10,
+    color: '#36506f',
+    textAlign: 'left',
+  },
+  bundleDiscountText: {
+    marginTop: 2,
+    fontSize: 10,
+    color: '#8f1f1f',
+    textAlign: 'left',
+    fontWeight: '700',
+  },
+  negotiationText: {
+    marginTop: 2,
+    fontSize: 10,
+    color: '#0f6b42',
+    textAlign: 'left',
+    fontWeight: '700',
+  },
+  warningText: {
+    marginTop: 2,
+    fontSize: 10,
+    color: '#8a6512',
+    textAlign: 'left',
+    fontWeight: '700',
+  },
   emptyContainer: {
     paddingVertical: 14,
     borderWidth: 1,
@@ -151,3 +210,6 @@ const styles = StyleSheet.create({
 });
 
 export default CartList;
+
+
+

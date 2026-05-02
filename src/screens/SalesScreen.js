@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+﻿import { useEffect, useMemo, useRef, useState } from 'react';
 import { ActivityIndicator, Alert, Image, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, Vibration, View, useWindowDimensions } from 'react-native';
 import { Asset } from 'expo-asset';
 import CartList from '../components/CartList';
@@ -36,6 +36,7 @@ import {
   updatePosProductionItemStatus,
   updatePosOrderStatus,
 } from '../services/erpApi';
+import { appEnv } from '../config/appEnv';
 import { enqueueOrderPayload, loadOrderQueue, setOrderQueue } from '../utils/orderQueue';
 import { appendOrderAuditLog, loadOrderAuditLogs } from '../utils/orderAuditLog';
 
@@ -49,6 +50,7 @@ const formatDate = (date) => {
 
 const sanitizeNumericInput = (value) => value.replace(/[^0-9]/g, '');
 const sanitizeDecimalInput = (value) => String(value || '').replace(/[^0-9.,]/g, '');
+const sanitizeCurrencyInput = (value) => sanitizeNumericInput(String(value || ''));
 const sanitizeQtyInput = (value) => {
   const digits = sanitizeNumericInput(String(value || ''));
   if (!digits) {
@@ -62,6 +64,14 @@ const sanitizeQtyInput = (value) => {
 };
 const normalizeText = (value) => String(value || '').trim().toLowerCase();
 const roundMoney = (value) => Math.round((Number(value) || 0) * 100) / 100;
+const resolvePricingGrandTotal = (pricing) => {
+  if (pricing && pricing.grand_total !== undefined && pricing.grand_total !== null) {
+    return roundMoney(pricing.grand_total);
+  }
+  return roundMoney(
+    (pricing?.subtotal || 0) + (pricing?.finishing_total || 0) + (pricing?.express_fee || 0),
+  );
+};
 const parseMeterValue = (value) => {
   const normalized = String(value || '').trim().replace(',', '.');
   const parsed = Number(normalized);
@@ -215,14 +225,132 @@ const formatMeterNumber = (value) => {
   if (num <= 0) return '';
   return num.toFixed(4).replace(/\.?0+$/, '');
 };
+const parseCurrencyInput = (value) => {
+  const digits = sanitizeCurrencyInput(value);
+  if (!digits) {
+    return 0;
+  }
+  const parsed = Number(digits);
+  return Number.isFinite(parsed) && parsed > 0 ? roundMoney(parsed) : 0;
+};
+const resolveA3NegotiationConfig = (product, productDetail = null) => {
+  const rows = [
+    product,
+    productDetail,
+    toSourceProduct(product),
+    toSourceProduct(productDetail),
+  ].filter(Boolean);
+  const fixedSizeMode = resolveFixedSizeA3Mode(product, productDetail);
+  const enabled = fixedSizeMode.enabled && rows.some((row) => row?.bottom_price_enabled === true);
+  const bottomPriceRaw = rows
+    .map((row) => row?.bottom_price)
+    .find((value) => value !== undefined && value !== null && value !== '');
+  const minimumQtyRaw = rows
+    .map((row) => row?.bottom_price_min_qty)
+    .find((value) => value !== undefined && value !== null && value !== '');
+  return {
+    enabled,
+    bottomPrice: roundMoney(Number(bottomPriceRaw || 0)),
+    minimumQty: Math.max(0, Number.parseInt(String(minimumQtyRaw || '0'), 10) || 0),
+    label: fixedSizeMode.label || 'A3+',
+  };
+};
+const resolveA3NegotiationState = ({
+  config,
+  qtyValue,
+  negotiatedPriceInput,
+  fallbackBottomPrice = 0,
+} = {}) => {
+  if (!config?.enabled) {
+    return {
+      visible: false,
+      tone: 'info',
+      message: '',
+      isApplied: false,
+      isBlocking: false,
+      value: null,
+      bottomPrice: roundMoney(Number(fallbackBottomPrice || 0)),
+      minimumQty: 0,
+    };
+  }
+
+  const qtyNumber = Math.max(1, Number(qtyValue) || 1);
+  const bottomPrice = roundMoney(Number(config?.bottomPrice || 0) || Number(fallbackBottomPrice || 0) || 0);
+  const minimumQty = Math.max(0, Number(config?.minimumQty || 0) || 0);
+  const negotiatedPrice = parseCurrencyInput(negotiatedPriceInput);
+  const hasInput = negotiatedPrice > 0;
+
+  if (minimumQty > 0 && qtyNumber < minimumQty) {
+    return {
+      visible: false,
+      tone: 'info',
+      message: '',
+      isApplied: false,
+      isBlocking: false,
+      value: null,
+      bottomPrice,
+      minimumQty,
+    };
+  }
+
+  if (!hasInput) {
+    return {
+      visible: true,
+      tone: 'info',
+      message: `Masukkan harga negosiasi untuk ${config?.label || 'A3+'}.${minimumQty > 0 ? ` Minimal qty ${minimumQty}.` : ''}`,
+      isApplied: false,
+      isBlocking: false,
+      value: null,
+      bottomPrice,
+      minimumQty,
+    };
+  }
+
+  if (bottomPrice > 0 && negotiatedPrice < bottomPrice) {
+    return {
+      visible: true,
+      tone: 'error',
+      message: `Harga negosiasi ${formatRupiah(negotiatedPrice)} tidak boleh di bawah harga bottom ${formatRupiah(bottomPrice)}.`,
+      isApplied: false,
+      isBlocking: true,
+      value: null,
+      bottomPrice,
+      minimumQty,
+    };
+  }
+
+  return {
+    visible: true,
+    tone: 'success',
+    message: `Harga negosiasi aktif di ${formatRupiah(negotiatedPrice)}.`,
+    isApplied: true,
+    isBlocking: false,
+    value: negotiatedPrice,
+    bottomPrice,
+    minimumQty,
+  };
+};
+
+const resolvePricingSubtotalPerUnit = (pricing, qtyFallback = 1) => {
+  const qty = Math.max(1, Number(pricing?.qty || qtyFallback || 1) || 1);
+  const subtotal = roundMoney(Number(pricing?.subtotal || 0));
+  if (subtotal <= 0) {
+    return 0;
+  }
+
+  return roundMoney(subtotal / qty);
+};
 const isLbMaxBreakdown = (item) => {
   return (String(item?.source || '') === 'lb_max_width')
     || (String(item?.stock_usage_formula || '').toLowerCase() === 'lb_max_area')
     || Boolean(item?.meta?.lb_max);
 };
+const isBundlingDiscountBreakdown = (item) => {
+  return String(item?.source || '').toLowerCase() === 'bundling_discount';
+};
 const extractDisplayFromBreakdown = (breakdown = []) => {
   const finishingNames = breakdown
-    .filter((row) => !isLbMaxBreakdown(row))
+    .filter((row) => !isLbMaxBreakdown(row) && !isBundlingDiscountBreakdown(row))
     .map((row) => String(row?.name || '').trim())
     .filter(Boolean);
   const lbMaxNames = breakdown
@@ -233,6 +361,131 @@ const extractDisplayFromBreakdown = (breakdown = []) => {
     finishingText: finishingNames.length > 0 ? finishingNames.join(', ') : '-',
     lbMaxText: lbMaxNames.length > 0 ? lbMaxNames.join(', ') : '-',
   };
+};
+const resolvePricingBreakdownBundleDiscount = (pricing = null) => {
+  const explicit = Number(
+    pricing?.price_breakdown?.finishing_bundle_discount
+    ?? pricing?.price_breakdown?.sticker_finishing_bundling_discount
+    ?? 0,
+  );
+  if (Number.isFinite(explicit) && explicit > 0) {
+    return roundMoney(explicit);
+  }
+  const breakdown = Array.isArray(pricing?.finishing_breakdown) ? pricing.finishing_breakdown : [];
+  const derived = breakdown.reduce((sum, row) => {
+    if (!isBundlingDiscountBreakdown(row)) {
+      return sum;
+    }
+    return sum + Math.abs(Number(row?.line_total || row?.unit_price || 0));
+  }, 0);
+  return roundMoney(derived);
+};
+const buildPricingDisplaySummary = ({
+  pricing = null,
+  materialText = '',
+  stickerRule = null,
+  negotiation = null,
+} = {}) => {
+  const subtotal = roundMoney(Number(pricing?.subtotal || 0));
+  const finishingFinal = roundMoney(Number(pricing?.finishing_total || 0));
+  const bundleDiscount = resolvePricingBreakdownBundleDiscount(pricing);
+  const finishingBeforeDiscount = roundMoney(finishingFinal + bundleDiscount);
+  const negotiatedSubtotal = negotiation?.isApplied
+    ? roundMoney(Number(negotiation?.value || 0) * Math.max(1, Number(pricing?.qty || 1) || 1))
+    : 0;
+  const printSubtotal = negotiation?.isApplied ? negotiatedSubtotal : subtotal;
+  const grandTotal = negotiation?.isApplied
+    ? roundMoney(negotiatedSubtotal + finishingFinal + Number(pricing?.express_fee || 0))
+    : resolvePricingGrandTotal(pricing);
+  const bundleActive = bundleDiscount > 0;
+  const billingGroup = String(
+    stickerRule?.billing_group
+    || pricing?.rule?.billing_group
+    || pricing?.price_breakdown?.sticker_billing_group
+    || ''
+  ).trim().toUpperCase();
+  const rollWidth = Number(
+    stickerRule?.selected_width_m
+    || pricing?.rule?.selected_width_m
+    || pricing?.price_breakdown?.sticker_selected_roll_width_m
+    || 0
+  );
+  const designLengthM = Number(
+    stickerRule?.design_length_m
+    || pricing?.rule?.design_length_m
+    || pricing?.price_breakdown?.sticker_design_length_m
+    || 0
+  );
+  const billedLengthM = Number(
+    stickerRule?.billed_length_m
+    || pricing?.rule?.billed_length_m
+    || pricing?.price_breakdown?.sticker_billed_length_m
+    || 0
+  );
+  const billingMinLengthM = Number(
+    stickerRule?.billing_min_length_m
+    || pricing?.rule?.billing_min_length_m
+    || pricing?.price_breakdown?.sticker_billing_min_length_m
+    || 0
+  );
+  const stickerNotice = resolveStickerBillingNotice({
+    pricing,
+    stickerRule,
+    fallbackInputLengthM: designLengthM,
+  });
+  const summaryParts = [];
+  if (billingGroup) {
+    summaryParts.push(`Rule ${billingGroup}`);
+  }
+  if (rollWidth > 0) {
+    summaryParts.push(`Lebar roll ${formatMeterNumber(rollWidth)} m`);
+  }
+  if (bundleDiscount > 0) {
+    summaryParts.push(`Diskon bundling ${formatRupiah(bundleDiscount)}`);
+  }
+  if (negotiation?.isApplied) {
+    summaryParts.push(`Nego ${formatRupiah(negotiatedSubtotal)}`);
+  }
+  return {
+    subtotal,
+    printSubtotal,
+    finishingFinal,
+    finishingBeforeDiscount,
+    bundleDiscount,
+    bundleActive,
+    grandTotal,
+    materialText: String(materialText || '').trim(),
+    billingGroup,
+    rollWidth,
+    designLengthM,
+    billedLengthM,
+    billingMinLengthM,
+    stickerNotice,
+    isNegotiated: Boolean(negotiation?.isApplied),
+    negotiatedSubtotal,
+    bottomPrice: roundMoney(Number(negotiation?.bottomPrice || 0)),
+    minimumQty: Math.max(0, Number(negotiation?.minimumQty || 0) || 0),
+    shortText: summaryParts.join(' | '),
+  };
+};
+const buildPricingSummaryFromBackendItem = (backendItem, materialText = '') => {
+  const snapshot = parseJsonObject(backendItem?.spec_snapshot) || {};
+  const stickerRule = snapshot?.sticker_rule && typeof snapshot.sticker_rule === 'object'
+    ? snapshot.sticker_rule
+    : null;
+  return buildPricingDisplaySummary({
+    pricing: backendItem,
+    materialText,
+    stickerRule,
+    negotiation: Number(backendItem?.negotiated_price || 0) > 0
+      ? {
+        isApplied: true,
+        value: Number(backendItem?.negotiated_price || 0),
+        bottomPrice: Number(backendItem?.bottom_price || 0),
+        minimumQty: Number(backendItem?.bottom_price_min_qty || 0),
+      }
+      : null,
+  });
 };
 const extractNamesFromMixedList = (rows, nameMapById) => {
   const list = Array.isArray(rows) ? rows : [];
@@ -761,6 +1014,7 @@ const normalizeProductName = (row) => toLabel(
   row?.title,
 );
 const normalizeVariantName = (row) => toLabel(
+  row?.source_variant_label,
   row?.variant_name,
   row?.variant,
   row?.sku_name,
@@ -874,6 +1128,7 @@ const normalizeSubCategoryName = (row) => toLabel(
   'Tanpa Sub Kategori',
 );
 const normalizeProductFamilyName = (row) => toLabel(
+  row?.source_parent_product_name,
   toSourceProduct(row)?.name,
   row?.source_product_name,
   row?.parent_product_name,
@@ -993,31 +1248,58 @@ const normalizeCustomerTypeRow = (row) => ({
 });
 const toSourceProduct = (row) => row?.sourceProduct || row?.source_product || null;
 const normalizeFinishingRow = (row) => ({
-  ...row,
-  id: Number(
-    row?.id ||
-    row?.product_id ||
-    row?.finishing_product_id ||
-    row?.source_product_id ||
-    toSourceProduct(row)?.id ||
-    0,
-  ),
-  name: toLabel(row?.name, row?.sku_name, row?.sku),
-  sku: String(row?.sku || '').trim(),
-  axis_group: String(
-    row?.axis_group ||
-    row?.finishing_axis_group ||
-    row?.meta?.finishing_axis_group ||
-    '',
-  ).trim().toLowerCase(),
-  payload_key: ['product_id', 'product', 'source_product_id'].includes(
-    String(row?.payload_key || row?.pivot?.payload_key || '').trim().toLowerCase(),
-  ) || Number(row?.product_id || row?.finishing_product_id || row?.source_product_id || 0) > 0
-    ? 'product_id'
-    : 'id',
+  ...(() => {
+    const sourceMeta = toSourceMeta(row);
+    const sideFlags = resolveFinishingSideFlags(row, sourceMeta);
+    return {
+      ...row,
+      id: Number(
+        row?.id ||
+        row?.product_id ||
+        row?.finishing_product_id ||
+        row?.source_product_id ||
+        toSourceProduct(row)?.id ||
+        0,
+      ),
+      name: toLabel(row?.name, row?.sku_name, row?.sku),
+      sku: String(row?.sku || '').trim(),
+      axis_group: String(
+        row?.axis_group ||
+        row?.finishing_axis_group ||
+        row?.meta?.finishing_axis_group ||
+        '',
+      ).trim().toLowerCase(),
+      side_groups: Array.from(new Set([
+        ...(Array.isArray(row?.side_groups) ? row.side_groups : []),
+        ...(sideFlags.right || sideFlags.left ? ['right_left'] : []),
+        ...(sideFlags.top || sideFlags.bottom ? ['top_bottom'] : []),
+      ].map((item) => String(item || '').trim().toLowerCase()).filter(Boolean))),
+      domain: resolveFinishingDomain(row, sourceMeta),
+      payload_key: ['product_id', 'product', 'source_product_id'].includes(
+        String(row?.payload_key || row?.pivot?.payload_key || '').trim().toLowerCase(),
+      ) || Number(row?.product_id || row?.finishing_product_id || row?.source_product_id || 0) > 0
+        ? 'product_id'
+        : 'id',
+    };
+  })(),
 });
 const isPrintingProductType = (value) => ['advertising', 'printing'].includes(String(value || '').toLowerCase());
 const isFinishingCatalogType = (value) => String(value || '').toLowerCase() === 'finishing';
+const formatFinishingOptionLabel = (row) => {
+  const name = String(row?.name || '').trim();
+  const unitHint = String(row?.unit_hint || '').trim().toUpperCase();
+  if (!name) {
+    return '-';
+  }
+  if (!unitHint) {
+    return name;
+  }
+  const compactName = name.toUpperCase();
+  if (compactName.includes(unitHint)) {
+    return name;
+  }
+  return `${name} (${unitHint})`;
+};
 const parseBooleanLoose = (value) => {
   if (typeof value === 'boolean') return value;
   if (typeof value === 'number') return value === 1;
@@ -1025,6 +1307,84 @@ const parseBooleanLoose = (value) => {
   if (['1', 'true', 'yes', 'ya', 'y', 'on', 'enabled', 'aktif'].includes(text)) return true;
   if (['0', 'false', 'no', 'tidak', 'off', 'disabled', 'nonaktif'].includes(text)) return false;
   return null;
+};
+const containsAnyTerm = (haystack, terms = []) => {
+  const text = normalizeText(haystack);
+  return terms.some((term) => {
+    const token = normalizeText(term);
+    return token && text.includes(token);
+  });
+};
+const resolveFinishingDomain = (row, sourceMeta = null) => {
+  const meta = sourceMeta && typeof sourceMeta === 'object' && !Array.isArray(sourceMeta)
+    ? sourceMeta
+    : toSourceMeta(row);
+  const sourceProduct = toSourceProduct(row);
+  const explicitDomain = normalizeText(
+    meta?.finishing_domain
+    || meta?.domain
+    || row?.finishing_domain
+    || row?.domain
+    || sourceProduct?.finishing_domain
+    || sourceProduct?.domain
+    || sourceProduct?.meta?.finishing_domain
+    || sourceProduct?.meta?.domain
+    || '',
+  );
+  if (['sticker', 'mmt', 'shared'].includes(explicitDomain)) {
+    return explicitDomain;
+  }
+
+  const stickerOnly = [
+    meta?.sticker_only,
+    row?.sticker_only,
+    sourceProduct?.sticker_only,
+    sourceProduct?.meta?.sticker_only,
+  ].map(parseBooleanLoose).find((value) => value !== null);
+  if (stickerOnly === true) {
+    return 'sticker';
+  }
+
+  const mmtOnly = [
+    meta?.mmt_only,
+    row?.mmt_only,
+    sourceProduct?.mmt_only,
+    sourceProduct?.meta?.mmt_only,
+  ].map(parseBooleanLoose).find((value) => value !== null);
+  if (mmtOnly === true) {
+    return 'mmt';
+  }
+
+  const haystack = [
+    row?.name,
+    row?.sku,
+    meta?.finishing_recommendation_group,
+    ...(Array.isArray(meta?.finishing_recommendation_groups) ? meta.finishing_recommendation_groups : []),
+    meta?.seed_filter_category,
+    meta?.seed_service_name,
+    meta?.seed_product_main_name,
+    meta?.category_name,
+    meta?.product_category_name,
+    meta?.main_category_name,
+    meta?.main_category,
+    meta?.kategori,
+    meta?.material_for,
+    meta?.material_group,
+    meta?.seeded_group,
+    sourceProduct?.name,
+    sourceProduct?.sku,
+  ].filter(Boolean).join(' ');
+
+  const hasStickerToken = containsAnyTerm(haystack, ['sticker', 'stiker']);
+  const hasMmtToken = containsAnyTerm(haystack, ['mmt', 'banner', 'frontlite', 'backlite', 'flexi', 'cloth']);
+  if (hasStickerToken && !hasMmtToken) {
+    return 'sticker';
+  }
+  if (hasMmtToken && !hasStickerToken) {
+    return 'mmt';
+  }
+
+  return 'shared';
 };
 const resolveFinishingRequiresMataAyam = (row) => {
   const sourceProduct = toSourceProduct(row);
@@ -1181,6 +1541,10 @@ const isWidthFinishingOption = (option) => {
   if (!option || typeof option !== 'object') return false;
   const lbMaxWidthCm = Math.max(0, Number(option.lb_max_width_cm || 0) || 0);
   if (lbMaxWidthCm <= 0) return false;
+  const sideGroups = Array.isArray(option.side_groups)
+    ? option.side_groups.map((item) => String(item || '').trim().toLowerCase()).filter(Boolean)
+    : [];
+  if (sideGroups.includes('right_left')) return true;
   const axisGroup = String(option.axis_group || '').trim().toLowerCase();
   return axisGroup === 'right_left' || axisGroup === 'all_sides';
 };
@@ -1270,6 +1634,162 @@ const toSourceMeta = (row) => {
   const meta = sourceProduct?.meta;
   return meta && typeof meta === 'object' && !Array.isArray(meta) ? meta : {};
 };
+const hasA3Token = (value) => {
+  const text = normalizeText(value).replace(/\s+/g, ' ');
+  return text.includes('a3+') || text.includes('a3 plus') || text.includes('a3plus') || /\ba3\b/.test(text);
+};
+const resolveFixedSizeA3Mode = (product, productDetail = null) => {
+  const explicitA3Plus = [
+    productDetail?.a3_plus,
+    product?.a3_plus,
+    productDetail?.data?.a3_plus,
+    product?.data?.a3_plus,
+  ].find((value) => typeof value === 'boolean');
+  const rows = [
+    product,
+    productDetail,
+    toSourceProduct(product),
+    toSourceProduct(productDetail),
+  ].filter(Boolean);
+  const metas = rows.map((row) => {
+    const meta = row?.meta;
+    return meta && typeof meta === 'object' && !Array.isArray(meta) ? meta : {};
+  });
+  const explicitEnabled = rows.some((row) =>
+    row?.supports_a3_bottom_negotiation === true
+    || row?.is_a3_product === true
+    || row?.a3_fixed_size === true
+  ) || metas.some((meta) =>
+    meta?.supports_a3_bottom_negotiation === true
+    || meta?.a3_fixed_size === true
+    || meta?.fixed_size_a3 === true
+  );
+  const label = toLabel(
+    ...metas.map((meta) => meta?.size_label || meta?.paper_size || meta?.size_text),
+    'A3+',
+  );
+  const textCandidates = []
+    .concat(rows.map((row) => row?.name))
+    .concat(rows.map((row) => row?.sku))
+    .concat(rows.map((row) => row?.product_type))
+    .concat(rows.map((row) => row?.category_name))
+    .concat(rows.map((row) => row?.subcategory_name))
+    .concat(rows.map((row) => row?.material_name))
+    .concat(rows.map((row) => row?.stock_display_unit))
+    .concat(metas.map((meta) => meta?.product_type))
+    .concat(metas.map((meta) => meta?.configurator))
+    .concat(metas.map((meta) => meta?.sales_schema))
+    .concat(metas.map((meta) => meta?.material_group))
+    .concat(metas.map((meta) => meta?.material_for))
+    .concat(metas.map((meta) => meta?.seeded_group))
+    .concat(metas.map((meta) => meta?.stock_display_unit))
+    .concat(metas.map((meta) => meta?.paper_size))
+    .concat(metas.map((meta) => meta?.size_text))
+    .concat(metas.map((meta) => meta?.size_label));
+
+  if (explicitA3Plus === false && !explicitEnabled && !textCandidates.some((value) => hasA3Token(value))) {
+    return {
+      enabled: false,
+      label: 'A3+',
+      helperText: '',
+    };
+  }
+
+  if (explicitA3Plus !== true && !explicitEnabled && !textCandidates.some((value) => hasA3Token(value))) {
+    return {
+      enabled: false,
+      label: 'A3+',
+      helperText: '',
+    };
+  }
+
+  const normalizedLabel = hasA3Token(label) ? label : 'A3+';
+  return {
+    enabled: true,
+    label: normalizedLabel,
+    helperText: 'Produk A3+ memakai ukuran tetap. Kasir cukup isi qty dan finishing.',
+  };
+};
+const isStrictStickerSalesProduct = (product, productDetail = null) => {
+  const explicitA3Plus = [
+    productDetail?.a3_plus,
+    product?.a3_plus,
+    productDetail?.data?.a3_plus,
+    product?.data?.a3_plus,
+  ].find((value) => typeof value === 'boolean');
+  if (explicitA3Plus === true) {
+    return false;
+  }
+
+  const explicitStrictSticker = [
+    productDetail?.strict_sticker,
+    product?.strict_sticker,
+    productDetail?.data?.strict_sticker,
+    product?.data?.strict_sticker,
+  ].find((value) => typeof value === 'boolean');
+  if (typeof explicitStrictSticker === 'boolean') {
+    return explicitStrictSticker;
+  }
+
+  const rows = [
+    product,
+    productDetail,
+    toSourceProduct(product),
+    toSourceProduct(productDetail),
+  ].filter(Boolean);
+  const metas = rows.map((row) => {
+    const meta = row?.meta;
+    return meta && typeof meta === 'object' && !Array.isArray(meta) ? meta : {};
+  });
+  const sourceMeta = metas.find((meta) => Object.keys(meta).length > 0) || {};
+  const sourceType = String(
+    toSourceProduct(productDetail)?.product_type
+    || toSourceProduct(product)?.product_type
+    || productDetail?.product_type
+    || product?.product_type
+    || sourceMeta?.product_type
+    || ''
+  ).trim().toLowerCase();
+
+  if (sourceType === 'book') return false;
+  if (String(sourceMeta?.configurator || '').trim().toLowerCase() === 'book') return false;
+  if (sourceMeta?.book_category) return false;
+
+  const schema = String(sourceMeta?.sales_schema || '').trim().toLowerCase();
+  const enabled = Boolean(sourceMeta?.sticker_sales_enabled);
+  if (schema !== 'sticker' && !enabled) return false;
+
+  const categoryHaystack = normalizeText([
+    product?.source_category_name,
+    product?.source_main_category_name,
+    product?.source_subcategory_name,
+    sourceMeta?.seed_filter_category,
+  ].filter(Boolean).join(' '));
+  const identityHaystack = normalizeText([
+    product?.name,
+    productDetail?.name,
+    toSourceProduct(product)?.name,
+    toSourceProduct(productDetail)?.name,
+    toSourceProduct(product)?.sku,
+    toSourceProduct(productDetail)?.sku,
+    sourceMeta?.seed_service_name,
+    sourceMeta?.seed_product_main_name,
+  ].filter(Boolean).join(' '));
+  const fullHaystack = `${categoryHaystack} ${identityHaystack}`.trim();
+
+  const looksLikeBook = containsAnyTerm(fullHaystack, ['book', 'buku', 'blueprint']);
+  if (looksLikeBook) return false;
+
+  const explicitStickerCategory = containsAnyTerm(categoryHaystack, ['sticker', 'stiker']);
+  const explicitStickerIdentity = containsAnyTerm(identityHaystack, ['sticker', 'stiker']);
+  const explicitSticker = explicitStickerCategory || explicitStickerIdentity;
+
+  const explicitMmtCategory = containsAnyTerm(categoryHaystack, ['mmt', 'banner', 'frontlite', 'backlite', 'flexi', 'cloth']);
+  const explicitMmtIdentity = containsAnyTerm(identityHaystack, ['mmt', 'banner', 'frontlite', 'backlite', 'flexi', 'cloth']);
+  if (explicitMmtCategory || (explicitMmtIdentity && !explicitSticker)) return false;
+
+  return explicitSticker;
+};
 const resolveStickerResellerMinimumLength = (sourceMeta = {}, pricing = null) => {
   const billingGroup = String(
     pricing?.rule?.billing_group
@@ -1304,7 +1824,48 @@ const buildStickerResellerMinimumMessage = (productName, inputLengthM, minLength
   const name = String(productName || 'Produk sticker').trim() || 'Produk sticker';
   const minText = formatMeterNumber(minLengthM || 0) || String(minLengthM || 0);
   const inputText = formatMeterNumber(inputLengthM || 0) || String(inputLengthM || 0);
-  return `${name}: panjang minimal pemesanan sticker reseller adalah ${minText} meter (input ${inputText} meter).`;
+  return `${name}: reseller minimum ${minText} m. Input ${inputText} m tetap boleh, tetapi tagihan mengikuti minimum.`;
+};
+const resolveStickerBillingNotice = ({
+  pricing = null,
+  stickerRule = null,
+  fallbackInputLengthM = 0,
+} = {}) => {
+  const billingGroup = String(
+    stickerRule?.billing_group
+    || pricing?.rule?.billing_group
+    || pricing?.price_breakdown?.sticker_billing_group
+    || ''
+  ).trim().toUpperCase();
+  const designLengthM = Number(
+    stickerRule?.design_length_m
+    || pricing?.rule?.design_length_m
+    || pricing?.price_breakdown?.sticker_design_length_m
+    || fallbackInputLengthM
+    || 0
+  );
+  const billedLengthM = Number(
+    stickerRule?.billed_length_m
+    || pricing?.rule?.billed_length_m
+    || pricing?.price_breakdown?.sticker_billed_length_m
+    || 0
+  );
+  const minLengthM = Number(
+    stickerRule?.billing_min_length_m
+    || pricing?.rule?.billing_min_length_m
+    || pricing?.price_breakdown?.sticker_billing_min_length_m
+    || 0
+  );
+
+  if (billingGroup === 'ROLL_STICKER' && designLengthM > 0 && billedLengthM > designLengthM && minLengthM > 0) {
+    return `Aturan reseller: input ${formatMeterNumber(designLengthM)} m, tagih ${formatMeterNumber(billedLengthM)} m minimum.`;
+  }
+
+  if (billingGroup === 'ROLL_FREE_LENGTH' && designLengthM > 0) {
+    return `Aturan retail: panjang mengikuti input ${formatMeterNumber(designLengthM)} m.`;
+  }
+
+  return '';
 };
 const validateStickerResellerOrderingConfig = ({
   customer,
@@ -1319,8 +1880,7 @@ const validateStickerResellerOrderingConfig = ({
     return null;
   }
   const sourceMeta = toSourceMeta(productDetail || product);
-  const isStickerSchema = String(sourceMeta?.sales_schema || '').trim().toLowerCase() === 'sticker'
-    || Boolean(sourceMeta?.sticker_sales_enabled);
+  const isStickerSchema = isStrictStickerSalesProduct(product, productDetail);
   if (!isStickerSchema) {
     return null;
   }
@@ -1338,6 +1898,12 @@ const validateStickerResellerOrderingConfig = ({
   );
 };
 const resolveUsedMaterialInfoFromPricing = (pricing, fallbackMaterialInfo, materials, catalogMaterialNameMap) => {
+  const explicitMaterialStockRaw =
+    pricing?.rule?.selected_material_stock ??
+    pricing?.note?.material_stock;
+  const explicitMaterialMinStockRaw =
+    pricing?.rule?.selected_material_min_stock ??
+    pricing?.note?.material_min_stock;
   const directIds = collectMaterialIds(
     pricing?.material_product_id,
     pricing?.material_id,
@@ -1424,6 +1990,8 @@ const resolveUsedMaterialInfoFromPricing = (pricing, fallbackMaterialInfo, mater
     materialName: materialName || '-',
     materialStock,
     materialMinStock,
+    hasExplicitMaterialStock: explicitMaterialStockRaw !== undefined && explicitMaterialStockRaw !== null && explicitMaterialStockRaw !== '',
+    hasExplicitMaterialMinStock: explicitMaterialMinStockRaw !== undefined && explicitMaterialMinStockRaw !== null && explicitMaterialMinStockRaw !== '',
   };
 };
 const buildSelectedMaterialStockMessage = (usedMaterialInfo, productName = '') => {
@@ -1453,16 +2021,44 @@ const buildSelectedMaterialStockMessage = (usedMaterialInfo, productName = '') =
   }
   return lines.join('\n');
 };
-const validateSelectedMaterialStock = (usedMaterialInfo, productName = '') => {
+const buildSelectedMaterialLowStockWarning = (usedMaterialInfo, productName = '') => {
+  const materialName = String(
+    usedMaterialInfo?.materialName ||
+    usedMaterialInfo?.displayText ||
+    'material',
+  ).trim();
+  const targetProduct = String(productName || '').trim();
   const stock = Number(usedMaterialInfo?.materialStock || 0) || 0;
   const minStock = Number(usedMaterialInfo?.materialMinStock || 0) || 0;
+  if (stock <= 0 || minStock <= 0 || stock > minStock) {
+    return '';
+  }
+  const lines = ['Peringatan stok material: stok sudah menyentuh batas minimum.'];
+  if (targetProduct) {
+    lines.push('Produk: ' + targetProduct + '.');
+  }
+  if (materialName) {
+    lines.push('Material: ' + materialName + '.');
+  }
+  lines.push('Stok saat ini: ' + formatMeterNumber(stock) + '.');
+  lines.push('Batas minimum: ' + formatMeterNumber(minStock) + '.');
+  return lines.join('\n');
+};
+const validateSelectedMaterialStock = (usedMaterialInfo, productName = '') => {
+  if (!usedMaterialInfo?.hasExplicitMaterialStock) {
+    return '';
+  }
+  const stock = Number(usedMaterialInfo?.materialStock || 0) || 0;
   if (stock <= 0) {
     return buildSelectedMaterialStockMessage(usedMaterialInfo, productName);
   }
-  if (minStock > 0 && stock <= minStock) {
-    return buildSelectedMaterialStockMessage(usedMaterialInfo, productName);
-  }
   return '';
+};
+const resolveSelectedMaterialWarning = (usedMaterialInfo, productName = '') => {
+  if (!usedMaterialInfo?.hasExplicitMaterialStock) {
+    return '';
+  }
+  return buildSelectedMaterialLowStockWarning(usedMaterialInfo, productName);
 };
 const PAYMENT_METHOD_LABELS = ['Cash', 'Transfer', 'QRIS', 'Card'];
 
@@ -1611,7 +2207,7 @@ const isDraftCandidate = (row) => {
   return notes.includes('mode: simpan draft');
 };
 const resolveAppVersionLabel = () => {
-  const raw = String(process.env.EXPO_PUBLIC_APP_VERSION || '').trim();
+  const raw = appEnv.appVersion;
   if (!raw) {
     return 'v1.0.0';
   }
@@ -1688,6 +2284,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
   const [productName, setProductName] = useState('');
   const [selectedProductId, setSelectedProductId] = useState(null);
   const [qty, setQty] = useState('1');
+  const [negotiatedPriceInput, setNegotiatedPriceInput] = useState('');
   const [sizeWidthMeter, setSizeWidthMeter] = useState('');
   const [sizeLengthMeter, setSizeLengthMeter] = useState('');
   const [selectedFinishingIds, setSelectedFinishingIds] = useState([]);
@@ -1728,8 +2325,11 @@ const SalesScreen = ({ currentUser, onLogout }) => {
   const [auditLogs, setAuditLogs] = useState([]);
   const [lastPayloadPreview, setLastPayloadPreview] = useState(null);
   const [itemFinalPrice, setItemFinalPrice] = useState(0);
+  const [previewFallbackBottomPrice, setPreviewFallbackBottomPrice] = useState(0);
   const [previewMaterialDisplay, setPreviewMaterialDisplay] = useState('');
   const [previewMaterialError, setPreviewMaterialError] = useState('');
+  const [previewMaterialWarning, setPreviewMaterialWarning] = useState('');
+  const [previewPricingSummary, setPreviewPricingSummary] = useState(null);
   const [mataAyamIssueBadge, setMataAyamIssueBadge] = useState({
     visible: false,
     message: '',
@@ -2359,6 +2959,27 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     }
     return findByName(products, productName) || null;
   }, [selectedProductId, products, productName]);
+  const selectedProductDetail = useMemo(() => {
+    const selectedId = Number(selectedProductId || selectedProductRow?.id || 0);
+    return selectedId > 0 ? productDetails[selectedId] || null : null;
+  }, [selectedProductId, selectedProductRow, productDetails]);
+  const selectedProductFixedSizeMode = useMemo(
+    () => resolveFixedSizeA3Mode(selectedProductRow, selectedProductDetail),
+    [selectedProductRow, selectedProductDetail],
+  );
+  const selectedA3NegotiationConfig = useMemo(
+    () => resolveA3NegotiationConfig(selectedProductRow, selectedProductDetail),
+    [selectedProductRow, selectedProductDetail],
+  );
+  const selectedA3NegotiationState = useMemo(
+    () => resolveA3NegotiationState({
+      config: selectedA3NegotiationConfig,
+      qtyValue: qty,
+      negotiatedPriceInput,
+      fallbackBottomPrice: previewFallbackBottomPrice,
+    }),
+    [selectedA3NegotiationConfig, qty, negotiatedPriceInput, previewFallbackBottomPrice],
+  );
   const materialMapById = useMemo(() => {
     const map = new Map();
     materials.forEach((row) => {
@@ -2422,16 +3043,8 @@ const SalesScreen = ({ currentUser, onLogout }) => {
 
     const ensureFamilyNode = (row) => {
       const sourceProduct = toSourceProduct(row);
-      const familyId = Number(
-        row?.source_product_id
-        || sourceProduct?.id
-        || row?.parent_product_id
-        || row?.parent_id
-        || row?.product_id
-        || row?.id
-        || 0
-      );
       const familyName = toLabel(
+        row?.source_parent_product_name,
         sourceProduct?.name,
         row?.source_product_name,
         row?.parent_product_name,
@@ -2439,9 +3052,33 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         normalizeVariantName(row),
         'Produk',
       );
-      const familyKey = familyId > 0
+      const hasFamilyRelationHint = [
+        row?.source_parent_product_id,
+        sourceProduct?.id,
+        row?.parent_product_id,
+        row?.parent_id,
+        row?.source_parent_product_name,
+        row?.source_product_name,
+        row?.parent_product_name,
+        row?.base_product_name,
+        row?.parent_name,
+      ].some((value) => String(value || '').trim() !== '');
+      const familyId = Number(
+        row?.source_parent_product_id
+        || row?.parent_product_id
+        || row?.parent_id
+        ||
+        row?.source_product_id
+        || sourceProduct?.parent_product_id
+        || sourceProduct?.id
+        || row?.product_id
+        || row?.id
+        || 0
+      );
+      const familyNameKey = normalizeText(familyName);
+      const familyKey = familyId > 0 && (!hasFamilyRelationHint || !familyNameKey)
         ? `family:${familyId}`
-        : `family:${normalizeText(familyName) || JSON.stringify(row || {})}`;
+        : `family:${familyNameKey || familyId || JSON.stringify(row || {})}`;
 
       let familyNode = familyMap.get(familyKey);
       if (!familyNode) {
@@ -2505,7 +3142,11 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       }
 
       const rowId = Number(row?.id || 0);
-      const isLikelyVariant = Boolean(familyId > 0 && rowId > 0 && familyId !== rowId);
+      const isLikelyVariant = Boolean(
+        row?.source_is_variant === true
+        || Number(row?.source_parent_product_id || 0) > 0
+        || (familyId > 0 && rowId > 0 && familyId !== rowId),
+      );
       if (isLikelyVariant) {
         attachVariant(familyNode, row, row, familyId, sourceProduct, 0);
       } else if (familyNode.variants.length === 0) {
@@ -2593,9 +3234,17 @@ const SalesScreen = ({ currentUser, onLogout }) => {
           lb_max_width_cm: Number(meta?.finishing_lb_max_width_cm ?? meta?.lb_max_width_cm ?? 0),
           source: 'catalog',
           axis_group: normalizeAxisGroup(row),
+          side_groups: (() => {
+            const sideFlags = resolveFinishingSideFlags(row, meta);
+            return [
+              ...(sideFlags.right || sideFlags.left ? ['right_left'] : []),
+              ...(sideFlags.top || sideFlags.bottom ? ['top_bottom'] : []),
+            ];
+          })(),
           recommendation_groups: recommendationGroups
             .map((item) => String(item || '').trim().toLowerCase())
             .filter(Boolean),
+          domain: resolveFinishingDomain(row, meta),
           requires_mata_ayam: resolveFinishingRequiresMataAyam({ ...row, meta }),
           payload_key: 'product_id',
         };
@@ -2614,6 +3263,14 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     const sourceMeta = toSourceMeta(selectedProductRow);
     return String(sourceMeta?.sales_schema || '').trim().toLowerCase();
   }, [selectedProductRow]);
+  const selectedIsStrictSticker = useMemo(() => {
+    const detail = selectedProductId ? productDetails[Number(selectedProductId)] : null;
+    return isStrictStickerSalesProduct(selectedProductRow, detail);
+  }, [selectedProductRow, selectedProductId, productDetails]);
+  const selectedFinishingDomain = useMemo(
+    () => (selectedIsStrictSticker ? 'sticker' : 'mmt'),
+    [selectedIsStrictSticker],
+  );
   const effectiveFinishingOptions = useMemo(() => {
     const productFinishings = selectedProductFinishings.map((row) => ({
       id: Number(row.id || 0),
@@ -2628,39 +3285,69 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       axis_group: ['right_left', 'top_bottom', 'all_sides', 'sambungan'].includes(String(row.axis_group || ''))
         ? String(row.axis_group)
         : normalizeAxisGroup(row),
+      side_groups: Array.isArray(row.side_groups)
+        ? row.side_groups.map((item) => String(item || '').trim().toLowerCase()).filter(Boolean)
+        : [],
       recommendation_groups: Array.isArray(row.recommendation_groups)
         ? row.recommendation_groups.map((item) => String(item || '').trim().toLowerCase()).filter(Boolean)
         : [],
+      domain: resolveFinishingDomain(row, row?.meta),
       requires_mata_ayam: resolveFinishingRequiresMataAyam(row),
       payload_key: row.payload_key === 'product_id' ? 'product_id' : 'id',
     })).filter((row) => row.id > 0 && row.name);
 
+    const matchesFinishingDomain = (option) => {
+      const domain = String(option?.domain || 'shared').trim().toLowerCase();
+      if (!isPrintingProductType(selectedProductType)) {
+        return true;
+      }
+      if (domain === 'shared') {
+        return true;
+      }
+      return domain === selectedFinishingDomain;
+    };
+
+    const hasSelectableAxis = (option) => {
+      const sideGroups = Array.isArray(option?.side_groups) ? option.side_groups : [];
+      return sideGroups.length > 0 || ['right_left', 'top_bottom', 'all_sides', 'sambungan'].includes(String(option?.axis_group || ''));
+    };
+
     if (isPrintingProductType(selectedProductType)) {
+      if (productFinishings.length > 0) {
+        return productFinishings.filter((option) => matchesFinishingDomain(option) && hasSelectableAxis(option));
+      }
+
+      if (selectedIsStrictSticker) {
+        return [];
+      }
+
       return printingFinishingCatalog.filter((option) => {
+        if (!matchesFinishingDomain(option)) {
+          return false;
+        }
         if (!selectedFinishingGroup) {
-          // Sticker tidak boleh fallback ke semua finishing katalog.
-          if (selectedSalesSchema === 'sticker') {
-            return false;
-          }
-          return true;
+          return hasSelectableAxis(option);
         }
         if (!Array.isArray(option.recommendation_groups) || option.recommendation_groups.length === 0) {
           return false;
         }
-        return option.recommendation_groups.includes(selectedFinishingGroup);
+        if (!option.recommendation_groups.includes(selectedFinishingGroup)) {
+          return false;
+        }
+        return hasSelectableAxis(option);
       });
     }
     if (productFinishings.length > 0) {
       return productFinishings;
     }
     return [];
-  }, [selectedProductType, printingFinishingCatalog, selectedFinishingGroup, selectedProductFinishings, selectedSalesSchema]);
+  }, [selectedProductType, printingFinishingCatalog, selectedFinishingGroup, selectedProductFinishings, selectedIsStrictSticker, selectedFinishingDomain]);
   const selectedFinishingSummary = useMemo(() => {
     if (!Array.isArray(selectedFinishingIds) || selectedFinishingIds.length === 0) {
       return '';
     }
     const byId = new Map(
-      (effectiveFinishingOptions || []).map((row) => [Number(row.id), String(row.name || '').trim()]),
+      (effectiveFinishingOptions || []).map((row) => [Number(row.id), formatFinishingOptionLabel(row)]),
     );
     return selectedFinishingIds
       .map((id) => byId.get(Number(id)) || '')
@@ -2672,7 +3359,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       return '';
     }
     const byId = new Map(
-      (effectiveFinishingOptions || []).map((row) => [Number(row.id), String(row.name || '').trim()]),
+      (effectiveFinishingOptions || []).map((row) => [Number(row.id), formatFinishingOptionLabel(row)]),
     );
     const rows = selectedFinishingIds
       .map((id) => Number(id))
@@ -2696,17 +3383,51 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     return `${selectedFinishingSummary} | Mata Ayam: ${selectedMataAyamSummary}`;
   }, [selectedFinishingSummary, selectedMataAyamSummary]);
   const lbMaxFinishingOptions = useMemo(() => {
+    if (selectedProductFixedSizeMode.enabled) {
+      return [];
+    }
     if (!isPrintingProductType(selectedProductType)) {
       return [];
     }
     return effectiveFinishingOptions.filter((row) => isWidthFinishingOption(row));
-  }, [selectedProductType, effectiveFinishingOptions]);
+  }, [selectedProductType, effectiveFinishingOptions, selectedProductFixedSizeMode.enabled]);
   const regularFinishingOptions = useMemo(() => {
+    if (selectedProductFixedSizeMode.enabled) {
+      return [];
+    }
     if (!isPrintingProductType(selectedProductType)) {
       return effectiveFinishingOptions;
     }
     return effectiveFinishingOptions.filter((row) => !isWidthFinishingOption(row));
-  }, [selectedProductType, effectiveFinishingOptions]);
+  }, [selectedProductType, effectiveFinishingOptions, selectedProductFixedSizeMode.enabled]);
+  const finishingAvailabilityMessage = useMemo(() => {
+    if (!selectedProductRow) {
+      return 'Pilih produk dulu untuk melihat finishing.';
+    }
+    if (regularFinishingOptions.length > 0) {
+      return '';
+    }
+    if (!isPrintingProductType(selectedProductType)) {
+      return 'Produk ini belum punya finishing aktif.';
+    }
+    if (selectedIsStrictSticker && !selectedFinishingGroup) {
+      return 'Produk sticker ini belum punya grup finishing sticker.';
+    }
+    if (selectedProductFinishings.length > 0) {
+      return 'Produk ini belum punya finishing reguler yang bisa dipilih kasir.';
+    }
+    if (selectedFinishingGroup) {
+      return `Belum ada finishing yang cocok dengan grup "${selectedFinishingGroup}".`;
+    }
+    return 'Belum ada finishing aktif untuk produk ini.';
+  }, [
+    regularFinishingOptions,
+    selectedProductRow,
+    selectedProductType,
+    selectedIsStrictSticker,
+    selectedFinishingGroup,
+    selectedProductFinishings,
+  ]);
   const finishingRequiresMataAyamById = useMemo(() => {
     return new Map(
       regularFinishingOptions
@@ -3210,6 +3931,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         const finishingTotal = Number(backendItem?.finishing_total || 0);
         const expressFee = Number(backendItem?.express_fee || 0);
         const lineTotal = roundMoney(subtotal + finishingTotal + expressFee);
+        const materialText = restored.materialText || '-';
         return {
           id: `queue-item-${idx}-${Date.now()}`,
           product: toLabel(
@@ -3222,9 +3944,10 @@ const SalesScreen = ({ currentUser, onLogout }) => {
           finishing: restored.finishingText,
           lbMax: restored.lbMaxText,
           pages: restored.pages,
-          material: restored.materialText,
+          material: materialText,
           lineTotal,
           total: lineTotal,
+          pricingSummary: buildPricingSummaryFromBackendItem(backendItem, materialText),
           backendItem,
         };
       });
@@ -3235,11 +3958,14 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       setSelectedCustomerId(Number(payload?.customer_id || 0) || null);
       setProductName('');
       setSelectedProductId(null);
+      setNegotiatedPriceInput('');
       setQty('1');
       setSizeWidthMeter('');
       setSizeLengthMeter('');
       setPreviewMaterialDisplay('');
       setPreviewMaterialError('');
+      setPreviewMaterialWarning('');
+      setPreviewPricingSummary(null);
       setSelectedFinishingIds([]);
       setSelectedFinishingMataAyamQtyById({});
       setMataAyamIssueBadge({ visible: false, message: '' });
@@ -3286,6 +4012,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         const finishingTotal = Number(item?.finishing_total || 0);
         const expressFee = Number(item?.express_fee || 0);
         const lineTotal = roundMoney(subtotal + finishingTotal + expressFee);
+        const materialText = restored.materialText || '-';
         return {
           id: `draft-${selectedId}-${item?.id || Math.random().toString(36).slice(2, 7)}`,
           product: toLabel(
@@ -3298,9 +4025,10 @@ const SalesScreen = ({ currentUser, onLogout }) => {
           finishing: restored.finishingText,
           lbMax: restored.lbMaxText,
           pages: restored.pages,
-          material: restored.materialText,
+          material: materialText,
           lineTotal,
           total: lineTotal,
+          pricingSummary: buildPricingSummaryFromBackendItem(item, materialText),
           backendItem: {
             product_id: Number(item?.product_id || 0),
             qty: Number(item?.qty || 1) || 1,
@@ -3315,6 +4043,10 @@ const SalesScreen = ({ currentUser, onLogout }) => {
             subtotal: roundMoney(subtotal),
             finishing_total: roundMoney(finishingTotal),
             express_fee: roundMoney(expressFee),
+            negotiated_price: Number(item?.negotiated_price || 0) > 0 ? roundMoney(item.negotiated_price) : null,
+            bottom_price_enabled: Boolean(item?.bottom_price_enabled),
+            bottom_price: roundMoney(Number(item?.bottom_price || 0)),
+            bottom_price_min_qty: Math.max(0, Number(item?.bottom_price_min_qty || 0) || 0),
             requires_production: String(item?.production_status || '').toLowerCase() !== 'not_required',
             requires_design: Boolean(item?.requires_design),
             material_product_id: materialId > 0 ? materialId : null,
@@ -3337,11 +4069,14 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       setSelectedCustomerId(Number(order?.customer?.id || 0) || null);
       setProductName('');
       setSelectedProductId(null);
+      setNegotiatedPriceInput('');
       setQty('1');
       setSizeWidthMeter('');
       setSizeLengthMeter('');
       setPreviewMaterialDisplay('');
       setPreviewMaterialError('');
+      setPreviewMaterialWarning('');
+      setPreviewPricingSummary(null);
       setSelectedFinishingIds([]);
       setSelectedFinishingMataAyamQtyById({});
       setMataAyamIssueBadge({ visible: false, message: '' });
@@ -3449,14 +4184,21 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       return;
     }
     const productId = Number(variantRow.id || 0) || null;
+    const fixedSizeMode = resolveFixedSizeA3Mode(variantRow);
     setSelectedProductId(productId);
     setProductName(buildSelectedProductLabel(variantRow));
+    setNegotiatedPriceInput('');
     setSelectedFinishingIds([]);
     setSelectedFinishingMataAyamQtyById({});
     setMataAyamIssueBadge({ visible: false, message: '' });
     setSelectedLbMaxProductId(null);
     setPreviewMaterialDisplay('');
     setPreviewMaterialError('');
+    setPreviewMaterialWarning('');
+    if (fixedSizeMode.enabled) {
+      setSizeWidthMeter('');
+      setSizeLengthMeter('');
+    }
     if (productId) {
       fetchPosProductDetail(productId)
         .then((detail) => {
@@ -3519,6 +4261,9 @@ const SalesScreen = ({ currentUser, onLogout }) => {
   };
 
   const buildFinishingsPayload = (productDetail, qtyNumber) => {
+    if (selectedProductFixedSizeMode.enabled) {
+      return [];
+    }
     if (!Array.isArray(selectedFinishingIds) || selectedFinishingIds.length === 0) {
       return [];
     }
@@ -3544,6 +4289,10 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       return { id, qty: qtyNumber, mata_ayam_qty: mataAyamQty };
     });
 
+    if (selectedIsStrictSticker) {
+      return rows;
+    }
+
     if (isPrintingProductType(selectedProductType)) {
       const groupMap = new Map();
       rows.forEach((row) => {
@@ -3559,6 +4308,9 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     return rows;
   };
   const buildLbMaxPayload = () => {
+    if (selectedProductFixedSizeMode.enabled) {
+      return [];
+    }
     const selectedId = Number(selectedLbMaxProductId || 0);
     if (selectedId <= 0) {
       return [];
@@ -3572,12 +4324,21 @@ const SalesScreen = ({ currentUser, onLogout }) => {
 
   const computePricingFromBackend = async (product, customerId) => {
     const qtyNumber = Math.max(Number(qty) || 0, 1);
-    const size = buildSizeFromMeters(sizeWidthMeter, sizeLengthMeter);
     const productDetail = await resolveProductDetail(Number(product.id));
+    const fixedSizeMode = resolveFixedSizeA3Mode(product, productDetail);
+    const size = fixedSizeMode.enabled
+      ? {
+        widthMeter: 0,
+        lengthMeter: 0,
+        widthMm: null,
+        heightMm: null,
+        areaM2: 0,
+        displayText: `${fixedSizeMode.label || 'A3+'} (Ukuran Tetap)`,
+      }
+      : buildSizeFromMeters(sizeWidthMeter, sizeLengthMeter);
     const materialInfo = resolveMaterialInfo(product, productDetail);
     const sourceMeta = toSourceMeta(productDetail || product);
-    const isStickerSchema = String(sourceMeta?.sales_schema || '').trim().toLowerCase() === 'sticker'
-      || Boolean(sourceMeta?.sticker_sales_enabled);
+    const isStickerSchema = isStrictStickerSalesProduct(product, productDetail);
     const finishingsPayload = buildFinishingsPayload(productDetail, qtyNumber);
     const lbMaxPayload = buildLbMaxPayload();
 
@@ -3592,7 +4353,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       qty: qtyNumber,
       width_mm: size.widthMm || null,
       height_mm: size.heightMm || null,
-      material_product_id: isStickerSchema ? null : (materialInfo.primaryMaterialId || null),
+      material_product_id: materialInfo.primaryMaterialId || null,
       extra_margin_cm: 0,
       customer_id: customerId || null,
       express: false,
@@ -3612,9 +4373,11 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       pricing,
       lengthMeter: size.lengthMeter,
     });
-    if (resellerMinimumMessage) {
-      throw new Error(resellerMinimumMessage);
-    }
+    const stickerOrderingNotice = resellerMinimumMessage || resolveStickerBillingNotice({
+      pricing,
+      stickerRule: pricing?.rule && typeof pricing.rule === 'object' ? pricing.rule : null,
+      fallbackInputLengthM: size.lengthMeter,
+    });
 
     const usedMaterialInfo = resolveUsedMaterialInfoFromPricing(
       pricing,
@@ -3623,7 +4386,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       catalogMaterialNameMap,
     );
 
-    return { pricing, pricingPayload, productDetail, materialInfo, usedMaterialInfo, size };
+    return { pricing, pricingPayload, productDetail, materialInfo, usedMaterialInfo, size, stickerOrderingNotice };
   };
 
   useEffect(() => {
@@ -3633,38 +4396,71 @@ const SalesScreen = ({ currentUser, onLogout }) => {
 
     if (!backendReady || !selectedProductRow) {
       setItemFinalPrice(0);
+      setPreviewFallbackBottomPrice(0);
       setPreviewMaterialDisplay('');
       setPreviewMaterialError('');
+      setPreviewMaterialWarning('');
+      setPreviewPricingSummary(null);
       return undefined;
     }
 
     const qtyNumber = Number(qty);
     const widthMeter = parseMeterValue(sizeWidthMeter);
     const lengthMeter = parseMeterValue(sizeLengthMeter);
-    if (qtyNumber < 1 || widthMeter <= 0 || lengthMeter <= 0) {
+    const isFixedSizeProduct = selectedProductFixedSizeMode.enabled;
+    if (qtyNumber < 1 || (!isFixedSizeProduct && (widthMeter <= 0 || lengthMeter <= 0))) {
       setItemFinalPrice(0);
+      setPreviewFallbackBottomPrice(0);
       setPreviewMaterialDisplay('');
       setPreviewMaterialError('');
+      setPreviewMaterialWarning('');
+      setPreviewPricingSummary(null);
       return undefined;
     }
 
     const timer = setTimeout(async () => {
       try {
         const customerId = Number(selectedCustomerId || 0) || null;
-        const { pricing, usedMaterialInfo } = await computePricingFromBackend(selectedProductRow, customerId);
-        const nextTotal = roundMoney(
-          (pricing?.subtotal || 0) + (pricing?.finishing_total || 0) + (pricing?.express_fee || 0),
-        );
+        const { pricing, usedMaterialInfo, productDetail, stickerOrderingNotice } = await computePricingFromBackend(selectedProductRow, customerId);
+        const negotiationConfig = resolveA3NegotiationConfig(selectedProductRow, productDetail);
+        const negotiationState = resolveA3NegotiationState({
+          config: negotiationConfig,
+          qtyValue: qtyNumber,
+          negotiatedPriceInput,
+          fallbackBottomPrice: resolvePricingSubtotalPerUnit(pricing, qtyNumber),
+        });
+        const nextTotal = negotiationState.isApplied
+          ? roundMoney(
+            (Number(negotiationState.value || 0) * qtyNumber)
+            + Number(pricing?.finishing_total || 0)
+            + Number(pricing?.express_fee || 0),
+          )
+          : resolvePricingGrandTotal(pricing);
         if (!cancelled && previewRequestRef.current === requestId) {
+          const targetProduct = String(buildSelectedProductLabel(selectedProductRow) || selectedProductRow?.name || '').trim();
           setItemFinalPrice(nextTotal);
+          setPreviewFallbackBottomPrice(resolvePricingSubtotalPerUnit(pricing, qtyNumber));
           setPreviewMaterialDisplay(String(usedMaterialInfo?.displayText || '').trim());
-          setPreviewMaterialError('');
+          setPreviewMaterialError(negotiationState.tone === 'error' ? negotiationState.message : '');
+          const combinedWarning = [
+            resolveSelectedMaterialWarning(usedMaterialInfo, targetProduct),
+            stickerOrderingNotice,
+          ].filter((text) => String(text || '').trim() !== '').join('\n');
+          setPreviewMaterialWarning(combinedWarning);
+          setPreviewPricingSummary(buildPricingDisplaySummary({
+            pricing,
+            materialText: String(usedMaterialInfo?.displayText || '').trim(),
+            negotiation: negotiationState,
+          }));
         }
       } catch (error) {
         if (!cancelled && previewRequestRef.current === requestId) {
           setItemFinalPrice(0);
+          setPreviewFallbackBottomPrice(0);
           setPreviewMaterialDisplay('');
           setPreviewMaterialError(String(error?.message || 'Preview bahan gagal dihitung.'));
+          setPreviewMaterialWarning('');
+          setPreviewPricingSummary(null);
         }
       }
     }, 350);
@@ -3678,6 +4474,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     selectedProductRow,
     selectedCustomerId,
     qty,
+    negotiatedPriceInput,
     sizeWidthMeter,
     sizeLengthMeter,
     selectedFinishingIds,
@@ -3691,6 +4488,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     regularFinishingOptions,
     lbMaxFinishingOptions,
     productDetails,
+    selectedProductFixedSizeMode.enabled,
   ]);
 
   const resetTransaction = () => {
@@ -3700,11 +4498,13 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     setTransactionDate(formatDate(new Date()));
     setProductName('');
     setSelectedProductId(null);
+    setNegotiatedPriceInput('');
     setQty('1');
     setSizeWidthMeter('');
     setSizeLengthMeter('');
     setPreviewMaterialDisplay('');
     setPreviewMaterialError('');
+    setPreviewMaterialWarning('');
     setSelectedFinishingIds([]);
     setSelectedFinishingMataAyamQtyById({});
     setMataAyamIssueBadge({ visible: false, message: '' });
@@ -3748,12 +4548,12 @@ const SalesScreen = ({ currentUser, onLogout }) => {
 
     try {
       const customerId = await resolveCustomerId();
-      const { pricing } = await computePricingFromBackend(product, customerId);
+      const { pricing, stickerOrderingNotice } = await computePricingFromBackend(product, customerId);
       setProductName(buildSelectedProductLabel(product));
       setSelectedProductId(Number(product.id || 0) || null);
       openNotice(
         'Produk Valid',
-        `${product.name} valid. Preview backend: ${formatRupiah(pricing.grand_total || 0)}`,
+        `${product.name} valid. Preview backend: ${formatRupiah(pricing.grand_total || 0)}${stickerOrderingNotice ? `\n${stickerOrderingNotice}` : ''}`,
       );
     } catch (error) {
       const targetProduct = String(buildSelectedProductLabel(product) || product?.name || productName || '').trim();
@@ -3793,7 +4593,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
 
     const widthMeter = parseMeterValue(sizeWidthMeter);
     const lengthMeter = parseMeterValue(sizeLengthMeter);
-    if (widthMeter <= 0 || lengthMeter <= 0) {
+    if (!selectedProductFixedSizeMode.enabled && (widthMeter <= 0 || lengthMeter <= 0)) {
       openNotice('Validasi', 'L Mater dan P Mater wajib diisi dan lebih dari 0.');
       return;
     }
@@ -3814,7 +4614,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
 
     try {
       const customerId = await resolveCustomerId();
-      const { pricing, pricingPayload, productDetail, materialInfo, usedMaterialInfo, size } = await computePricingFromBackend(product, customerId);
+      const { pricing, pricingPayload, productDetail, materialInfo, usedMaterialInfo, size, stickerOrderingNotice } = await computePricingFromBackend(product, customerId);
       const targetProduct = String(buildSelectedProductLabel(product) || product?.name || productName || '').trim();
       const materialStockMessage = validateSelectedMaterialStock(usedMaterialInfo, targetProduct);
       if (materialStockMessage) {
@@ -3822,6 +4622,17 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         return;
       }
       const sourceMeta = toSourceMeta(productDetail || product);
+      const negotiationConfig = resolveA3NegotiationConfig(product, productDetail);
+      const negotiationState = resolveA3NegotiationState({
+        config: negotiationConfig,
+        qtyValue: qtyNumber,
+        negotiatedPriceInput,
+        fallbackBottomPrice: resolvePricingSubtotalPerUnit(pricing, qtyNumber),
+      });
+      if (negotiationState.isBlocking) {
+        openNotice('Aturan Negosiasi A3+', negotiationState.message);
+        return;
+      }
       const itemId = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
       const pageNumber = Math.max(Number(pages) || 1, 1);
       const materialId = Number(usedMaterialInfo?.primaryMaterialId || materialInfo?.primaryMaterialId || 0);
@@ -3858,6 +4669,9 @@ const SalesScreen = ({ currentUser, onLogout }) => {
               customer_category: String(pricing.rule?.customer_category || '').trim().toLowerCase() || null,
               billing_group: String(pricing.rule?.billing_group || '').trim().toUpperCase() || null,
               billing_min_length_m: Number(pricing.rule?.billing_min_length_m || 0) || null,
+              design_length_m: Number(pricing.rule?.design_length_m || pricing?.price_breakdown?.sticker_design_length_m || size.lengthMeter || 0) || null,
+              billed_length_m: Number(pricing.rule?.billed_length_m || pricing?.price_breakdown?.sticker_billed_length_m || 0) || null,
+              selected_width_m: Number(pricing.rule?.selected_width_m || pricing?.price_breakdown?.sticker_selected_roll_width_m || 0) || null,
             }
             : null,
           specs: {
@@ -3884,11 +4698,32 @@ const SalesScreen = ({ currentUser, onLogout }) => {
           },
         },
       };
+      if (negotiationState.isApplied && negotiationState.value > 0) {
+        backendItem.negotiated_price = roundMoney(negotiationState.value);
+        backendItem.bottom_price = roundMoney(negotiationState.bottomPrice);
+        backendItem.bottom_price_enabled = true;
+        backendItem.bottom_price_min_qty = negotiationState.minimumQty;
+      }
       const normalizedBackendItem = enforceDesignFirstFlow(backendItem);
 
-      const lineTotal = roundMoney(
-        (backendItem.subtotal || 0) + (backendItem.finishing_total || 0) + (backendItem.express_fee || 0),
-      );
+      const lineTotal = negotiationState.isApplied
+        ? roundMoney(
+          (Number(negotiationState.value || 0) * qtyNumber)
+          + Number(pricing?.finishing_total || 0)
+          + Number(pricing?.express_fee || 0),
+        )
+        : resolvePricingGrandTotal(pricing);
+      const itemPricingSummary = buildPricingDisplaySummary({
+        pricing,
+        materialText,
+        stickerRule: pricing?.rule && typeof pricing.rule === 'object'
+          ? pricing.rule
+          : null,
+        negotiation: negotiationState,
+      });
+      if (!itemPricingSummary.stickerNotice && stickerOrderingNotice) {
+        itemPricingSummary.stickerNotice = stickerOrderingNotice;
+      }
 
       setCartItems((prevItems) => [
         ...prevItems,
@@ -3903,11 +4738,13 @@ const SalesScreen = ({ currentUser, onLogout }) => {
           material: materialText,
           lineTotal,
           total: lineTotal,
+          pricingSummary: itemPricingSummary,
           backendItem: normalizedBackendItem,
         },
       ]);
 
       setQty('1');
+      setNegotiatedPriceInput('');
       setSizeWidthMeter('');
       setSizeLengthMeter('');
       setPages('1');
@@ -3947,9 +4784,20 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     });
   };
 
+  useEffect(() => {
+    if (!selectedProductFixedSizeMode.enabled) {
+      return;
+    }
+    if (sizeWidthMeter || sizeLengthMeter) {
+      setSizeWidthMeter('');
+      setSizeLengthMeter('');
+    }
+  }, [selectedProductFixedSizeMode.enabled, sizeWidthMeter, sizeLengthMeter]);
+
   const handleCancelItem = () => {
     setProductName('');
     setSelectedProductId(null);
+    setNegotiatedPriceInput('');
     setQty('1');
     setSizeWidthMeter('');
     setSizeLengthMeter('');
@@ -3958,6 +4806,12 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     setMataAyamIssueBadge({ visible: false, message: '' });
     setSelectedLbMaxProductId(null);
     setPages('1');
+    setItemFinalPrice(0);
+    setPreviewFallbackBottomPrice(0);
+    setPreviewMaterialDisplay('');
+    setPreviewMaterialError('');
+    setPreviewMaterialWarning('');
+    setPreviewPricingSummary(null);
   };
 
   const handleClearCart = () => {
@@ -3992,38 +4846,33 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       return null;
     }
 
-    const currentCustomerType = resolveCustomerCategoryCode(selectedCustomer, customerTypes);
-    if (currentCustomerType === 'reseller') {
-      const violation = cartItems.find((item) => {
-        const backendItem = item?.backendItem || {};
-        const snapshot = parseJsonObject(backendItem?.spec_snapshot) || {};
-        const productId = Number(backendItem?.product_id || 0);
-        const productRow = products.find((row) => Number(row?.id || 0) === productId) || null;
-        const sourceMeta = toSourceMeta(productRow);
-        const schema = String(snapshot?.sales_schema || sourceMeta?.sales_schema || '').trim().toLowerCase();
-        const stickerEnabled = schema === 'sticker' || Boolean(sourceMeta?.sticker_sales_enabled);
-        if (!stickerEnabled) {
-          return false;
-        }
-        const lengthMm = Number(backendItem?.input_height_mm || backendItem?.height_mm || backendItem?.internal_height_mm || 0);
-        const lengthM = lengthMm > 0 ? (lengthMm / 1000) : 0;
-        const stickerRule = snapshot?.sticker_rule && typeof snapshot.sticker_rule === 'object' ? snapshot.sticker_rule : {};
-        const minLengthM = Number(stickerRule?.billing_min_length_m || resolveStickerResellerMinimumLength(sourceMeta, null) || 0);
-        if (!(minLengthM > 0)) {
-          return false;
-        }
-        return lengthM > 0 && lengthM < minLengthM;
-      });
-      if (violation) {
-        const backendItem = violation?.backendItem || {};
-        const snapshot = parseJsonObject(backendItem?.spec_snapshot) || {};
-        const productName = String(violation?.product || snapshot?.draft_form?.product_name || 'Produk sticker');
-        const lengthMm = Number(backendItem?.input_height_mm || backendItem?.height_mm || backendItem?.internal_height_mm || 0);
-        const lengthM = lengthMm > 0 ? (lengthMm / 1000) : 0;
-        const minLengthM = Number(snapshot?.sticker_rule?.billing_min_length_m || 1);
-        openNotice('Aturan Pemesanan', buildStickerResellerMinimumMessage(productName, lengthM, minLengthM));
+    const negotiationViolation = cartItems.find((item) => {
+      const backendItem = item?.backendItem || {};
+      const negotiatedPrice = Number(backendItem?.negotiated_price || 0);
+      if (!(negotiatedPrice > 0)) {
+        return false;
+      }
+      const minimumQty = Math.max(0, Number(backendItem?.bottom_price_min_qty || 0) || 0);
+      const bottomPrice = roundMoney(Number(backendItem?.bottom_price || 0));
+      const itemQty = Math.max(1, Number(item?.qty || backendItem?.qty || 1) || 1);
+      if (minimumQty > 0 && itemQty < minimumQty) {
+        return true;
+      }
+      return bottomPrice > 0 && negotiatedPrice < bottomPrice;
+    });
+    if (negotiationViolation) {
+      const backendItem = negotiationViolation?.backendItem || {};
+      const minimumQty = Math.max(0, Number(backendItem?.bottom_price_min_qty || 0) || 0);
+      const bottomPrice = roundMoney(Number(backendItem?.bottom_price || 0));
+      const negotiatedPrice = roundMoney(Number(backendItem?.negotiated_price || 0));
+      const itemQty = Math.max(1, Number(negotiationViolation?.qty || backendItem?.qty || 1) || 1);
+      const productLabel = String(negotiationViolation?.product || 'Produk A3+').trim();
+      if (minimumQty > 0 && itemQty < minimumQty) {
+        openNotice('Aturan Negosiasi A3+', `${productLabel}: minimal qty untuk negosiasi adalah ${minimumQty}. Qty saat ini ${itemQty}.`);
         return null;
       }
+      openNotice('Aturan Negosiasi A3+', `${productLabel}: harga negosiasi ${formatRupiah(negotiatedPrice)} tidak boleh di bawah bottom ${formatRupiah(bottomPrice)}.`);
+      return null;
     }
 
     const canonicalMethodLabel = normalizePaymentMethodLabel(paymentMethod);
@@ -4056,6 +4905,8 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         const originalFinishing = Number(item.backendItem.finishing_total || 0);
         const originalExpress = Number(item.backendItem.express_fee || 0);
         const adjustedSubtotal = Math.max(0, roundMoney(adjustedLine - originalFinishing - originalExpress));
+        const hasNegotiatedPrice = Number(item?.backendItem?.negotiated_price || 0) > 0;
+        const itemQty = Math.max(1, Number(item?.qty || item?.backendItem?.qty || 1) || 1);
         const currentSpec = parseJsonObject(item?.backendItem?.spec_snapshot) || {};
         const currentDraftForm = parseJsonObject(currentSpec?.draft_form) || {};
         const currentSpecs = parseJsonObject(currentSpec?.specs) || {};
@@ -4102,6 +4953,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
 
         return enforceDesignFirstFlow({
           ...item.backendItem,
+          ...(hasNegotiatedPrice ? { negotiated_price: roundMoney(adjustedSubtotal / itemQty) } : {}),
           subtotal: adjustedSubtotal,
           finishing_total: originalFinishing,
           express_fee: originalExpress,
@@ -4283,6 +5135,25 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       }
       const validationMessage = String(formatBackendValidationError(error) || '').trim();
       const lowerValidationMessage = validationMessage.toLowerCase();
+      const isNegotiationValidation = lowerValidationMessage.includes('negosiasi')
+        || lowerValidationMessage.includes('harga bottom')
+        || lowerValidationMessage.includes('minimum_qty')
+        || lowerValidationMessage.includes('bottom_price');
+      if (isNegotiationValidation) {
+        const productName = String(error?.body?.product_name || failedItemName || 'Produk A3+').trim();
+        const minimumQty = Math.max(0, Number(error?.body?.minimum_qty || 0) || 0);
+        const bottomPrice = roundMoney(Number(error?.body?.bottom_price || 0));
+        if (minimumQty > 0) {
+          openNotice('Aturan Negosiasi A3+', `${productName}: minimal pembelian untuk negosiasi adalah ${minimumQty}.`);
+          return null;
+        }
+        if (bottomPrice > 0) {
+          openNotice('Aturan Negosiasi A3+', `${productName}: harga negosiasi tidak boleh di bawah ${formatRupiah(bottomPrice)}.`);
+          return null;
+        }
+        openNotice('Aturan Negosiasi A3+', validationMessage || 'Negosiasi item A3+ belum sesuai aturan backend.');
+        return null;
+      }
       const isBankAccountValidation = lowerValidationMessage.includes('bank_account_id')
         || lowerValidationMessage.includes('bank penampungan')
         || lowerValidationMessage.includes('akun bank penampungan')
@@ -4567,6 +5438,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         showPages,
         productionStatus: String(item?.production_status || ''),
         productionStatusLabel: formatProductionStatusLabel(item?.production_status),
+        pricingSummary,
         lineTotal,
         note: toLabel(
           item?.notes,
@@ -4984,15 +5856,23 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                 onSelectProductVariant={handleSelectProductVariant}
                 qty={qty}
                 onChangeQty={(value) => setQty(sanitizeQtyInput(value))}
+                negotiatedPriceInput={negotiatedPriceInput}
+                onChangeNegotiatedPrice={(value) => setNegotiatedPriceInput(sanitizeCurrencyInput(value))}
                 sizeWidthMeter={sizeWidthMeter}
                 onChangeSizeWidthMeter={(value) => setSizeWidthMeter(sanitizeDecimalInput(value))}
                 sizeLengthMeter={sizeLengthMeter}
                 onChangeSizeLengthMeter={(value) => setSizeLengthMeter(sanitizeDecimalInput(value))}
+                isFixedSizeProduct={selectedProductFixedSizeMode.enabled}
+                fixedSizeLabel={selectedProductFixedSizeMode.label}
+                fixedSizeHint={selectedProductFixedSizeMode.helperText}
+                hideFinishingField={selectedProductFixedSizeMode.enabled}
                 selectedFinishingIds={selectedFinishingIds}
                 selectedFinishingMataAyamQtyById={selectedFinishingMataAyamQtyById}
                 finishingSummary={selectedFinishingDisplay}
                 finishingOptions={regularFinishingOptions}
+                finishingAvailabilityMessage={finishingAvailabilityMessage}
                 isPrintingFinishingMode={isPrintingProductType(selectedProductType)}
+                isStrictStickerFinishingMode={selectedIsStrictSticker}
                 onSaveSelectedFinishings={handleSaveSelectedFinishings}
                 onSaveSelectedFinishingMataAyamQtyById={handleSaveSelectedFinishingMataAyamQtyById}
                 selectedLbMaxProductId={selectedLbMaxProductId}
@@ -5004,10 +5884,13 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                 onChangePages={(value) => setPages(sanitizeNumericInput(value))}
                 materialDisplay={resolvedPreviewMaterialDisplay}
                 materialError={previewMaterialError}
+                materialWarning={previewMaterialWarning}
                 mataAyamIssueBadge={mergedMataAyamIssueBadge}
                 onValidateProduct={handleValidateProduct}
                 onAddToCart={handleAddToCart}
                 itemFinalPrice={itemFinalPrice}
+                pricingSummary={previewPricingSummary}
+                negotiationNotice={selectedA3NegotiationState}
                 onCancelItem={handleCancelItem}
                 onClearCart={handleClearCart}
               />
@@ -5440,6 +6323,20 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                     <Text style={styles.invoiceItemMeta}>Bahan: {item.materialText}</Text>
                     <Text style={styles.invoiceItemMeta}>Finishing: {item.finishingText}</Text>
                     <Text style={styles.invoiceItemMeta}>LB Max: {item.lbMaxText}</Text>
+                    {item?.pricingSummary?.billingGroup ? (
+                      <Text style={styles.invoiceItemMeta}>Rule Sticker: {item.pricingSummary.billingGroup}{item.pricingSummary.rollWidth > 0 ? ` | Lebar Roll: ${item.pricingSummary.rollWidth} m` : ''}</Text>
+                    ) : null}
+                    {item?.pricingSummary?.stickerNotice ? (
+                      <Text style={styles.invoiceItemMeta}>{item.pricingSummary.stickerNotice}</Text>
+                    ) : null}
+                    {item?.pricingSummary?.bundleActive ? (
+                      <>
+                        <Text style={styles.invoiceItemMeta}>Finishing: {formatRupiah(item.pricingSummary.finishingBeforeDiscount)}</Text>
+                        <Text style={styles.invoiceItemMeta}>Diskon Bundle: {formatRupiah(item.pricingSummary.bundleDiscount)}</Text>
+                        <Text style={styles.invoiceItemMeta}>Finishing Final: {formatRupiah(item.pricingSummary.finishingFinal)}</Text>
+                        <Text style={styles.invoiceItemMeta}>Total Final: {formatRupiah(item.pricingSummary.printSubtotal || 0)} + {formatRupiah(item.pricingSummary.finishingBeforeDiscount)} - {formatRupiah(item.pricingSummary.bundleDiscount)} = {formatRupiah(item.lineTotal)}</Text>
+                      </>
+                    ) : null}
                     <Text style={styles.invoiceItemMeta}>Catatan: {item.note}</Text>
                     <Text style={styles.invoiceItemTotal}>Total Item: {formatRupiah(item.lineTotal)}</Text>
                   </View>
@@ -6160,6 +7057,23 @@ const styles = StyleSheet.create({
 });
 
 export default SalesScreen;
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 

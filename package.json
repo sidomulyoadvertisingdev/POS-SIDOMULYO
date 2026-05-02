@@ -1,22 +1,59 @@
 {
-  "name": "pos-kasir-expo",
-  "version": "1.0.0",
-  "main": "index.js",
-  "scripts": {
-    "start": "expo start",
-    "android": "expo start --android",
-    "ios": "expo start --ios",
-    "web": "expo start --web"
-  },
-  "dependencies": {
-    "@expo-google-fonts/poppins": "^0.4.1",
-    "expo": "~54.0.33",
-    "expo-font": "^55.0.6",
-    "expo-status-bar": "~3.0.9",
-    "react": "19.1.0",
-    "react-dom": "19.1.0",
-    "react-native": "0.81.5",
-    "react-native-web": "^0.21.0"
-  },
-  "private": true
+    "name":  "pos-kasir-expo",
+    "version":  "1.5.6",
+    "main":  "index.js",
+    "scripts":  {
+                    "start":  "expo start",
+                    "android":  "expo start --android",
+                    "ios":  "expo start --ios",
+                    "web":  "expo start --web",
+                    "build:web":  "npx expo export --platform web --output-dir dist-web",
+                    "desktop":  "npm run build:web \u0026\u0026 electron electron/main.js",
+                    "build:win":  "npm run build:web \u0026\u0026 electron-builder --win nsis"
+                },
+    "dependencies":  {
+                         "@expo-google-fonts/poppins":  "^0.4.1",
+                         "expo":  "~54.0.33",
+                         "expo-font":  "^55.0.6",
+                         "expo-status-bar":  "~3.0.9",
+                         "react":  "19.1.0",
+                         "react-dom":  "19.1.0",
+                         "react-native":  "0.81.5",
+                         "react-native-web":  "^0.21.0"
+                     },
+    "devDependencies":  {
+                            "electron":  "^37.2.0",
+                            "electron-builder":  "^26.0.12"
+                        },
+    "build":  {
+                  "appId":  "com.sidomulyo.poskasir",
+                  "productName":  "POS Kasir",
+                  "directories":  {
+                                      "output":  "release"
+                                  },
+                  "files":  [
+                                "dist-web/**/*",
+                                "electron/**/*",
+                                "assets/icon.png",
+                                "assets/Logo-SM.ico",
+                                "package.json"
+                            ],
+                  "extraMetadata":  {
+                                        "main":  "electron/main.js"
+                                    },
+                  "win":  {
+                              "target":  [
+                                             "nsis"
+                                         ],
+                              "icon":  "assets/Logo-SM.ico",
+                              "signAndEditExecutable":  false
+                          },
+                  "nsis":  {
+                               "oneClick":  false,
+                               "allowToChangeInstallationDirectory":  true,
+                               "createDesktopShortcut":  true,
+                               "createStartMenuShortcut":  true
+                           }
+              },
+    "private":  true
 }

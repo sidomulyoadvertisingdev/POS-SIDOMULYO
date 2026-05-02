@@ -1,3 +1,5 @@
+import { appEnv } from '../config/appEnv';
+
 const normalizeText = (value) => String(value || '').trim().toLowerCase();
 const toPositiveInt = (value) => {
   const parsed = Number.parseInt(String(value || '').trim(), 10);
@@ -63,12 +65,12 @@ export const mapPaymentMethodToBackend = (paymentMethod) => {
 export const mapPaymentMethodToBankAccountId = (paymentMethod) => {
   const method = mapPaymentMethodToBackend(paymentMethod);
   const byMethod = {
-    cash: toPositiveInt(process.env.EXPO_PUBLIC_BANK_ACCOUNT_CASH_ID),
-    transfer: toPositiveInt(process.env.EXPO_PUBLIC_BANK_ACCOUNT_TRANSFER_ID),
-    qris: toPositiveInt(process.env.EXPO_PUBLIC_BANK_ACCOUNT_QRIS_ID),
-    card: toPositiveInt(process.env.EXPO_PUBLIC_BANK_ACCOUNT_CARD_ID),
+    cash: toPositiveInt(appEnv.bankAccountCashId),
+    transfer: toPositiveInt(appEnv.bankAccountTransferId),
+    qris: toPositiveInt(appEnv.bankAccountQrisId),
+    card: toPositiveInt(appEnv.bankAccountCardId),
   };
-  const fallback = toPositiveInt(process.env.EXPO_PUBLIC_BANK_ACCOUNT_DEFAULT_ID);
+  const fallback = toPositiveInt(appEnv.bankAccountDefaultId);
   return byMethod[method] || fallback || 0;
 };
 

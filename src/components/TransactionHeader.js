@@ -11,6 +11,20 @@ import {
 } from 'react-native';
 
 const normalizeText = (value) => String(value || '').trim().toLowerCase();
+const toCustomerTypeCode = (value) => {
+  const text = normalizeText(value);
+  if (['umum', 'retail', 'eceran'].includes(text)) return 'umum';
+  if (['reseller', 'agen'].includes(text)) return 'reseller';
+  if (['corporate', 'perusahaan', 'company'].includes(text)) return 'corporate';
+  return text;
+};
+const toCustomerTypeLabel = (value) => {
+  const code = toCustomerTypeCode(value);
+  if (code === 'umum') return 'Retail';
+  if (code === 'reseller') return 'Reseller';
+  if (code === 'corporate') return 'Corporate';
+  return String(value || '').trim() || 'Tanpa Tipe';
+};
 
 const TransactionHeader = ({
   noteNumber,
@@ -57,6 +71,25 @@ const TransactionHeader = ({
     () => (Array.isArray(customerTypes) ? customerTypes : []),
     [customerTypes],
   );
+  const resolveCustomerTypeLabel = (customer) => {
+    const direct = toCustomerTypeLabel(
+      customer?.label
+      || customer?.customer_label
+      || customer?.customer_type
+      || customer?.customer_type_name
+      || customer?.type_name
+      || '',
+    );
+    if (direct !== 'Tanpa Tipe') {
+      return direct;
+    }
+    const selectedTypeId = Number(customer?.customer_type_id || customer?.type_id || 0);
+    if (selectedTypeId > 0) {
+      const matchedType = filteredTypes.find((row) => Number(row?.id || 0) === selectedTypeId);
+      return toCustomerTypeLabel(matchedType?.code || matchedType?.name || '');
+    }
+    return 'Retail';
+  };
 
   const handleSaveCustomer = async () => {
     if (isSavingCustomer) {
@@ -115,9 +148,16 @@ const TransactionHeader = ({
             onPress={() => setIsCustomerModalOpen(true)}
             disabled={!backendReady}
           >
-            <Text style={styles.selectorText}>
-              {selectedCustomer?.name || 'Pilih customer'}
-            </Text>
+            <View>
+              <Text style={styles.selectorText}>
+                {selectedCustomer?.name || 'Pilih customer'}
+              </Text>
+              {selectedCustomer ? (
+                <Text style={styles.selectorHintText}>
+                  {resolveCustomerTypeLabel(selectedCustomer)}
+                </Text>
+              ) : null}
+            </View>
           </Pressable>
           <Pressable
             style={[styles.addButton, !backendReady ? styles.selectorDisabled : null]}
@@ -161,6 +201,7 @@ const TransactionHeader = ({
                   }}
                 >
                   <Text style={styles.listItemText}>{item.name || '-'}</Text>
+                  <Text style={styles.listItemRole}>{resolveCustomerTypeLabel(item)}</Text>
                   {item.phone ? <Text style={styles.listItemMeta}>{item.phone}</Text> : null}
                 </Pressable>
               ))}
@@ -354,6 +395,12 @@ const styles = StyleSheet.create({
     fontSize: 12,
     color: '#1e1e1e',
   },
+  selectorHintText: {
+    fontSize: 11,
+    color: '#4d5b7c',
+    marginTop: 2,
+    fontWeight: '700',
+  },
   addButton: {
     width: 28,
     height: 26,
@@ -419,6 +466,12 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: '700',
     color: '#1f1f1f',
+  },
+  listItemRole: {
+    fontSize: 11,
+    color: '#1846a3',
+    marginTop: 2,
+    fontWeight: '700',
   },
   listItemMeta: {
     fontSize: 11,
