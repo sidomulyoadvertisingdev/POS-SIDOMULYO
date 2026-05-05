@@ -83,13 +83,42 @@ Catatan versi:
 2. Label versi di UI sekarang otomatis ikut `package.json` jika `EXPO_PUBLIC_APP_VERSION` dikosongkan.
 3. Jadi sebelum rilis, cukup naikkan versi di `package.json`.
 
-## 6. Publish file release ke GitHub Pages
+## 6. Build site GitHub Pages
+
+Kalau Anda ingin menyiapkan hasil yang siap dipublish ke GitHub Pages, gunakan:
+
+```powershell
+npm run build:pages
+```
+
+Perintah ini akan:
+
+1. build web Expo ke `dist-web`
+2. build release Windows ke `release/velopack`
+3. menggabungkan web app + file Velopack ke `release/pages-site`
+4. menambahkan file `.nojekyll` dan `404.html` untuk GitHub Pages
+5. menyesuaikan asset web ke base path repo `POS-SIDOMULYO`
+
+Output publish GitHub Pages akan ada di:
+
+```text
+release/pages-site
+```
+
+Isi pentingnya biasanya:
+
+1. `index.html`
+2. `releases.win.json`
+3. paket `.nupkg`
+4. installer `.exe`
+
+## 7. Publish file release ke GitHub Pages
 
 Ada 2 cara:
 
 ### Opsi A. Manual
 
-Upload seluruh isi folder `release/velopack` ke source GitHub Pages pada repo `sidomulyoadvertisingdev/POS-SIDOMULYO`.
+Upload seluruh isi folder `release/pages-site` ke source GitHub Pages pada repo `sidomulyoadvertisingdev/POS-SIDOMULYO`.
 
 ### Opsi B. Otomatis via GitHub Actions
 
@@ -111,9 +140,10 @@ git push origin v1.5.10
 
 Workflow itu akan:
 
-1. build release Windows
-2. mengambil isi `release/velopack`
-3. publish hasilnya ke GitHub Pages
+1. menjalankan `npm ci`
+2. build site GitHub Pages lewat `npm run build:pages`
+3. mengambil isi `release/pages-site`
+4. publish hasilnya ke GitHub Pages
 
 URL hasil publish yang akan dipakai updater:
 
@@ -123,7 +153,36 @@ https://sidomulyoadvertisingdev.github.io/POS-SIDOMULYO/releases.win.json
 
 File itu harus bisa diakses langsung dari komputer client.
 
-## 7. Cara kerja update otomatis di client
+## 8. Checklist rilis singkat
+
+Sebelum push:
+
+1. pastikan `.env` sudah mengarah ke backend produksi
+2. naikkan `version` di `package.json`
+3. jalankan `npm ci`
+4. jalankan `npm run build:pages`
+5. cek folder `release/pages-site` terisi `index.html` dan `releases.win.json`
+
+Sesudah push:
+
+1. buka `Actions` repo
+2. pastikan workflow `Publish Velopack Pages` status hijau
+3. buka `https://sidomulyoadvertisingdev.github.io/POS-SIDOMULYO/`
+4. cek `https://sidomulyoadvertisingdev.github.io/POS-SIDOMULYO/releases.win.json`
+
+Kalau gagal di `npm ci`:
+
+1. jalankan `npm install`
+2. commit perubahan `package-lock.json`
+3. push ulang
+
+Kalau web tampil `404`:
+
+1. cek `Settings > Pages`
+2. pastikan `Source` memakai `GitHub Actions`
+3. pastikan workflow terbaru sudah selesai dan bukan run lama
+
+## 9. Cara kerja update otomatis di client
 
 Setelah aplikasi versi baru dirilis dan file release baru diupload:
 
@@ -132,7 +191,7 @@ Setelah aplikasi versi baru dirilis dan file release baru diupload:
 3. setelah selesai, user akan melihat prompt restart
 4. kalau user pilih `Nanti`, update tetap akan terpasang saat aplikasi dibuka ulang berikutnya
 
-## 8. Build installer lama tanpa Velopack
+## 10. Build installer lama tanpa Velopack
 
 Kalau Anda masih butuh installer NSIS lama:
 
@@ -140,7 +199,7 @@ Kalau Anda masih butuh installer NSIS lama:
 npm run build:win:legacy
 ```
 
-## 9. Supaya installer tidak mudah dicurigai Windows
+## 11. Supaya installer tidak mudah dicurigai Windows
 
 Hal yang paling menentukan tetap `code signing certificate`.
 
@@ -151,6 +210,6 @@ Hal yang paling menentukan tetap `code signing certificate`.
 
 Tanpa code signing, Windows tetap bisa menampilkan `Unknown Publisher` walaupun metadata aplikasi sudah rapi.
 
-## 10. Catatan backend
+## 12. Catatan backend
 
 Nilai `EXPO_PUBLIC_*` ikut dibake saat `build:web`, jadi sebelum build release pastikan `.env` sudah mengarah ke endpoint produksi yang benar.
