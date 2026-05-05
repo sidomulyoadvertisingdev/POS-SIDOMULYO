@@ -34,6 +34,14 @@ jobs:
         with:
           dotnet-version: '8.0.x'
 
+      - name: Install Velopack CLI
+        run: dotnet tool install -g vpk --version 0.0.1589-ga2c5a97
+
+      - name: Add .NET tools to PATH
+        shell: pwsh
+        run: |
+          "$env:USERPROFILE\.dotnet\tools" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
       - name: Install dependencies
         run: npm install
 

@@ -22,6 +22,16 @@ const velopackVersion = String(
 
 const commandName = (base) => (process.platform === 'win32' ? `${base}.cmd` : base);
 
+const hasCommand = (command, args = ['--version']) => {
+  const result = spawnSync(command, args, {
+    cwd: projectRoot,
+    stdio: 'ignore',
+    shell: false,
+  });
+
+  return result.status === 0;
+};
+
 const run = (command, args, options = {}) => {
   console.log(`\n> ${command} ${args.join(' ')}`);
 
@@ -52,21 +62,36 @@ const ensureConfig = () => {
 };
 
 const ensureDnxInstalled = () => {
-  const command = process.platform === 'win32' ? 'where.exe' : 'which';
-  const target = process.platform === 'win32' ? 'dnx.exe' : 'dnx';
-  const result = spawnSync(command, [target], {
-    cwd: projectRoot,
-    stdio: 'ignore',
-    shell: false,
-  });
-
-  if (result.status === 0) {
+  if (hasCommand('dnx')) {
     return;
   }
 
-  throw new Error(
-    'Perintah "dnx" tidak ditemukan. Install .NET SDK terlebih dahulu, lalu jalankan lagi build Velopack ini.'
-  );
+  if (hasCommand(commandName('vpk'))) {
+    return;
+  }
+
+  throw new Error([
+    'Perintah "dnx" atau "vpk" tidak ditemukan.',
+    'Install .NET SDK lalu jalankan "dotnet tool install -g vpk" atau gunakan "dnx vpk --version <versi>".',
+  ].join(' '));
+};
+
+const getVelopackCommand = () => {
+  if (hasCommand('dnx')) {
+    return {
+      command: 'dnx',
+      args: ['vpk', '--version', velopackVersion],
+    };
+  }
+
+  if (hasCommand(commandName('vpk'))) {
+    return {
+      command: commandName('vpk'),
+      args: [],
+    };
+  }
+
+  throw new Error('CLI Velopack tidak ditemukan.');
 };
 
 const main = () => {
@@ -81,10 +106,10 @@ const main = () => {
 
   fs.mkdirSync(outputDir, { recursive: true });
 
-  run('dnx', [
-    'vpk',
-    '--version',
-    velopackVersion,
+  const velopackCli = getVelopackCommand();
+
+  run(velopackCli.command, [
+    ...velopackCli.args,
     'pack',
     '--packId',
     packId,
