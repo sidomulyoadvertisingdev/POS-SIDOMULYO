@@ -1,7 +1,22 @@
-const { app, BrowserWindow, nativeImage } = require('electron');
+const { app, BrowserWindow, dialog, nativeImage } = require('electron');
 const fs = require('fs');
 const http = require('http');
 const path = require('path');
+const { UpdateManager, VelopackApp } = require('velopack');
+const {
+  autoCheckDelayMs,
+  isAutoUpdateEnabled,
+  updateSourceUrl,
+} = require('./update-config');
+
+VelopackApp.build()
+  .setAutoApplyOnStartup(true)
+  .setLogger((level, message) => {
+    if (process.env.NODE_ENV !== 'production') {
+      console.log(`[velopack:${level}] ${message}`);
+    }
+  })
+  .run();
 
 const iconPath = path.join(__dirname, '..', 'assets', 'icon.png');
 const appRootPath = app.getAppPath();
@@ -24,6 +39,7 @@ const MIME_TYPES = {
 };
 
 let localServer = null;
+let updateCheckStarted = false;
 
 const toSafeAssetPath = (requestUrl) => {
   const pathname = decodeURIComponent(new URL(requestUrl, 'http://127.0.0.1').pathname);
@@ -86,10 +102,98 @@ const createMainWindow = async () => {
   });
 
   mainWindow.loadURL(appUrl);
+  return mainWindow;
+};
+
+const canUseAutoUpdate = () => (
+  process.platform === 'win32'
+  && app.isPackaged
+  && isAutoUpdateEnabled
+  && Boolean(updateSourceUrl)
+);
+
+const createUpdateManager = () => {
+  if (!canUseAutoUpdate()) {
+    return null;
+  }
+
+  return new UpdateManager(updateSourceUrl);
+};
+
+const promptToRestartForUpdate = async (mainWindow, updateManager, updateInfo) => {
+  const version = String(
+    updateInfo?.TargetFullRelease?.Version
+    || updateInfo?.Version
+    || ''
+  ).trim();
+
+  const message = version
+    ? `Update versi ${version} sudah siap dipasang.`
+    : 'Update terbaru sudah siap dipasang.';
+
+  const detail = [
+    'Aplikasi perlu restart untuk menyelesaikan update otomatis.',
+    'Jika pilih "Nanti", update akan tetap terpasang saat aplikasi dibuka ulang berikutnya.',
+  ].join(' ');
+
+  const dialogWindow = mainWindow && !mainWindow.isDestroyed()
+    ? mainWindow
+    : undefined;
+
+  const { response } = await dialog.showMessageBox(dialogWindow, {
+    type: 'info',
+    buttons: ['Restart Sekarang', 'Nanti'],
+    defaultId: 0,
+    cancelId: 1,
+    title: 'Update Aplikasi',
+    message,
+    detail,
+    noLink: true,
+  });
+
+  if (response !== 0) {
+    return;
+  }
+
+  updateManager.waitExitThenApplyUpdate(updateInfo, false, true);
+  app.quit();
+};
+
+const checkForUpdatesInBackground = async (mainWindow) => {
+  if (updateCheckStarted) {
+    return;
+  }
+
+  updateCheckStarted = true;
+
+  let updateManager = null;
+
+  try {
+    updateManager = createUpdateManager();
+    if (!updateManager) {
+      return;
+    }
+
+    const updateInfo = await updateManager.checkForUpdatesAsync();
+    if (!updateInfo) {
+      return;
+    }
+
+    await updateManager.downloadUpdateAsync(updateInfo);
+    await promptToRestartForUpdate(mainWindow, updateManager, updateInfo);
+  } catch (error) {
+    console.error('[velopack] gagal memeriksa update otomatis:', error);
+  }
 };
 
 app.whenReady().then(async () => {
-  await createMainWindow();
+  const mainWindow = await createMainWindow();
+
+  if (canUseAutoUpdate()) {
+    setTimeout(() => {
+      checkForUpdatesInBackground(mainWindow);
+    }, autoCheckDelayMs);
+  }
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {

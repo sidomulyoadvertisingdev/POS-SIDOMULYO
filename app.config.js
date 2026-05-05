@@ -1,6 +1,8 @@
 const appJson = require('./app.json');
+const packageJson = require('./package.json');
 
 const trimString = (value) => String(value || '').trim();
+const resolveAppVersion = () => trimString(process.env.EXPO_PUBLIC_APP_VERSION) || trimString(packageJson.version);
 
 module.exports = () => ({
   ...appJson,
@@ -12,7 +14,7 @@ module.exports = () => ({
       erpEmail: trimString(process.env.EXPO_PUBLIC_ERP_EMAIL),
       erpPassword: String(process.env.EXPO_PUBLIC_ERP_PASSWORD || ''),
       erpToken: trimString(process.env.EXPO_PUBLIC_ERP_TOKEN),
-      appVersion: trimString(process.env.EXPO_PUBLIC_APP_VERSION),
+      appVersion: resolveAppVersion(),
       bankAccountCashId: trimString(process.env.EXPO_PUBLIC_BANK_ACCOUNT_CASH_ID),
       bankAccountTransferId: trimString(process.env.EXPO_PUBLIC_BANK_ACCOUNT_TRANSFER_ID),
       bankAccountQrisId: trimString(process.env.EXPO_PUBLIC_BANK_ACCOUNT_QRIS_ID),
