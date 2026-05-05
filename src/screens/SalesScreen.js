@@ -61,6 +61,7 @@ import {
   renderReceiptText,
   writeHtmlToPrintWindow,
 } from '../printing';
+const { buildProductPickerTree, hasA3Token } = require('../utils/productPickerTree');
 
 const formatDate = (date) => {
   return date.toLocaleDateString('id-ID', {
@@ -893,13 +894,37 @@ const calculateDraftItemsTotal = (items = []) => {
     return 0;
   }
   return roundMoney(
-    items.reduce((sum, item) => {
-      const subtotal = Number(item?.subtotal || item?.line_total || item?.total || 0);
-      const finishingTotal = Number(item?.finishing_total || 0);
-      const expressFee = Number(item?.express_fee || 0);
-      return sum + subtotal + finishingTotal + expressFee;
-    }, 0),
+    items.reduce((sum, item) => sum + resolveItemGrandTotal(item), 0),
   );
+};
+const resolveItemGrandTotal = (item, pricingSummaryInput = null) => {
+  const directFrontendTotal = Number(item?.lineTotal ?? 0) || 0;
+  if (directFrontendTotal > 0) {
+    return roundMoney(directFrontendTotal);
+  }
+
+  const directBackendTotal = Number(
+    item?.line_total
+    ?? item?.grand_total
+    ?? item?.final_total
+    ?? 0,
+  ) || 0;
+  if (directBackendTotal > 0) {
+    return roundMoney(directBackendTotal);
+  }
+
+  const pricingSummary = pricingSummaryInput && typeof pricingSummaryInput === 'object'
+    ? pricingSummaryInput
+    : null;
+  const summaryGrandTotal = Number(pricingSummary?.grandTotal || 0) || 0;
+  if (summaryGrandTotal > 0) {
+    return roundMoney(summaryGrandTotal);
+  }
+
+  const subtotal = Number(item?.subtotal ?? item?.total ?? 0) || 0;
+  const finishingTotal = Number(item?.finishing_total || 0) || 0;
+  const expressFee = Number(item?.express_fee || 0) || 0;
+  return roundMoney(subtotal + finishingTotal + expressFee);
 };
 const enforceDesignFirstFlow = (backendItem = {}) => {
   const requiresProduction = String(backendItem?.production_status || '').toLowerCase() !== 'not_required'
@@ -983,7 +1008,7 @@ const findReprintSpecSnapshot = ({ orderId, invoiceNo }) => {
   return null;
 };
 const getDefaultPrinterProfile = () => normalizePrinterProfile({
-  ...DEFAULT_PRINTER_PROFILES.browserFallback,
+  ...DEFAULT_PRINTER_PROFILES.thermal80,
 });
 const loadStoredPrinterProfile = () => {
   if (canUseLocalStorage()) {
@@ -1392,6 +1417,22 @@ const buildSelectedProductLabel = (row) => {
   }
   return variant || family || '';
 };
+const resolveReceiptProductName = (row, fallback = '') => toLabel(
+  row?.productBaseName,
+  row?.base_product_name,
+  row?.source_product_name,
+  row?.source_parent_product_name,
+  row?.parent_product_name,
+  row?.parent_name,
+  row?.product?.name,
+  row?.sourceProduct?.name,
+  row?.source_product?.name,
+  row?.productName,
+  row?.product,
+  row?.product_name,
+  row?.name,
+  fallback,
+);
 const DEFAULT_CUSTOMER_TYPES = [
   { id: -1, name: 'Pelanggan Umum', code: 'umum' },
   { id: -2, name: 'Reseller', code: 'reseller' },
@@ -1898,10 +1939,6 @@ const toSourceMeta = (row) => {
   const sourceProduct = toSourceProduct(row);
   const meta = sourceProduct?.meta;
   return meta && typeof meta === 'object' && !Array.isArray(meta) ? meta : {};
-};
-const hasA3Token = (value) => {
-  const text = normalizeText(value).replace(/\s+/g, ' ');
-  return text.includes('a3+') || text.includes('a3 plus') || text.includes('a3plus') || /\ba3\b/.test(text);
 };
 const resolveFixedSizeA3Mode = (product, productDetail = null) => {
   const explicitA3Plus = [
@@ -2981,12 +3018,13 @@ const SalesScreen = ({ currentUser, onLogout }) => {
   }, [activePrinterProfile]);
 
   const handlePrinterProfileChange = (nextProfile) => {
+    const defaultProfile = getDefaultPrinterProfile();
     const normalized = normalizePrinterProfile({
       ...createPrinterProfile({
-        id: activePrinterProfile?.id || DEFAULT_PRINTER_PROFILES.browserFallback.id,
-        name: activePrinterProfile?.name || DEFAULT_PRINTER_PROFILES.browserFallback.name,
-        type: activePrinterProfile?.type || DEFAULT_PRINTER_PROFILES.browserFallback.type,
-        connection: activePrinterProfile?.connection || DEFAULT_PRINTER_PROFILES.browserFallback.connection,
+        id: activePrinterProfile?.id || defaultProfile.id,
+        name: activePrinterProfile?.name || defaultProfile.name,
+        type: activePrinterProfile?.type || defaultProfile.type,
+        connection: activePrinterProfile?.connection || defaultProfile.connection,
       }),
       ...(nextProfile || {}),
     });
@@ -3005,13 +3043,13 @@ const SalesScreen = ({ currentUser, onLogout }) => {
   };
   const handleRestoreRecommendedPrinterDefaults = () => {
     const recommended = normalizePrinterProfile({
-      ...DEFAULT_PRINTER_PROFILES.browserFallback,
-      name: 'Browser Print',
+      ...getDefaultPrinterProfile(),
+      name: 'Thermal 80mm',
     });
     setPrinterProfile(recommended);
     setHasSavedPrinterProfile(false);
     persistPrinterProfile(null);
-    openNotice('Printer Kasir', 'Form printer dikembalikan ke mode browser standar.', null, {
+    openNotice('Printer Kasir', 'Form printer dikembalikan ke default Thermal 80mm.', null, {
       autoCloseMs: 2200,
     });
   };
@@ -3424,7 +3462,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       notes: paymentNotes || '-',
       items: cartItems.map((item, index) => ({
         no: index + 1,
-        product: String(item?.product || '-'),
+        product: String(resolveReceiptProductName(item, item?.product || '-') || '-'),
         qty: Number(item?.qty || 0),
         price: Number(
           item?.pricingSummary?.grandTotal
@@ -3589,7 +3627,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       },
       items: Array.isArray(snapshot?.items)
         ? snapshot.items.map((item) => ({
-          name: String(item?.product || '-'),
+          name: String(resolveReceiptProductName(item, item?.product || '-') || '-'),
           qty: Number(item?.qty || 0) || 0,
           price: Number(item?.price || 0) || 0,
           size: String(item?.size || '-'),
@@ -3625,14 +3663,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
 
   const mapReceiptItemFromSource = (item, index = 0) => {
     const restored = restoreDraftItemDisplay(item, materialMapById, finishingNameMapById);
-    const productName = toLabel(
-      item?.productName,
-      item?.product,
-      item?.product_name,
-      item?.product?.name,
-      item?.name,
-      `Item #${index + 1}`,
-    );
+    const productName = resolveReceiptProductName(item, `Item #${index + 1}`);
     const qty = Math.max(Number(item?.qty || item?.quantity || 1) || 1, 1);
     const rawLineTotal = Number(
       item?.lineTotal
@@ -3641,13 +3672,11 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       ?? item?.subtotal
       ?? 0,
     ) || 0;
-    const finishingTotal = Number(item?.finishing_total || 0) || 0;
-    const expressFee = Number(item?.express_fee || 0) || 0;
-    const lineTotal = roundMoney(rawLineTotal + finishingTotal + expressFee);
     const directPrice = Number(item?.price || 0) || 0;
     const pricingSummary = item?.pricingSummary && typeof item.pricingSummary === 'object'
       ? item.pricingSummary
       : buildPricingSummaryFromBackendItem(item, restored.materialText || '');
+    const lineTotal = resolveItemGrandTotal(item, pricingSummary);
 
     const resolvedUnitPrice = directPrice > 0
       ? directPrice
@@ -3655,7 +3684,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
           (
             Number(pricingSummary?.grandTotal || 0)
             || Number(pricingSummary?.printSubtotal || 0)
-            || lineTotal
+            || rawLineTotal
           ) / qty,
         );
 
@@ -3749,7 +3778,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
   };
 
   const buildBrowserReceiptPreviewHtml = (receiptData, profileInput = null) => {
-    const profile = normalizePrinterProfile(profileInput || activePrinterProfile || DEFAULT_PRINTER_PROFILES.browserFallback);
+    const profile = normalizePrinterProfile(profileInput || activePrinterProfile || getDefaultPrinterProfile());
     const receiptTitle = String(receiptData?.store?.title || 'Nota Penjualan').trim() || 'Nota Penjualan';
     const receiptText = renderReceiptText(receiptData, profile);
     return renderReceiptHtml(receiptText, profile, receiptTitle, {
@@ -4178,159 +4207,15 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     return map;
   }, [finishingCatalog]);
   const productPickerTree = useMemo(() => {
-    const rows = Array.isArray(products) ? products : [];
-    const categoryMap = new Map();
-    const familyMap = new Map();
-
-    const ensureCategoryPath = (baseRow, fallbackFamilyKey = '') => {
-      const categoryName = normalizeCategoryName(baseRow);
-      const subCategoryName = normalizeSubCategoryName(baseRow);
-      const categoryKey = `cat:${normalizeText(categoryName) || fallbackFamilyKey || 'tanpa-kategori'}`;
-      const subCategoryKey = `${categoryKey}::sub:${normalizeText(subCategoryName) || 'tanpa-sub-kategori'}`;
-
-      if (!categoryMap.has(categoryKey)) {
-        categoryMap.set(categoryKey, { key: categoryKey, name: categoryName, subcategories: [] });
-      }
-      const category = categoryMap.get(categoryKey);
-      let subCategory = category.subcategories.find((item) => item.key === subCategoryKey);
-      if (!subCategory) {
-        subCategory = { key: subCategoryKey, name: subCategoryName, products: [] };
-        category.subcategories.push(subCategory);
-      }
-      return { category, subCategory, categoryKey, subCategoryKey };
-    };
-
-    const ensureFamilyNode = (row) => {
-      const sourceProduct = toSourceProduct(row);
-      const familyName = toLabel(
-        row?.source_parent_product_name,
-        sourceProduct?.name,
-        row?.source_product_name,
-        row?.parent_product_name,
-        normalizeProductFamilyName(row),
-        normalizeVariantName(row),
-        'Produk',
-      );
-      const hasFamilyRelationHint = [
-        row?.source_parent_product_id,
-        sourceProduct?.id,
-        row?.parent_product_id,
-        row?.parent_id,
-        row?.source_parent_product_name,
-        row?.source_product_name,
-        row?.parent_product_name,
-        row?.base_product_name,
-        row?.parent_name,
-      ].some((value) => String(value || '').trim() !== '');
-      const familyId = Number(
-        row?.source_parent_product_id
-        || row?.parent_product_id
-        || row?.parent_id
-        ||
-        row?.source_product_id
-        || sourceProduct?.parent_product_id
-        || sourceProduct?.id
-        || row?.product_id
-        || row?.id
-        || 0
-      );
-      const familyNameKey = normalizeText(familyName);
-      const familyKey = familyId > 0 && (!hasFamilyRelationHint || !familyNameKey)
-        ? `family:${familyId}`
-        : `family:${familyNameKey || familyId || JSON.stringify(row || {})}`;
-
-      let familyNode = familyMap.get(familyKey);
-      if (!familyNode) {
-        const baseForClassification = sourceProduct && typeof sourceProduct === 'object'
-          ? { ...row, ...sourceProduct, source_product: sourceProduct, sourceProduct }
-          : row;
-        const path = ensureCategoryPath(baseForClassification, familyKey);
-        familyNode = {
-          key: `${path.subCategoryKey}::${familyKey}`,
-          name: familyName,
-          variants: [],
-          _variantKeys: new Set(),
-          _subCategoryKey: path.subCategoryKey,
-        };
-        path.subCategory.products.push(familyNode);
-        familyMap.set(familyKey, familyNode);
-      }
-      return { familyNode, familyId, sourceProduct };
-    };
-
-    const attachVariant = (familyNode, variantCandidate, fallbackRow, familyId, sourceProduct, idx = 0) => {
-      const variantId = Number(variantCandidate?.id || variantCandidate?.product_id || 0);
-      const variantName = toLabel(
-        variantCandidate?.variant_name,
-        variantCandidate?.name,
-        variantCandidate?.sku_name,
-        variantCandidate?.sku,
-        normalizeVariantName(variantCandidate),
-        normalizeVariantName(fallbackRow),
-        familyNode.name,
-      );
-      const variantKey = variantId > 0
-        ? `id:${variantId}`
-        : `${familyNode.key}::var:${normalizeText(variantName) || idx}`;
-      if (familyNode._variantKeys.has(variantKey)) {
-        return;
-      }
-      const mergedRow = {
-        ...fallbackRow,
-        ...variantCandidate,
-        source_product_id: familyId > 0 ? familyId : (fallbackRow?.source_product_id || sourceProduct?.id || null),
-        source_product: sourceProduct || fallbackRow?.source_product || fallbackRow?.sourceProduct || null,
-      };
-      familyNode._variantKeys.add(variantKey);
-      familyNode.variants.push({
-        key: variantKey,
-        id: variantId || null,
-        name: variantName || familyNode.name,
-        row: mergedRow,
-      });
-    };
-
-    rows.forEach((row) => {
-      const { familyNode, familyId, sourceProduct } = ensureFamilyNode(row);
-      const nestedVariants = Array.isArray(row?.variants) ? row.variants : [];
-      if (nestedVariants.length > 0) {
-        nestedVariants.forEach((variant, idx) => {
-          attachVariant(familyNode, variant, row, familyId, sourceProduct, idx);
-        });
-        return;
-      }
-
-      const rowId = Number(row?.id || 0);
-      const isLikelyVariant = Boolean(
-        row?.source_is_variant === true
-        || Number(row?.source_parent_product_id || 0) > 0
-        || (familyId > 0 && rowId > 0 && familyId !== rowId),
-      );
-      if (isLikelyVariant) {
-        attachVariant(familyNode, row, row, familyId, sourceProduct, 0);
-      } else if (familyNode.variants.length === 0) {
-        // Produk tanpa varian tetap bisa dipilih langsung.
-        attachVariant(familyNode, row, row, familyId, sourceProduct, 0);
-      }
+    return buildProductPickerTree(Array.isArray(products) ? products : [], {
+      normalizeText,
+      toLabel,
+      normalizeCategoryName,
+      normalizeSubCategoryName,
+      toSourceProduct,
+      normalizeProductFamilyName,
+      normalizeVariantName,
     });
-
-    return Array.from(categoryMap.values())
-      .sort((a, b) => a.name.localeCompare(b.name, 'id'))
-      .map((category) => ({
-        ...category,
-        subcategories: category.subcategories
-          .sort((a, b) => a.name.localeCompare(b.name, 'id'))
-          .map((sub) => ({
-            ...sub,
-            products: sub.products
-              .map((product) => ({
-                key: product.key,
-                name: product.name,
-                variants: product.variants.sort((a, b) => a.name.localeCompare(b.name, 'id')),
-              }))
-              .sort((a, b) => a.name.localeCompare(b.name, 'id')),
-          })),
-      }));
   }, [products]);
 
   useEffect(() => {
@@ -5965,6 +5850,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         {
           id: itemId,
           product: String(buildSelectedProductLabel(product) || product.name || ''),
+          productBaseName: String(normalizeProductFamilyName(product) || product.name || '').trim(),
           qty: qtyNumber,
           size: size.displayText,
           finishing: selectedFinishingDisplay || '-',
@@ -6972,10 +6858,6 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       const snapshot = parseJsonObject(item?.spec_snapshot) || {};
       const specs = parseJsonObject(snapshot?.specs) || {};
       const draftForm = parseJsonObject(snapshot?.draft_form) || {};
-      const lineSubtotal = Number(item?.line_total || item?.subtotal || item?.total || 0);
-      const finishingTotal = Number(item?.finishing_total || 0);
-      const expressFee = Number(item?.express_fee || 0);
-      const lineTotal = roundMoney(lineSubtotal + finishingTotal + expressFee);
       const productName = toLabel(
         item?.product_name,
         item?.product?.name,
@@ -6987,6 +6869,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       const showPages = isNotebookLikeProductName(productName) || pages > 1;
       const materialText = restored.materialText || '-';
       const pricingSummary = buildPricingSummaryFromBackendItem(item, materialText);
+      const lineTotal = resolveItemGrandTotal(item, pricingSummary);
       return {
         key: String(item?.id || `item-${index}`),
         productName,
@@ -7129,10 +7012,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     const items = Array.isArray(sourceRow?.items) ? sourceRow.items : [];
     let itemDetails = items.map((item) => {
       const restored = restoreDraftItemDisplay(item, materialMapById, finishingNameMapById);
-      const lineSubtotal = Number(item?.line_total || item?.subtotal || item?.total || 0);
-      const finishingTotal = Number(item?.finishing_total || 0);
-      const expressFee = Number(item?.express_fee || 0);
-      const lineTotal = roundMoney(lineSubtotal + finishingTotal + expressFee);
+      const lineTotal = resolveItemGrandTotal(item);
       const statusText = formatProductionStatusLabel(item?.production_status);
       const statusColor = getProductionStatusTextColor(item?.production_status);
       return {
