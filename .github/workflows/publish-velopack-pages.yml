@@ -35,7 +35,7 @@ jobs:
           dotnet-version: '8.0.x'
 
       - name: Install dependencies
-        run: npm ci
+        run: npm install
 
       - name: Build Velopack release
         run: npm run build:win
