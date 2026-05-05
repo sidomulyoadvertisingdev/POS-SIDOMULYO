@@ -10,11 +10,38 @@ const API_BASE_URL = String(extra.erpApiBaseUrl || '').trim() || resolveDefaultA
 const API_EMAIL = String(extra.erpEmail || '').trim();
 const API_PASSWORD = String(extra.erpPassword || '');
 const API_TOKEN = String(extra.erpToken || '').trim();
+const REQUEST_TIMEOUT_MS = 20000;
 
 let authToken = String(API_TOKEN || '').trim();
 let sessionEmail = '';
 let sessionPassword = '';
 let refreshInProgress = null;
+
+const createTimeoutError = (url) => {
+  const error = new Error(`Request timeout setelah ${Math.round(REQUEST_TIMEOUT_MS / 1000)} detik. Cek koneksi ke backend: ${url}`);
+  error.status = 0;
+  error.code = 'REQUEST_TIMEOUT';
+  return error;
+};
+
+const fetchWithTimeout = async (url, options = {}) => {
+  let timeoutId = null;
+
+  try {
+    return await Promise.race([
+      fetch(url, options),
+      new Promise((_, reject) => {
+        timeoutId = setTimeout(() => {
+          reject(createTimeoutError(url));
+        }, REQUEST_TIMEOUT_MS);
+      }),
+    ]);
+  } finally {
+    if (timeoutId) {
+      clearTimeout(timeoutId);
+    }
+  }
+};
 
 const buildHeaders = (extra = {}) => {
   const headers = {
@@ -66,7 +93,8 @@ const authenticateWithCredentials = async (email, password) => {
     throw new Error('Email dan password backend wajib diisi.');
   }
 
-  const login = await fetch(`${API_BASE_URL}/auth/login`, {
+  const loginUrl = `${API_BASE_URL}/auth/login`;
+  const login = await fetchWithTimeout(loginUrl, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ email: resolvedEmail, password: resolvedPassword }),
@@ -89,12 +117,12 @@ const authenticateWithCredentials = async (email, password) => {
 };
 
 const request = async (path, options = {}, retryOnAuth = true) => {
-  const response = await fetch(`${API_BASE_URL}${path}`, {
+  const requestUrl = `${API_BASE_URL}${path}`;
+  const response = await fetchWithTimeout(requestUrl, {
     ...options,
     headers: buildHeaders(options.headers || {}),
   });
 
-  const requestUrl = `${API_BASE_URL}${path}`;
   if (response.redirected && typeof response.url === 'string') {
     const redirectedUrl = String(response.url || '');
     const redirectedToFrontend =
@@ -207,7 +235,7 @@ export const logoutPosUser = async () => {
   }
 
   try {
-    await fetch(`${API_BASE_URL}/auth/logout`, {
+    await fetchWithTimeout(`${API_BASE_URL}/auth/logout`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',

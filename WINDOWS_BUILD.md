@@ -134,8 +134,8 @@ Langkahnya:
 Atau push tag versi, misalnya:
 
 ```powershell
-git tag v1.6.0
-git push origin v1.6.0
+git tag v1.6.1
+git push origin v1.6.1
 ```
 
 Workflow itu akan:

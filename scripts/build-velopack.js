@@ -102,6 +102,11 @@ const resolveLocalBin = (name) => {
   return null;
 };
 
+const resolveLocalTool = (...segments) => {
+  const candidate = path.join(projectRoot, ...segments);
+  return fs.existsSync(candidate) ? candidate : null;
+};
+
 const trySpawn = (command, args = ['--version'], options = {}) => {
   const result = spawnSync(command, args, {
     cwd: projectRoot,
@@ -196,6 +201,24 @@ const ensureDnxInstalled = () => {
   ].join(' '));
 };
 
+const updateWindowsExeIcon = () => {
+  if (!isWindows) {
+    return;
+  }
+
+  const exePath = path.join(unpackedDir, mainExe);
+  if (!fs.existsSync(exePath)) {
+    throw new Error(`Executable hasil build tidak ditemukan: ${exePath}`);
+  }
+
+  const rceditCommand = resolveLocalTool('node_modules', 'electron-winstaller', 'vendor', 'rcedit.exe');
+  if (!rceditCommand) {
+    throw new Error('Tool lokal rcedit.exe tidak ditemukan untuk menyetel icon executable Windows.');
+  }
+
+  run(rceditCommand, [exePath, '--set-icon', iconPath]);
+};
+
 const getVelopackCommand = () => {
   const dnxCommand = resolveCommand('dnx');
   if (dnxCommand) {
@@ -238,6 +261,8 @@ const main = () => {
   if (!fs.existsSync(unpackedDir)) {
     throw new Error(`Folder hasil build Electron tidak ditemukan: ${unpackedDir}`);
   }
+
+  updateWindowsExeIcon();
 
   fs.mkdirSync(outputDir, { recursive: true });
 

@@ -137,6 +137,11 @@ export const renderReceiptText = (receipt: ReceiptData, printerProfile: PrinterP
   if (showCustomer && receipt.transaction.customer) {
     lines.push(leftRight('Customer', receipt.transaction.customer, width));
   }
+  if (receipt.transaction.notes) {
+    wrapText(`Catatan: ${receipt.transaction.notes}`, width).forEach((line) => {
+      lines.push(line);
+    });
+  }
   lines.push(separator(width));
 
   if (!isCompact) {

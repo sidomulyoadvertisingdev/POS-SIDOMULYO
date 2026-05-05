@@ -2925,6 +2925,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     orderId: '-',
     invoiceNo: '-',
     customerName: 'Pelanggan umum',
+    note: '',
     orderStatus: '-',
     productionSummary: '-',
     itemCount: 0,
@@ -3494,6 +3495,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     const estimatedDoneAt = String(options?.estimatedDoneAt || '-').trim() || '-';
     const customerPhone = String(options?.customerPhone || '-').trim() || '-';
     const items = Array.isArray(receiptData?.items) ? receiptData.items : [];
+    const orderNotes = String(receiptData?.transaction?.notes || '').trim();
     const paidAmount = Number(receiptData?.summary?.paid || 0) || 0;
     const remainingDue = Number(receiptData?.summary?.remainingDue || 0) || 0;
     const paymentAmountLabel = remainingDue > 0
@@ -3509,6 +3511,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       `Status Pembayaran: ${receiptData?.transaction?.paymentStatus || '-'}`,
       `Metode Pembayaran: ${receiptData?.payment?.method || '-'}`,
       `Estimasi Selesai: ${estimatedDoneAt}`,
+      ...(orderNotes ? [`Catatan: ${orderNotes}`] : []),
     ]);
 
     appendClipboardSection(lines, 'DETAIL PESANAN', items.flatMap((item, index) => ([
@@ -3624,6 +3627,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         cashier: String(snapshot?.cashierName || ''),
         customer: String(snapshot?.customerName || ''),
         paymentStatus: String(snapshot?.paymentStatus || ''),
+        notes: String(snapshot?.notes || '').trim(),
       },
       items: Array.isArray(snapshot?.items)
         ? snapshot.items.map((item) => ({
@@ -3753,6 +3757,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         cashier: String(sourceRow?.cashier?.name || currentUser?.name || 'Kasir'),
         customer: String(sourceRow?.customer?.name || 'Pelanggan umum'),
         paymentStatus: paymentStatusLabel,
+        notes: stripWorkflowSystemNotes(sourceRow?.payment?.note || sourceRow?.note || sourceRow?.notes || ''),
       },
       items: Array.isArray(items)
         ? items.map((item, index) => mapReceiptItemFromSource(item, index))
@@ -5107,7 +5112,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       setDiscountMode('percent');
       setPaymentMethod(normalizePaymentMethodLabel(payload?.payment?.method || 'Cash'));
       setPaymentAmount(String(Math.max(0, Number(payload?.payment?.amount || 0))));
-      setPaymentNotes(stripWorkflowSystemNotes(payload?.payment?.note || payload?.notes || ''));
+      setPaymentNotes(stripWorkflowSystemNotes(payload?.payment?.note || payload?.note || payload?.notes || ''));
       setLastSyncInfo(`Lanjut Draft Antrian${payload?.invoice_no ? ` | ${payload.invoice_no}` : ''}`);
       setActiveMenu('pos');
       return;
@@ -5180,7 +5185,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         || 'Cash',
       ));
       setPaymentAmount(String(Math.max(0, Number(order?.invoice?.paid_total || order?.paid_total || 0))));
-      setPaymentNotes(stripWorkflowSystemNotes(order?.payment?.note || order?.notes || ''));
+      setPaymentNotes(stripWorkflowSystemNotes(order?.payment?.note || order?.note || order?.notes || ''));
       setLastSyncInfo(
         `Lanjut Draft #${selectedId}${order?.invoice?.invoice_no ? ` | ${order.invoice.invoice_no}` : ''}`,
       );
@@ -6147,6 +6152,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         customer_id: customerId,
         ...(mode === 'draft' ? { status: 'draft' } : {}),
         due_at: null,
+        note: paymentNotes || null,
         notes: [
           selectedCustomer?.name ? `Customer: ${selectedCustomer.name}` : '',
           `Tanggal Order: ${transactionDate}`,
@@ -6255,6 +6261,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
           customer_id: null,
           ...(mode === 'draft' ? { status: 'draft' } : {}),
           due_at: null,
+          note: paymentNotes || null,
           notes: paymentNotes || null,
           items: cartItems.map((item) => enforceDesignFirstFlow(item.backendItem)),
           payment: {
@@ -6810,6 +6817,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       orderId: '-',
       invoiceNo: '-',
       customerName: 'Pelanggan umum',
+      note: '',
       orderStatus: '-',
       productionSummary: '-',
       itemCount: 0,
@@ -6835,6 +6843,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     const orderId = String(sourceRow?.id || '-');
     const invoiceNo = String(sourceRow?.invoice?.invoice_no || '-');
     const customerName = String(sourceRow?.customer?.name || 'Pelanggan umum');
+    const orderNote = stripWorkflowSystemNotes(sourceRow?.payment?.note || sourceRow?.note || sourceRow?.notes || '');
     const orderStatus = normalizeInvoiceOrderStatus(sourceRow) || '';
     const orderStatusLabel = formatDraftStatusLabel(orderStatus);
     const pickup = sourceRow?.pickup && typeof sourceRow.pickup === 'object' ? sourceRow.pickup : {};
@@ -6935,6 +6944,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       orderId,
       invoiceNo,
       customerName,
+      note: orderNote,
       orderStatus: orderStatusLabel,
       productionSummary,
       itemCount,
@@ -8949,6 +8959,9 @@ const SalesScreen = ({ currentUser, onLogout }) => {
             <Text style={styles.popupMessage}>Pelanggan: {orderPreviewSnapshot.customerName}</Text>
             <Text style={styles.popupMessage}>Tanggal: {orderPreviewSnapshot.transactionDate}</Text>
             <Text style={styles.popupMessage}>Metode Bayar: {orderPreviewSnapshot.paymentMethod}</Text>
+            {String(orderPreviewSnapshot.notes || '').trim() ? (
+              <Text style={styles.popupMessage}>Catatan: {orderPreviewSnapshot.notes}</Text>
+            ) : null}
             <View style={styles.previewBadgeRow}>
               <View
                 style={[
@@ -9231,6 +9244,9 @@ const SalesScreen = ({ currentUser, onLogout }) => {
               <Text style={styles.popupMessage}>Order ID: {invoiceDetailModal.orderId}</Text>
               <Text style={styles.popupMessage}>Invoice: {invoiceDetailModal.invoiceNo}</Text>
               <Text style={styles.popupMessage}>Customer: {invoiceDetailModal.customerName}</Text>
+              {String(invoiceDetailModal.note || '').trim() ? (
+                <Text style={styles.popupMessage}>Catatan: {invoiceDetailModal.note}</Text>
+              ) : null}
               <Text style={styles.popupMessage}>Status Order: {invoiceDetailModal.orderStatus}</Text>
               <Text style={styles.popupMessage}>Produksi Ringkas: {invoiceDetailModal.productionSummary}</Text>
               <Text style={styles.popupMessage}>Item: {invoiceDetailModal.itemCount} | Total: {formatRupiah(invoiceDetailModal.total)}</Text>

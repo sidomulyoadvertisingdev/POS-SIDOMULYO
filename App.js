@@ -12,11 +12,29 @@ export default function App() {
   const [authState, setAuthState] = useState('unauthenticated');
   const [currentUser, setCurrentUser] = useState(null);
   const [isStartupSplashVisible, setIsStartupSplashVisible] = useState(true);
+  const [fontLoadTimedOut, setFontLoadTimedOut] = useState(false);
   const [fontsLoaded] = useFonts({
     Poppins_400Regular,
   });
+  const isAppFontReady = fontsLoaded || fontLoadTimedOut;
 
   useEffect(() => {
+    if (fontsLoaded) {
+      return undefined;
+    }
+
+    const timer = setTimeout(() => {
+      setFontLoadTimedOut(true);
+    }, 5000);
+
+    return () => clearTimeout(timer);
+  }, [fontsLoaded]);
+
+  useEffect(() => {
+    if (!isAppFontReady) {
+      return;
+    }
+
     if (!fontsLoaded) {
       return;
     }
@@ -25,7 +43,7 @@ export default function App() {
     TextInput.defaultProps = TextInput.defaultProps || {};
     Text.defaultProps.style = [{ fontFamily: 'Poppins_400Regular' }, Text.defaultProps.style];
     TextInput.defaultProps.style = [{ fontFamily: 'Poppins_400Regular' }, TextInput.defaultProps.style];
-  }, [fontsLoaded]);
+  }, [fontsLoaded, isAppFontReady]);
 
   const handleLoginSuccess = (user) => {
     setCurrentUser(user || null);
@@ -41,7 +59,7 @@ export default function App() {
   return (
     <SafeAreaView style={styles.container}>
       <StatusBar style="light" />
-      {!fontsLoaded ? (
+      {!isAppFontReady ? (
         <View style={styles.loadingWrap}>
           <ActivityIndicator size="large" color="#0f45af" />
         </View>

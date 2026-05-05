@@ -46,6 +46,7 @@ export interface ReceiptTransaction {
   cashier?: string;
   customer?: string;
   paymentStatus?: string;
+  notes?: string;
 }
 
 export interface ReceiptItem {

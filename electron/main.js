@@ -19,9 +19,43 @@ VelopackApp.build()
   .run();
 
 const iconPath = path.join(__dirname, '..', 'assets', 'iconsm.ico');
-const appRootPath = app.getAppPath();
-const distDirPath = path.join(appRootPath, 'dist-web');
-const distIndexPath = path.join(distDirPath, 'index.html');
+
+const getCandidateAppRoots = () => {
+  const candidates = [
+    path.resolve(__dirname, '..'),
+    app.getAppPath(),
+    path.join(process.resourcesPath, 'app.asar'),
+    process.resourcesPath,
+    path.join(path.dirname(process.execPath), 'resources', 'app.asar'),
+    path.join(path.dirname(process.execPath), 'resources'),
+  ].filter(Boolean);
+
+  return [...new Set(candidates.map((candidate) => path.resolve(candidate)))];
+};
+
+const resolveDistPaths = () => {
+  for (const appRootPath of getCandidateAppRoots()) {
+    const distDirPath = path.join(appRootPath, 'dist-web');
+    const distIndexPath = path.join(distDirPath, 'index.html');
+
+    if (fs.existsSync(distIndexPath)) {
+      return {
+        appRootPath,
+        distDirPath,
+        distIndexPath,
+      };
+    }
+  }
+
+  const fallbackRoot = path.resolve(__dirname, '..');
+  return {
+    appRootPath: fallbackRoot,
+    distDirPath: path.join(fallbackRoot, 'dist-web'),
+    distIndexPath: path.join(fallbackRoot, 'dist-web', 'index.html'),
+  };
+};
+
+const { distDirPath, distIndexPath } = resolveDistPaths();
 
 const MIME_TYPES = {
   '.css': 'text/css; charset=utf-8',
@@ -54,6 +88,7 @@ const createLocalServer = () => new Promise((resolve, reject) => {
     const fallbackToIndex = () => {
       fs.readFile(distIndexPath, (indexError, indexContent) => {
         if (indexError) {
+          console.error('[desktop] gagal membaca index build:', distIndexPath, indexError);
           response.writeHead(500, { 'Content-Type': 'text/plain; charset=utf-8' });
           response.end('Gagal memuat aplikasi desktop.');
           return;
