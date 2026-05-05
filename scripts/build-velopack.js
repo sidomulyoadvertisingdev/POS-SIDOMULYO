@@ -20,8 +20,6 @@ const velopackVersion = String(
   || ''
 ).trim().replace(/^[~^]/, '');
 
-const commandName = (base) => (process.platform === 'win32' ? `${base}.cmd` : base);
-
 const hasCommand = (command, args = ['--version']) => {
   const result = spawnSync(command, args, {
     cwd: projectRoot,
@@ -66,7 +64,7 @@ const ensureDnxInstalled = () => {
     return;
   }
 
-  if (hasCommand(commandName('vpk'))) {
+  if (hasCommand('vpk')) {
     return;
   }
 
@@ -84,9 +82,9 @@ const getVelopackCommand = () => {
     };
   }
 
-  if (hasCommand(commandName('vpk'))) {
+  if (hasCommand('vpk')) {
     return {
-      command: commandName('vpk'),
+      command: 'vpk',
       args: [],
     };
   }
