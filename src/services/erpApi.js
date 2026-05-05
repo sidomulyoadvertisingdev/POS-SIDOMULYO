@@ -1,13 +1,7 @@
 import Constants from 'expo-constants';
 
 const resolveDefaultApiBaseUrl = () => {
-  const webHost = typeof globalThis !== 'undefined' && globalThis.location
-    ? String(globalThis.location.hostname || '').trim().toLowerCase()
-    : '';
-  if (webHost && webHost !== 'localhost' && webHost !== '127.0.0.1') {
-    return `http://${webHost}:8000/api`;
-  }
-  return 'http://127.0.0.1:8000/api';
+  return 'https://dashboard.sidomulyoproject.com/api';
 };
 
 const extra = Constants.expoConfig?.extra || {};
@@ -271,6 +265,11 @@ export const fetchPosCustomers = async (search = '') => {
   return toDataList(payload);
 };
 
+export const fetchPosSettings = async () => {
+  await ensureAuthenticated();
+  return request('/pos/settings');
+};
+
 export const fetchPosCustomerTypes = async () => {
   await ensureAuthenticated();
   // Backend ERPSIDOMULYO saat ini tidak expose endpoint customer type pada API POS.
@@ -292,6 +291,14 @@ export const fetchPosBankAccounts = async () => {
     '/accounts/bank',
   ]);
   return toDataList(payload);
+};
+
+export const createPosInvoicePayment = async (invoiceId, payload) => {
+  await ensureAuthenticated();
+  return request(`/pos/invoices/${invoiceId}/payments`, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
 };
 
 export const createPosCustomer = async (payload) => {
@@ -411,6 +418,91 @@ export const fetchPosOrderTransactions = async (params = {}) => {
 export const fetchPosOrders = async () => {
   await ensureAuthenticated();
   return request('/pos/orders');
+};
+
+export const fetchPosClosingSummary = async (params = {}) => {
+  await ensureAuthenticated();
+  const query = new URLSearchParams();
+  if (params?.date) {
+    query.set('date', String(params.date));
+  }
+  const suffix = query.toString() ? `?${query.toString()}` : '';
+  return request(`/pos/reports/closing-summary${suffix}`);
+};
+
+export const fetchUserDirectory = async () => {
+  await ensureAuthenticated();
+  const payload = await request('/users');
+  return toDataList(payload);
+};
+
+export const fetchPosFinanceRecipients = async () => {
+  await ensureAuthenticated();
+  const payload = await request('/pos/reports/finance-recipients');
+  return toDataList(payload);
+};
+
+export const fetchPosCloserOrder = async (params = {}) => {
+  await ensureAuthenticated();
+  const query = new URLSearchParams();
+  if (params?.date) {
+    query.set('date', String(params.date));
+  }
+  const suffix = query.toString() ? `?${query.toString()}` : '';
+  const payload = await request(`/pos/reports/closer-order${suffix}`);
+  return payload?.data ?? null;
+};
+
+export const submitPosCloserOrder = async (payload) => {
+  await ensureAuthenticated();
+  const body = await request('/pos/reports/closer-order', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+  return toDataItem(body);
+};
+
+export const fetchPosCashFlowTypes = async (params = {}) => {
+  await ensureAuthenticated();
+  const query = new URLSearchParams();
+  if (params?.type) {
+    query.set('type', String(params.type));
+  }
+  if (params?.active_only !== undefined) {
+    query.set('active_only', params.active_only ? '1' : '0');
+  }
+  const suffix = query.toString() ? `?${query.toString()}` : '';
+  return request(`/pos/cash-flow-types${suffix}`);
+};
+
+export const fetchPosCashFlows = async (params = {}) => {
+  await ensureAuthenticated();
+  const query = new URLSearchParams();
+  if (params?.type) {
+    query.set('type', String(params.type));
+  }
+  if (params?.search) {
+    query.set('search', String(params.search));
+  }
+  if (params?.date_from) {
+    query.set('date_from', String(params.date_from));
+  }
+  if (params?.date_to) {
+    query.set('date_to', String(params.date_to));
+  }
+  if (params?.per_page) {
+    query.set('per_page', String(params.per_page));
+  }
+  const suffix = query.toString() ? `?${query.toString()}` : '';
+  return request(`/pos/cash-flows${suffix}`);
+};
+
+export const createPosCashFlow = async (payload) => {
+  await ensureAuthenticated();
+  return request('/pos/cash-flows', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
 };
 
 export const fetchPosOrderDetail = async (orderId) => {

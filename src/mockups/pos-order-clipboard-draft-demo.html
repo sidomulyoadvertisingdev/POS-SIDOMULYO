@@ -1,0 +1,993 @@
+<!doctype html>
+<html lang="id">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>POS Copy Invoice + Draft Demo</title>
+    <style>
+      :root {
+        --bg: #eef3f8;
+        --panel: #ffffff;
+        --ink: #182433;
+        --muted: #5d6b7a;
+        --line: #d4deea;
+        --brand: #1f5eff;
+        --brand-deep: #183fa8;
+        --accent: #0f9d6c;
+        --warn: #b97912;
+        --danger: #cc4b4b;
+        --chip: #edf4ff;
+        --shadow: 0 10px 30px rgba(23, 42, 79, 0.08);
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        background: linear-gradient(180deg, #f6f9fc 0%, #edf2f8 100%);
+        color: var(--ink);
+        font-family: "Segoe UI", Arial, sans-serif;
+      }
+
+      body {
+        padding: 24px;
+      }
+
+      .page {
+        max-width: 1440px;
+        margin: 0 auto;
+        display: grid;
+        grid-template-columns: 1.35fr 0.95fr;
+        gap: 18px;
+      }
+
+      .card {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        box-shadow: var(--shadow);
+      }
+
+      .main-card {
+        padding: 20px;
+      }
+
+      .side-card {
+        padding: 18px;
+      }
+
+      .hero {
+        display: flex;
+        justify-content: space-between;
+        gap: 16px;
+        align-items: flex-start;
+        margin-bottom: 18px;
+      }
+
+      .hero h1 {
+        margin: 0 0 8px;
+        font-size: 28px;
+      }
+
+      .hero p {
+        margin: 0;
+        color: var(--muted);
+        line-height: 1.55;
+      }
+
+      .status-strip {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+
+      .chip {
+        display: inline-flex;
+        align-items: center;
+        padding: 7px 10px;
+        background: var(--chip);
+        border: 1px solid #c8dafd;
+        color: var(--brand-deep);
+        font-size: 12px;
+        font-weight: 700;
+      }
+
+      .section-title {
+        margin: 0 0 12px;
+        font-size: 15px;
+        font-weight: 800;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+      }
+
+      .order-shell {
+        display: grid;
+        grid-template-columns: 1fr;
+        gap: 16px;
+      }
+
+      .toolbar {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+        margin-bottom: 16px;
+      }
+
+      .btn {
+        border: 1px solid transparent;
+        padding: 11px 14px;
+        font-size: 13px;
+        font-weight: 800;
+        cursor: pointer;
+      }
+
+      .btn-primary {
+        background: var(--brand);
+        border-color: var(--brand);
+        color: #fff;
+      }
+
+      .btn-success {
+        background: var(--accent);
+        border-color: var(--accent);
+        color: #fff;
+      }
+
+      .btn-secondary {
+        background: #f2f6fb;
+        border-color: var(--line);
+        color: var(--ink);
+      }
+
+      .btn-outline {
+        background: #fff;
+        border-color: #bfd1ee;
+        color: var(--brand-deep);
+      }
+
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 12px;
+      }
+
+      .field {
+        display: grid;
+        gap: 6px;
+      }
+
+      .field label {
+        font-size: 12px;
+        font-weight: 700;
+        color: #35506f;
+      }
+
+      .field input,
+      .field select,
+      .field textarea {
+        width: 100%;
+        border: 1px solid var(--line);
+        padding: 10px 11px;
+        font: inherit;
+        color: var(--ink);
+        background: #fff;
+      }
+
+      .field textarea {
+        min-height: 80px;
+        resize: vertical;
+      }
+
+      .full {
+        grid-column: 1 / -1;
+      }
+
+      .items-card,
+      .preview-card,
+      .spec-card {
+        border: 1px solid var(--line);
+        background: #fbfdff;
+        padding: 14px;
+      }
+
+      .item-row {
+        border: 1px solid #d8e4f3;
+        background: #fff;
+        padding: 12px;
+        margin-bottom: 10px;
+      }
+
+      .item-row:last-child {
+        margin-bottom: 0;
+      }
+
+      .item-head {
+        display: flex;
+        justify-content: space-between;
+        gap: 12px;
+        margin-bottom: 10px;
+      }
+
+      .item-name {
+        font-weight: 800;
+      }
+
+      .item-meta {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 8px;
+      }
+
+      .tiny {
+        font-size: 12px;
+        color: var(--muted);
+      }
+
+      .summary-grid {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 10px;
+      }
+
+      .summary-box {
+        padding: 12px;
+        border: 1px solid var(--line);
+        background: #fff;
+      }
+
+      .summary-label {
+        font-size: 11px;
+        color: var(--muted);
+        text-transform: uppercase;
+        font-weight: 700;
+      }
+
+      .summary-value {
+        margin-top: 6px;
+        font-size: 18px;
+        font-weight: 800;
+      }
+
+      .text-output {
+        width: 100%;
+        min-height: 320px;
+        border: 1px solid var(--line);
+        background: #0e1726;
+        color: #f4f8ff;
+        padding: 14px;
+        font-family: "Consolas", "Courier New", monospace;
+        font-size: 12px;
+        line-height: 1.5;
+        white-space: pre-wrap;
+      }
+
+      .split {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 14px;
+      }
+
+      .flow-list,
+      .status-list {
+        display: grid;
+        gap: 10px;
+      }
+
+      .flow-step,
+      .status-step {
+        border: 1px solid var(--line);
+        background: #fff;
+        padding: 12px;
+      }
+
+      .step-title {
+        font-weight: 800;
+        margin-bottom: 4px;
+      }
+
+      .step-desc {
+        color: var(--muted);
+        font-size: 13px;
+        line-height: 1.55;
+      }
+
+      .search-box {
+        display: grid;
+        gap: 10px;
+        margin-bottom: 14px;
+      }
+
+      .draft-list {
+        display: grid;
+        gap: 10px;
+      }
+
+      .draft-card {
+        border: 1px solid var(--line);
+        background: #fff;
+        padding: 12px;
+      }
+
+      .draft-top {
+        display: flex;
+        justify-content: space-between;
+        gap: 10px;
+      }
+
+      .draft-title {
+        font-size: 14px;
+        font-weight: 800;
+      }
+
+      .draft-meta {
+        margin-top: 4px;
+        font-size: 12px;
+        color: var(--muted);
+        line-height: 1.55;
+      }
+
+      .draft-actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin-top: 12px;
+      }
+
+      .status-badge {
+        display: inline-flex;
+        padding: 5px 8px;
+        font-size: 11px;
+        font-weight: 800;
+        text-transform: uppercase;
+        border: 1px solid;
+      }
+
+      .status-draft {
+        color: #946200;
+        border-color: #efcb74;
+        background: #fff8e5;
+      }
+
+      .status-waiting {
+        color: #915d00;
+        border-color: #efc76d;
+        background: #fff8e7;
+      }
+
+      .status-dp {
+        color: #1f5ca8;
+        border-color: #afcdf8;
+        background: #edf5ff;
+      }
+
+      .status-paid {
+        color: #176d47;
+        border-color: #9dd6b9;
+        background: #edf9f2;
+      }
+
+      .code-block {
+        margin: 0;
+        white-space: pre-wrap;
+        font-family: "Consolas", "Courier New", monospace;
+        font-size: 12px;
+        line-height: 1.55;
+        color: #d8e6ff;
+        background: #101827;
+        border: 1px solid #1e314e;
+        padding: 14px;
+      }
+
+      .helper {
+        color: var(--muted);
+        font-size: 12px;
+        line-height: 1.55;
+      }
+
+      .notice {
+        margin-top: 10px;
+        border: 1px solid #bfd4fa;
+        background: #f4f8ff;
+        color: #214980;
+        padding: 10px 12px;
+        font-size: 13px;
+      }
+
+      @media (max-width: 1120px) {
+        .page {
+          grid-template-columns: 1fr;
+        }
+
+        .split,
+        .summary-grid,
+        .grid,
+        .item-meta {
+          grid-template-columns: 1fr;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="page">
+      <section class="card main-card">
+        <div class="hero">
+          <div>
+            <h1>Proses Order Tanpa Screenshot</h1>
+            <p>
+              Rancangan fitur POS agar kasir bisa menyalin invoice, menyalin pesanan, dan menyimpan draft
+              tanpa perlu screenshot layar. Fokusnya cepat dipakai kasir, mudah dipaste ke WhatsApp, dan aman
+              dilanjutkan lagi kalau customer belum bayar.
+            </p>
+          </div>
+          <div class="status-strip">
+            <span class="chip">Salin Invoice</span>
+            <span class="chip">Salin Pesanan</span>
+            <span class="chip">Simpan Draft</span>
+            <span class="chip">Cari Draft</span>
+          </div>
+        </div>
+
+        <div class="toolbar">
+          <button class="btn btn-primary" id="copyInvoiceBtn">Salin Invoice</button>
+          <button class="btn btn-outline" id="copyOrderBtn">Salin Pesanan</button>
+          <button class="btn btn-success" id="saveDraftBtn">Simpan Draft</button>
+          <button class="btn btn-secondary" id="loadSampleBtn">Muat Contoh Data</button>
+        </div>
+
+        <div class="order-shell">
+          <section class="spec-card">
+            <h2 class="section-title">UX/UI Proses Order</h2>
+            <div class="grid">
+              <div class="field">
+                <label>No. Invoice</label>
+                <input id="invoiceNo" value="INV-250504-100D" />
+              </div>
+              <div class="field">
+                <label>No. Draft</label>
+                <input id="draftNo" value="DRF-250504-009" />
+              </div>
+              <div class="field">
+                <label>Tanggal</label>
+                <input id="orderDate" value="2026-05-04 23:27:35" />
+              </div>
+              <div class="field">
+                <label>Estimasi Selesai</label>
+                <input id="dueDate" value="2026-05-06 16:00" />
+              </div>
+              <div class="field">
+                <label>Nama Pelanggan</label>
+                <input id="customerName" value="Pelanggan Reseller" />
+              </div>
+              <div class="field">
+                <label>No. HP</label>
+                <input id="customerPhone" value="0812-3456-8899" />
+              </div>
+              <div class="field">
+                <label>Status Invoice</label>
+                <select id="invoiceStatus">
+                  <option value="draft">Draft</option>
+                  <option value="waiting_payment">Menunggu Pembayaran</option>
+                  <option value="dp" selected>DP / Belum Lunas</option>
+                  <option value="paid">Lunas</option>
+                  <option value="in_production">Diproses</option>
+                  <option value="completed">Selesai</option>
+                  <option value="picked_up">Diambil</option>
+                </select>
+              </div>
+              <div class="field">
+                <label>Metode Pembayaran</label>
+                <select id="paymentMethod">
+                  <option value="Cash">Cash</option>
+                  <option value="Transfer" selected>Transfer</option>
+                  <option value="QRIS">QRIS</option>
+                  <option value="Card">Card</option>
+                </select>
+              </div>
+              <div class="field">
+                <label>Subtotal</label>
+                <input id="subtotal" type="number" value="24000" />
+              </div>
+              <div class="field">
+                <label>Total</label>
+                <input id="grandTotal" type="number" value="24000" />
+              </div>
+              <div class="field">
+                <label>DP / Bayar Masuk</label>
+                <input id="paidAmount" type="number" value="10000" />
+              </div>
+              <div class="field">
+                <label>Sisa Bayar</label>
+                <input id="remainingDue" type="number" value="14000" />
+              </div>
+            </div>
+          </section>
+
+          <section class="items-card">
+            <h2 class="section-title">Detail Pesanan</h2>
+            <div id="itemsContainer"></div>
+            <div class="notice">
+              UX yang disarankan:
+              tombol aksi diletakkan di bagian atas panel Proses Order, lalu hasil teks invoice/pesanan ditampilkan
+              di preview bawah agar kasir bisa cek sebelum copy.
+            </div>
+          </section>
+
+          <section class="preview-card">
+            <div class="summary-grid">
+              <div class="summary-box">
+                <div class="summary-label">Draft Search Key</div>
+                <div class="summary-value" id="summaryDraftKey">DRF-250504-009</div>
+              </div>
+              <div class="summary-box">
+                <div class="summary-label">Status</div>
+                <div class="summary-value" id="summaryStatus">DP / Belum Lunas</div>
+              </div>
+              <div class="summary-box">
+                <div class="summary-label">Pembayaran Masuk</div>
+                <div class="summary-value" id="summaryPaid">Rp24.000</div>
+              </div>
+              <div class="summary-box">
+                <div class="summary-label">Sisa Bayar</div>
+                <div class="summary-value" id="summaryDue">Rp0</div>
+              </div>
+            </div>
+          </section>
+
+          <section class="split">
+            <div>
+              <h2 class="section-title">Format Teks Invoice</h2>
+              <textarea class="text-output" id="invoiceOutput" spellcheck="false"></textarea>
+            </div>
+            <div>
+              <h2 class="section-title">Format Teks Pesanan</h2>
+              <textarea class="text-output" id="orderOutput" spellcheck="false"></textarea>
+            </div>
+          </section>
+
+          <section class="split">
+            <div>
+              <h2 class="section-title">Alur Kerja Kasir</h2>
+              <div class="flow-list">
+                <div class="flow-step">
+                  <div class="step-title">1. Input Order</div>
+                  <div class="step-desc">Kasir isi customer, item, ukuran, bahan, finishing, catatan, estimasi, dan nominal DP bila ada.</div>
+                </div>
+                <div class="flow-step">
+                  <div class="step-title">2. Pilih Aksi Cepat</div>
+                  <div class="step-desc">Kasir bisa tekan `Salin Invoice`, `Salin Pesanan`, atau `Simpan Draft` tanpa perlu screenshot halaman.</div>
+                </div>
+                <div class="flow-step">
+                  <div class="step-title">3. Simpan Draft Jika Belum Bayar</div>
+                  <div class="step-desc">Draft disimpan dengan nomor draft, nomor invoice sementara/final, nama customer, nomor HP, dan detail item.</div>
+                </div>
+                <div class="flow-step">
+                  <div class="step-title">4. Cari Lagi Draft</div>
+                  <div class="step-desc">Kasir bisa cari lewat nama pelanggan, nomor HP, nomor invoice, atau nomor draft. Dari sini order bisa dibuka lagi untuk diedit atau dilunasi.</div>
+                </div>
+                <div class="flow-step">
+                  <div class="step-title">5. Finalisasi</div>
+                  <div class="step-desc">Setelah pembayaran selesai, status berubah menjadi `Lunas`, lalu invoice final bisa disalin ulang atau dicetak.</div>
+                </div>
+              </div>
+            </div>
+            <div>
+              <h2 class="section-title">Status Invoice</h2>
+              <div class="status-list">
+                <div class="status-step">
+                  <span class="status-badge status-draft">Draft</span>
+                  <div class="step-desc">Order belum final, masih bisa diubah, belum dianggap invoice final.</div>
+                </div>
+                <div class="status-step">
+                  <span class="status-badge status-waiting">Menunggu Pembayaran</span>
+                  <div class="step-desc">Invoice sudah dibuat tapi belum ada pembayaran masuk.</div>
+                </div>
+                <div class="status-step">
+                  <span class="status-badge status-dp">DP / Belum Lunas</span>
+                  <div class="step-desc">Sudah ada pembayaran sebagian, masih ada sisa tagihan.</div>
+                </div>
+                <div class="status-step">
+                  <span class="status-badge status-paid">Lunas</span>
+                  <div class="step-desc">Pembayaran lengkap, invoice final siap dikirim ke customer atau produksi.</div>
+                </div>
+                <div class="status-step">
+                  <span class="status-badge status-paid">Diproses / Selesai / Diambil</span>
+                  <div class="step-desc">Status operasional produksi dan pengambilan, dipakai untuk follow-up customer dan tim produksi.</div>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section>
+            <h2 class="section-title">Struktur Data Draft</h2>
+            <pre class="code-block" id="draftStructureOutput"></pre>
+          </section>
+        </div>
+      </section>
+
+      <aside class="card side-card">
+        <h2 class="section-title">Pencarian Draft</h2>
+        <div class="search-box">
+          <div class="field">
+            <label>Cari Draft</label>
+            <input id="draftSearch" placeholder="Cari nama pelanggan / no HP / no invoice / no draft..." />
+          </div>
+          <div class="helper">
+            Draft harus bisa dicari berdasarkan `nama pelanggan`, `nomor HP`, `nomor invoice`, atau `nomor draft`.
+            Demo ini memakai `localStorage` agar alurnya mudah diuji.
+          </div>
+        </div>
+
+        <div class="draft-list" id="draftList"></div>
+      </aside>
+    </div>
+
+    <script>
+      const sampleOrder = {
+        invoiceNo: "INV-250504-100D",
+        draftNo: "DRF-250504-009",
+        orderDate: "2026-05-04 23:27:35",
+        dueDate: "2026-05-06 16:00",
+        customerName: "Pelanggan Reseller",
+        customerPhone: "0812-3456-8899",
+        invoiceStatus: "dp",
+        paymentMethod: "Transfer",
+        subtotal: 24000,
+        grandTotal: 24000,
+        paidAmount: 10000,
+        remainingDue: 14000,
+        items: [
+          {
+            id: "ITEM-001",
+            productName: "Laminasi Doff/doff A3+",
+            qty: 10,
+            sizeText: "A3+",
+            materialText: "Art Carton",
+            finishingText: "Laminasi Doff",
+            note: "Cetak besok pagi, warna pekat",
+            unitPrice: 2400,
+            subtotal: 24000
+          }
+        ]
+      };
+
+      const draftStorageKey = "pos_order_draft_demo_v1";
+
+      const formatRupiah = (value) => {
+        return `Rp${Number(value || 0).toLocaleString("id-ID")}`;
+      };
+
+      const humanizeStatus = (value) => {
+        const map = {
+          draft: "Draft",
+          waiting_payment: "Menunggu Pembayaran",
+          dp: "DP / Belum Lunas",
+          paid: "Lunas",
+          in_production: "Diproses",
+          completed: "Selesai",
+          picked_up: "Diambil"
+        };
+        return map[value] || value || "-";
+      };
+
+      const collectItems = () => {
+        return Array.from(document.querySelectorAll(".item-row")).map((row) => ({
+          id: row.dataset.itemId || crypto.randomUUID(),
+          productName: row.querySelector("[data-field='productName']").value.trim(),
+          qty: Number(row.querySelector("[data-field='qty']").value || 0),
+          sizeText: row.querySelector("[data-field='sizeText']").value.trim(),
+          materialText: row.querySelector("[data-field='materialText']").value.trim(),
+          finishingText: row.querySelector("[data-field='finishingText']").value.trim(),
+          note: row.querySelector("[data-field='note']").value.trim(),
+          unitPrice: Number(row.querySelector("[data-field='unitPrice']").value || 0),
+          subtotal: Number(row.querySelector("[data-field='subtotal']").value || 0)
+        }));
+      };
+
+      const collectForm = () => ({
+        invoiceNo: document.getElementById("invoiceNo").value.trim(),
+        draftNo: document.getElementById("draftNo").value.trim(),
+        orderDate: document.getElementById("orderDate").value.trim(),
+        dueDate: document.getElementById("dueDate").value.trim(),
+        customerName: document.getElementById("customerName").value.trim(),
+        customerPhone: document.getElementById("customerPhone").value.trim(),
+        invoiceStatus: document.getElementById("invoiceStatus").value,
+        paymentMethod: document.getElementById("paymentMethod").value,
+        subtotal: Number(document.getElementById("subtotal").value || 0),
+        grandTotal: Number(document.getElementById("grandTotal").value || 0),
+        paidAmount: Number(document.getElementById("paidAmount").value || 0),
+        remainingDue: Number(document.getElementById("remainingDue").value || 0),
+        items: collectItems()
+      });
+
+      const buildInvoiceText = (order) => {
+        const itemLines = order.items.map((item, index) => {
+          return [
+            `${index + 1}. ${item.productName}`,
+            `   Qty: ${item.qty}`,
+            `   Ukuran: ${item.sizeText || "-"}`,
+            `   Bahan: ${item.materialText || "-"}`,
+            `   Finishing: ${item.finishingText || "-"}`,
+            `   Catatan: ${item.note || "-"}`,
+            `   Harga: ${formatRupiah(item.unitPrice)}`,
+            `   Subtotal: ${formatRupiah(item.subtotal)}`,
+          ].join("\n");
+        }).join("\n\n");
+
+        return [
+          `INVOICE`,
+          `No. Invoice: ${order.invoiceNo || "-"}`,
+          `Tanggal: ${order.orderDate || "-"}`,
+          `Pelanggan: ${order.customerName || "-"}`,
+          `No. HP: ${order.customerPhone || "-"}`,
+          `Estimasi Selesai: ${order.dueDate || "-"}`,
+          ``,
+          `DETAIL PESANAN`,
+          itemLines,
+          ``,
+          `RINGKASAN PEMBAYARAN`,
+          `Subtotal: ${formatRupiah(order.subtotal)}`,
+          `Total: ${formatRupiah(order.grandTotal)}`,
+          `DP / Bayar Masuk: ${formatRupiah(order.paidAmount)}`,
+          `Sisa Bayar: ${formatRupiah(order.remainingDue)}`,
+          `Status Pembayaran: ${humanizeStatus(order.invoiceStatus)}`,
+          `Metode Pembayaran: ${order.paymentMethod || "-"}`,
+        ].join("\n");
+      };
+
+      const buildOrderText = (order) => {
+        const itemLines = order.items.map((item, index) => {
+          return [
+            `${index + 1}. ${item.productName}`,
+            `   Qty: ${item.qty}`,
+            `   Ukuran: ${item.sizeText || "-"}`,
+            `   Bahan: ${item.materialText || "-"}`,
+            `   Finishing: ${item.finishingText || "-"}`,
+            `   Catatan: ${item.note || "-"}`,
+          ].join("\n");
+        }).join("\n\n");
+
+        return [
+          `DETAIL PESANAN`,
+          `No. Invoice: ${order.invoiceNo || "-"}`,
+          `Tanggal: ${order.orderDate || "-"}`,
+          `Pelanggan: ${order.customerName || "-"}`,
+          `No. HP: ${order.customerPhone || "-"}`,
+          `Estimasi Selesai: ${order.dueDate || "-"}`,
+          ``,
+          itemLines,
+        ].join("\n");
+      };
+
+      const buildDraftPayload = (order) => {
+        return {
+          draft_id: order.draftNo,
+          invoice_no: order.invoiceNo,
+          customer: {
+            name: order.customerName,
+            phone: order.customerPhone
+          },
+          order_date: order.orderDate,
+          due_date: order.dueDate,
+          status: order.invoiceStatus,
+          payment: {
+            method: order.paymentMethod,
+            subtotal: order.subtotal,
+            grand_total: order.grandTotal,
+            paid_amount: order.paidAmount,
+            remaining_due: order.remainingDue
+          },
+          items: order.items.map((item) => ({
+            product_name: item.productName,
+            qty: item.qty,
+            size_text: item.sizeText,
+            material_text: item.materialText,
+            finishing_text: item.finishingText,
+            note: item.note,
+            unit_price: item.unitPrice,
+            subtotal: item.subtotal
+          })),
+          searchable_tokens: [
+            order.draftNo,
+            order.invoiceNo,
+            order.customerName,
+            order.customerPhone
+          ].filter(Boolean),
+          updated_at: new Date().toISOString()
+        };
+      };
+
+      const syncSummary = (order) => {
+        document.getElementById("summaryDraftKey").textContent = order.draftNo || "-";
+        document.getElementById("summaryStatus").textContent = humanizeStatus(order.invoiceStatus);
+        document.getElementById("summaryPaid").textContent = formatRupiah(order.paidAmount);
+        document.getElementById("summaryDue").textContent = formatRupiah(order.remainingDue);
+      };
+
+      const renderItems = (items) => {
+        const container = document.getElementById("itemsContainer");
+        container.innerHTML = "";
+        items.forEach((item, index) => {
+          const row = document.createElement("div");
+          row.className = "item-row";
+          row.dataset.itemId = item.id || `ITEM-${index + 1}`;
+          row.innerHTML = `
+            <div class="item-head">
+              <div class="item-name">Item ${index + 1}</div>
+              <div class="tiny">Kasir masih bisa edit item draft sebelum finalisasi</div>
+            </div>
+            <div class="item-meta">
+              <div class="field">
+                <label>Produk</label>
+                <input data-field="productName" value="${item.productName || ""}" />
+              </div>
+              <div class="field">
+                <label>Qty</label>
+                <input data-field="qty" type="number" value="${item.qty || 0}" />
+              </div>
+              <div class="field">
+                <label>Ukuran</label>
+                <input data-field="sizeText" value="${item.sizeText || ""}" />
+              </div>
+              <div class="field">
+                <label>Bahan</label>
+                <input data-field="materialText" value="${item.materialText || ""}" />
+              </div>
+              <div class="field">
+                <label>Finishing</label>
+                <input data-field="finishingText" value="${item.finishingText || ""}" />
+              </div>
+              <div class="field">
+                <label>Harga</label>
+                <input data-field="unitPrice" type="number" value="${item.unitPrice || 0}" />
+              </div>
+              <div class="field">
+                <label>Subtotal</label>
+                <input data-field="subtotal" type="number" value="${item.subtotal || 0}" />
+              </div>
+              <div class="field full">
+                <label>Catatan</label>
+                <textarea data-field="note">${item.note || ""}</textarea>
+              </div>
+            </div>
+          `;
+          container.appendChild(row);
+        });
+      };
+
+      const refreshOutputs = () => {
+        const order = collectForm();
+        document.getElementById("invoiceOutput").value = buildInvoiceText(order);
+        document.getElementById("orderOutput").value = buildOrderText(order);
+        document.getElementById("draftStructureOutput").textContent = JSON.stringify(buildDraftPayload(order), null, 2);
+        syncSummary(order);
+      };
+
+      const loadOrderToForm = (order) => {
+        document.getElementById("invoiceNo").value = order.invoiceNo || "";
+        document.getElementById("draftNo").value = order.draftNo || "";
+        document.getElementById("orderDate").value = order.orderDate || "";
+        document.getElementById("dueDate").value = order.dueDate || "";
+        document.getElementById("customerName").value = order.customerName || "";
+        document.getElementById("customerPhone").value = order.customerPhone || "";
+        document.getElementById("invoiceStatus").value = order.invoiceStatus || "draft";
+        document.getElementById("paymentMethod").value = order.paymentMethod || "Cash";
+        document.getElementById("subtotal").value = order.subtotal || 0;
+        document.getElementById("grandTotal").value = order.grandTotal || 0;
+        document.getElementById("paidAmount").value = order.paidAmount || 0;
+        document.getElementById("remainingDue").value = order.remainingDue || 0;
+        renderItems(Array.isArray(order.items) ? order.items : []);
+        refreshOutputs();
+      };
+
+      const loadDrafts = () => {
+        try {
+          return JSON.parse(localStorage.getItem(draftStorageKey) || "[]");
+        } catch (_error) {
+          return [];
+        }
+      };
+
+      const saveDrafts = (drafts) => {
+        localStorage.setItem(draftStorageKey, JSON.stringify(drafts));
+      };
+
+      const renderDraftList = (keyword = "") => {
+        const target = document.getElementById("draftList");
+        const rows = loadDrafts();
+        const needle = String(keyword || "").trim().toLowerCase();
+        const filtered = rows.filter((row) => {
+          if (!needle) return true;
+          return [
+            row?.draftNo,
+            row?.invoiceNo,
+            row?.customerName,
+            row?.customerPhone
+          ].some((value) => String(value || "").toLowerCase().includes(needle));
+        });
+
+        if (filtered.length === 0) {
+          target.innerHTML = `<div class="draft-card"><div class="draft-title">Belum ada draft</div><div class="draft-meta">Simpan draft dulu untuk melihat daftar dan menguji alur pencarian.</div></div>`;
+          return;
+        }
+
+        target.innerHTML = "";
+        filtered.forEach((row) => {
+          const card = document.createElement("div");
+          card.className = "draft-card";
+          card.innerHTML = `
+            <div class="draft-top">
+              <div>
+                <div class="draft-title">${row.draftNo || "-"} | ${row.invoiceNo || "-"}</div>
+                <div class="draft-meta">${row.customerName || "-"} | ${row.customerPhone || "-"}</div>
+                <div class="draft-meta">Total: ${formatRupiah(row.grandTotal)} | DP: ${formatRupiah(row.paidAmount)} | Sisa: ${formatRupiah(row.remainingDue)}</div>
+              </div>
+              <span class="status-badge ${row.invoiceStatus === "paid" ? "status-paid" : row.invoiceStatus === "dp" ? "status-dp" : row.invoiceStatus === "draft" ? "status-draft" : "status-waiting"}">${humanizeStatus(row.invoiceStatus)}</span>
+            </div>
+            <div class="draft-actions">
+              <button class="btn btn-outline" data-action="open">Lanjutkan Draft</button>
+              <button class="btn btn-secondary" data-action="copy-invoice">Salin Invoice</button>
+              <button class="btn btn-secondary" data-action="copy-order">Salin Pesanan</button>
+            </div>
+          `;
+
+          card.querySelector("[data-action='open']").addEventListener("click", () => loadOrderToForm(row));
+          card.querySelector("[data-action='copy-invoice']").addEventListener("click", async () => {
+            await navigator.clipboard.writeText(buildInvoiceText(row));
+            alert("Invoice draft berhasil disalin.");
+          });
+          card.querySelector("[data-action='copy-order']").addEventListener("click", async () => {
+            await navigator.clipboard.writeText(buildOrderText(row));
+            alert("Detail pesanan draft berhasil disalin.");
+          });
+
+          target.appendChild(card);
+        });
+      };
+
+      const saveCurrentDraft = () => {
+        const order = collectForm();
+        const rows = loadDrafts();
+        const next = rows.filter((row) => String(row.draftNo || "") !== String(order.draftNo || ""));
+        next.unshift({ ...order, updatedAt: new Date().toISOString() });
+        saveDrafts(next);
+        renderDraftList(document.getElementById("draftSearch").value);
+        refreshOutputs();
+        alert("Draft berhasil disimpan. Kasir bisa cari lagi lewat nama, HP, invoice, atau nomor draft.");
+      };
+
+      const copyInvoice = async () => {
+        const text = buildInvoiceText(collectForm());
+        await navigator.clipboard.writeText(text);
+        refreshOutputs();
+        alert("Invoice teks berhasil disalin. Tinggal paste ke WhatsApp customer.");
+      };
+
+      const copyOrder = async () => {
+        const text = buildOrderText(collectForm());
+        await navigator.clipboard.writeText(text);
+        refreshOutputs();
+        alert("Detail pesanan berhasil disalin. Tinggal paste ke customer atau tim produksi.");
+      };
+
+      document.getElementById("copyInvoiceBtn").addEventListener("click", copyInvoice);
+      document.getElementById("copyOrderBtn").addEventListener("click", copyOrder);
+      document.getElementById("saveDraftBtn").addEventListener("click", saveCurrentDraft);
+      document.getElementById("loadSampleBtn").addEventListener("click", () => loadOrderToForm(sampleOrder));
+      document.getElementById("draftSearch").addEventListener("input", (event) => {
+        renderDraftList(event.target.value);
+      });
+
+      document.addEventListener("input", (event) => {
+        if (event.target.closest(".main-card")) {
+          refreshOutputs();
+        }
+      });
+
+      loadOrderToForm(sampleOrder);
+      renderDraftList();
+    </script>
+  </body>
+</html>

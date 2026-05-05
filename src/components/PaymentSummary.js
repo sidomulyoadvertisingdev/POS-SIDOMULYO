@@ -9,6 +9,7 @@ const PaymentSummary = ({
   onChangeDiscountAmount,
   grandTotal,
   paymentMethod,
+  paymentMethodHelperText,
   onChangePaymentMethod,
   paymentMethodOptions,
   paymentStatus,
@@ -27,6 +28,10 @@ const PaymentSummary = ({
   const methodOptions = Array.isArray(paymentMethodOptions) && paymentMethodOptions.length > 0
     ? paymentMethodOptions
     : ['Cash', 'Transfer', 'QRIS', 'Card'];
+  const normalizedMethod = String(paymentMethod || '').trim().toLowerCase();
+  const paymentFlowBadge = normalizedMethod === 'cash'
+    ? { label: 'Tunai Fisik', tone: 'cash' }
+    : { label: 'Masuk Rekening', tone: 'noncash' };
 
   return (
     <View style={styles.wrapper}>
@@ -67,9 +72,51 @@ const PaymentSummary = ({
         <View style={styles.payPanel}>
           <View style={styles.row}>
             <Text style={styles.label}>Metode Bayar</Text>
-            <Pressable style={[styles.input, styles.selectInput]} onPress={() => setIsPaymentMethodModalOpen(true)}>
-              <Text style={styles.selectText}>{paymentMethod || 'Pilih metode bayar'}</Text>
-            </Pressable>
+            <View style={styles.paymentMethodField}>
+              <Pressable style={[styles.input, styles.selectInput]} onPress={() => setIsPaymentMethodModalOpen(true)}>
+                <Text style={styles.selectText}>{paymentMethod || 'Pilih metode bayar'}</Text>
+              </Pressable>
+              <View style={styles.methodQuickRow}>
+                {methodOptions.map((option) => {
+                  const active = String(option) === String(paymentMethod || '');
+                  return (
+                    <Pressable
+                      key={`quick-${String(option)}`}
+                      style={[styles.methodQuickChip, active ? styles.methodQuickChipActive : null]}
+                      onPress={() => onChangePaymentMethod?.(String(option))}
+                    >
+                      <Text style={[styles.methodQuickChipText, active ? styles.methodQuickChipTextActive : null]}>
+                        {String(option)}
+                      </Text>
+                    </Pressable>
+                  );
+                })}
+              </View>
+              <View style={styles.paymentFlowBadgeRow}>
+                <View
+                  style={[
+                    styles.paymentFlowBadge,
+                    paymentFlowBadge.tone === 'cash'
+                      ? styles.paymentFlowBadgeCash
+                      : styles.paymentFlowBadgeNonCash,
+                  ]}
+                >
+                  <Text
+                    style={[
+                      styles.paymentFlowBadgeText,
+                      paymentFlowBadge.tone === 'cash'
+                        ? styles.paymentFlowBadgeTextCash
+                        : styles.paymentFlowBadgeTextNonCash,
+                    ]}
+                  >
+                    {paymentFlowBadge.label}
+                  </Text>
+                </View>
+              </View>
+              {paymentMethodHelperText ? (
+                <Text style={styles.paymentMethodHelperText}>{paymentMethodHelperText}</Text>
+              ) : null}
+            </View>
           </View>
 
           <View style={styles.row}>
@@ -180,6 +227,11 @@ const styles = StyleSheet.create({
     minWidth: 360,
     gap: 7,
   },
+  paymentMethodField: {
+    flex: 1,
+    minWidth: 170,
+    gap: 6,
+  },
   row: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -218,6 +270,63 @@ const styles = StyleSheet.create({
     fontSize: 12,
     color: '#1f1f1f',
     textAlign: 'left',
+  },
+  methodQuickRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 6,
+  },
+  methodQuickChip: {
+    borderWidth: 1,
+    borderColor: '#b7b7b7',
+    backgroundColor: '#f7f5eb',
+    paddingHorizontal: 8,
+    paddingVertical: 5,
+  },
+  methodQuickChipActive: {
+    borderColor: '#2250c9',
+    backgroundColor: '#2f64ef',
+  },
+  methodQuickChipText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#2b3448',
+  },
+  methodQuickChipTextActive: {
+    color: '#ffffff',
+  },
+  paymentFlowBadgeRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+  },
+  paymentFlowBadge: {
+    borderWidth: 1,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+  },
+  paymentFlowBadgeCash: {
+    borderColor: '#9ed1b1',
+    backgroundColor: '#ebf8f0',
+  },
+  paymentFlowBadgeNonCash: {
+    borderColor: '#a8c6f0',
+    backgroundColor: '#eef4ff',
+  },
+  paymentFlowBadgeText: {
+    fontSize: 10,
+    fontWeight: '800',
+    textTransform: 'uppercase',
+  },
+  paymentFlowBadgeTextCash: {
+    color: '#1d6a3c',
+  },
+  paymentFlowBadgeTextNonCash: {
+    color: '#1e4f99',
+  },
+  paymentMethodHelperText: {
+    fontSize: 10,
+    lineHeight: 15,
+    color: '#43506a',
   },
   notesInput: {
     minHeight: 60,

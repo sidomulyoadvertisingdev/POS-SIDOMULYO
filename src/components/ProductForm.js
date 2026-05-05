@@ -26,6 +26,7 @@ const ProductForm = ({
   finishingAvailabilityMessage,
   isPrintingFinishingMode,
   isStrictStickerFinishingMode,
+  autoApplyFinishingSelection,
   onSaveSelectedFinishings,
   selectedFinishingMataAyamQtyById,
   onSaveSelectedFinishingMataAyamQtyById,
@@ -207,6 +208,61 @@ const ProductForm = ({
       return name;
     }
     return `${name} (${unitHint})`;
+  };
+  const commitFinishingSelection = (nextIds, nextMataAyamMap = finishingDraftMataAyamQtyById) => {
+    const normalizedIds = Array.from(
+      new Set((Array.isArray(nextIds) ? nextIds : [])
+        .map((id) => Number(id))
+        .filter((id) => id > 0)),
+    );
+    const normalizedMataAyam = {};
+    normalizedIds.forEach((id) => {
+      const option = finishingById.get(Number(id));
+      if (!option || option.requires_mata_ayam !== true) {
+        return;
+      }
+      const raw = String(nextMataAyamMap?.[id] ?? '0').replace(/[^0-9]/g, '');
+      const parsed = Number.parseInt(raw || '0', 10);
+      normalizedMataAyam[id] = Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+    });
+    onSaveSelectedFinishings?.(normalizedIds);
+    onSaveSelectedFinishingMataAyamQtyById?.(normalizedMataAyam);
+  };
+  const togglePrintingFinishingSelection = (item, groupKey) => {
+    const id = Number(item?.id || 0);
+    if (id <= 0) return;
+    const currentIds = Array.isArray(finishingDraftIds) ? finishingDraftIds : [];
+    const currentMap = finishingDraftMataAyamQtyById && typeof finishingDraftMataAyamQtyById === 'object'
+      ? finishingDraftMataAyamQtyById
+      : {};
+    const isSelected = currentIds.some((rowId) => Number(rowId) === id);
+    let nextIds = [];
+    const nextMap = { ...currentMap };
+
+    if (isSelected) {
+      delete nextMap[id];
+      nextIds = currentIds.filter((rowId) => Number(rowId) !== id);
+    } else if (!isPrintingFinishingMode) {
+      nextIds = [...currentIds, id];
+      if (item?.requires_mata_ayam === true) {
+        nextMap[id] = String(nextMap?.[id] ?? '0');
+      }
+    } else {
+      const withoutGroup = currentIds.filter((rowId) => {
+        const option = finishings.find((row) => Number(row.id) === Number(rowId));
+        return String(option?.axis_group || 'all_sides') !== groupKey;
+      });
+      nextIds = [...withoutGroup, id];
+      if (item?.requires_mata_ayam === true) {
+        nextMap[id] = String(nextMap?.[id] ?? '0');
+      }
+    }
+
+    setFinishingDraftIds(nextIds);
+    setFinishingDraftMataAyamQtyById(nextMap);
+    if (autoApplyFinishingSelection) {
+      commitFinishingSelection(nextIds, nextMap);
+    }
   };
 
   const pickerStep = useMemo(() => {
@@ -863,40 +919,7 @@ const ProductForm = ({
                             key={String(item.id || item.name)}
                             style={styles.finishingItemRow}
                             onPress={() => {
-                              const id = Number(item.id || 0);
-                              if (id <= 0) return;
-                              setFinishingDraftIds((prev) => {
-                                const currentIds = Array.isArray(prev) ? prev : [];
-                                const isSelected = currentIds.some((rowId) => Number(rowId) === id);
-                                if (isSelected) {
-                                  setFinishingDraftMataAyamQtyById((prevMap) => {
-                                    const nextMap = { ...(prevMap || {}) };
-                                    delete nextMap[id];
-                                    return nextMap;
-                                  });
-                                  return currentIds.filter((rowId) => Number(rowId) !== id);
-                                }
-                                if (!isPrintingFinishingMode) {
-                                  if (item?.requires_mata_ayam === true) {
-                                    setFinishingDraftMataAyamQtyById((prevMap) => ({
-                                      ...(prevMap || {}),
-                                      [id]: String(prevMap?.[id] ?? '0'),
-                                    }));
-                                  }
-                                  return [...currentIds, id];
-                                }
-                                const withoutGroup = currentIds.filter((rowId) => {
-                                  const option = finishings.find((row) => Number(row.id) === Number(rowId));
-                                  return String(option?.axis_group || 'all_sides') !== groupKey;
-                                });
-                                if (item?.requires_mata_ayam === true) {
-                                  setFinishingDraftMataAyamQtyById((prevMap) => ({
-                                    ...(prevMap || {}),
-                                    [id]: String(prevMap?.[id] ?? '0'),
-                                  }));
-                                }
-                                return [...withoutGroup, id];
-                              });
+                              togglePrintingFinishingSelection(item, groupKey);
                             }}
                           >
                             <View style={styles.finishingItemLeft}>
@@ -933,10 +956,14 @@ const ProductForm = ({
                         value={String(finishingDraftMataAyamQtyById?.[id] ?? '0')}
                         onChangeText={(value) => {
                           const sanitized = String(value || '').replace(/[^0-9]/g, '');
-                          setFinishingDraftMataAyamQtyById((prev) => ({
-                            ...(prev || {}),
+                          const nextMap = {
+                            ...(finishingDraftMataAyamQtyById || {}),
                             [id]: sanitized,
-                          }));
+                          };
+                          setFinishingDraftMataAyamQtyById(nextMap);
+                          if (autoApplyFinishingSelection) {
+                            commitFinishingSelection(finishingDraftIds, nextMap);
+                          }
                         }}
                         keyboardType="numeric"
                         placeholder="0"
@@ -1561,6 +1588,8 @@ const styles = StyleSheet.create({
 });
 
 export default ProductForm;
+
+
 
 
 

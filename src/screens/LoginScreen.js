@@ -119,7 +119,7 @@ const LoginScreen = ({ onLoginSuccess }) => {
               </Pressable>
             ) : null}
 
-            <Text style={styles.metaText}>API: {baseUrl}</Text>
+            <Text style={styles.metaText}>Backend API: {baseUrl}</Text>
           </View>
         </View>
       </View>

@@ -1,0 +1,531 @@
+<!doctype html>
+<html lang="id">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Template Print Thermal</title>
+    <style>
+      :root {
+        --ink: #111111;
+        --muted: #5f5f5f;
+        --line: #cfcfcf;
+        --bg: #f5f5f5;
+        --paper: #ffffff;
+        --emphasis: #000000;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        background: var(--bg);
+        color: var(--ink);
+        font-family: "Segoe UI", Arial, sans-serif;
+      }
+
+      body {
+        padding: 24px;
+      }
+
+      .demo-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+        gap: 24px;
+        align-items: start;
+      }
+
+      .paper {
+        background: var(--paper);
+        box-shadow: 0 8px 24px rgba(0, 0, 0, 0.08);
+        padding: 10px;
+      }
+
+      .paper-58 {
+        width: 58mm;
+      }
+
+      .paper-80 {
+        width: 80mm;
+      }
+
+      .thermal {
+        font-size: 11px;
+        line-height: 1.35;
+      }
+
+      .paper-80 .thermal {
+        font-size: 12px;
+      }
+
+      .center {
+        text-align: center;
+      }
+
+      .muted {
+        color: var(--muted);
+      }
+
+      .strong {
+        font-weight: 700;
+      }
+
+      .tiny {
+        font-size: 10px;
+      }
+
+      .title {
+        font-size: 15px;
+        font-weight: 800;
+        letter-spacing: 0.4px;
+        text-transform: uppercase;
+      }
+
+      .paper-58 .title {
+        font-size: 13px;
+      }
+
+      .divider {
+        border-top: 1px dashed var(--ink);
+        margin: 8px 0;
+      }
+
+      .divider-thick {
+        border-top: 2px solid var(--emphasis);
+        margin: 8px 0;
+      }
+
+      .meta,
+      .summary-list,
+      .status-list {
+        display: grid;
+        gap: 3px;
+      }
+
+      .row {
+        display: flex;
+        justify-content: space-between;
+        align-items: flex-start;
+        gap: 8px;
+      }
+
+      .row .label {
+        min-width: 88px;
+        color: var(--muted);
+      }
+
+      .paper-58 .row .label {
+        min-width: 74px;
+      }
+
+      .row .value {
+        flex: 1;
+        text-align: right;
+        word-break: break-word;
+      }
+
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        table-layout: fixed;
+      }
+
+      th,
+      td {
+        padding: 4px 0;
+        vertical-align: top;
+      }
+
+      th {
+        text-align: left;
+        border-bottom: 1px solid var(--ink);
+        font-size: 10px;
+        text-transform: uppercase;
+      }
+
+      td.num,
+      th.num {
+        text-align: right;
+        white-space: nowrap;
+      }
+
+      .items td {
+        border-bottom: 1px dashed var(--line);
+      }
+
+      .items tr:last-child td {
+        border-bottom: 0;
+      }
+
+      .items .name {
+        font-weight: 700;
+      }
+
+      .items .meta-text {
+        display: block;
+        margin-top: 2px;
+        color: var(--muted);
+        font-size: 10px;
+      }
+
+      .totals {
+        margin-top: 4px;
+      }
+
+      .grand-total {
+        padding: 6px 0;
+        border-top: 1px solid var(--ink);
+        border-bottom: 2px solid var(--ink);
+        font-size: 13px;
+        font-weight: 800;
+      }
+
+      .paper-58 .grand-total {
+        font-size: 12px;
+      }
+
+      .badge {
+        display: inline-block;
+        padding: 2px 6px;
+        border: 1px solid var(--ink);
+        font-weight: 700;
+        font-size: 10px;
+      }
+
+      .section-title {
+        margin: 8px 0 4px;
+        font-size: 11px;
+        font-weight: 800;
+        text-transform: uppercase;
+      }
+
+      .paper-80 .report-grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 10px;
+      }
+
+      .compact-table th,
+      .compact-table td {
+        padding: 3px 0;
+      }
+
+      .footer-note {
+        margin-top: 8px;
+        text-align: center;
+        font-size: 10px;
+      }
+
+      .screen-title {
+        margin: 0 0 12px;
+        font-size: 16px;
+      }
+
+      @page {
+        margin: 0;
+      }
+
+      @media print {
+        body {
+          background: #ffffff;
+          padding: 0;
+        }
+
+        .demo-grid {
+          display: block;
+        }
+
+        .paper {
+          box-shadow: none;
+          margin: 0 auto 0;
+          padding: 0;
+          page-break-after: always;
+        }
+
+        .paper:last-child {
+          page-break-after: auto;
+        }
+
+        .screen-title {
+          display: none;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <h1 class="screen-title">Template Print Thermal 58mm dan 80mm</h1>
+
+    <div class="demo-grid">
+      <section class="paper paper-58">
+        <article class="thermal">
+          <div class="center">
+            <div class="title">Nota Penjualan</div>
+            <div class="strong">SIDOMULYO DIGITAL PRINT</div>
+            <div>Jl. Ahmad Yani No. 88, Jakarta</div>
+            <div>0812-3456-7890</div>
+          </div>
+
+          <div class="divider"></div>
+
+          <div class="meta">
+            <div class="row"><span class="label">No. Nota</span><span class="value strong">INV-250504-019</span></div>
+            <div class="row"><span class="label">Tanggal</span><span class="value">04-05-2026 17:20</span></div>
+            <div class="row"><span class="label">Customer</span><span class="value">Bapak Rian / Toko Maju Jaya</span></div>
+            <div class="row"><span class="label">Estimasi</span><span class="value">06-05-2026 15:00</span></div>
+            <div class="row"><span class="label">Status</span><span class="value"><span class="badge">DP / PROSES</span></span></div>
+          </div>
+
+          <div class="divider"></div>
+
+          <table class="items">
+            <thead>
+              <tr>
+                <th style="width: 56%">Pesanan</th>
+                <th class="num" style="width: 12%">Qty</th>
+                <th class="num" style="width: 32%">Subtotal</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>
+                  <span class="name">Banner Flexi 280gr</span>
+                  <span class="meta-text">Uk: 2 x 1 m | Bahan: Flexi</span>
+                  <span class="meta-text">Finishing: Mata ayam</span>
+                  <span class="meta-text">Catatan: Dominan merah</span>
+                  <span class="meta-text">Harga: 35.000</span>
+                </td>
+                <td class="num">2</td>
+                <td class="num">70.000</td>
+              </tr>
+              <tr>
+                <td>
+                  <span class="name">Stiker Vinyl</span>
+                  <span class="meta-text">Uk: A3 | Bahan: Vinyl Glossy</span>
+                  <span class="meta-text">Finishing: Laminasi doff</span>
+                  <span class="meta-text">Catatan: Potong kiss cut</span>
+                  <span class="meta-text">Harga: 18.000</span>
+                </td>
+                <td class="num">5</td>
+                <td class="num">90.000</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <div class="divider"></div>
+
+          <div class="totals summary-list">
+            <div class="row"><span class="label">Subtotal</span><span class="value">160.000</span></div>
+            <div class="row grand-total"><span>Total</span><span>160.000</span></div>
+            <div class="row"><span class="label">DP</span><span class="value">100.000</span></div>
+            <div class="row"><span class="label">Sisa Bayar</span><span class="value strong">60.000</span></div>
+            <div class="row"><span class="label">Pembayaran</span><span class="value">Transfer BCA</span></div>
+            <div class="row"><span class="label">Status Bayar</span><span class="value strong">Belum Lunas</span></div>
+          </div>
+
+          <div class="divider"></div>
+
+          <div class="footer-note">
+            Simpan nota ini saat pengambilan pesanan.
+          </div>
+        </article>
+      </section>
+
+      <section class="paper paper-80">
+        <article class="thermal">
+          <div class="center">
+            <div class="title">Nota Penjualan</div>
+            <div class="strong">SIDOMULYO DIGITAL PRINT</div>
+            <div>Cetak banner, stiker, brosur, dan kebutuhan promosi</div>
+            <div>Jl. Ahmad Yani No. 88, Jakarta | 0812-3456-7890</div>
+          </div>
+
+          <div class="divider-thick"></div>
+
+          <div class="meta">
+            <div class="row"><span class="label">No. Nota</span><span class="value strong">INV-250504-019</span></div>
+            <div class="row"><span class="label">Tanggal</span><span class="value">04 Mei 2026 17:20 WIB</span></div>
+            <div class="row"><span class="label">Customer</span><span class="value">Bapak Rian / Toko Maju Jaya</span></div>
+            <div class="row"><span class="label">Status Pembayaran</span><span class="value"><span class="badge">DP / BELUM LUNAS</span></span></div>
+            <div class="row"><span class="label">Estimasi Selesai</span><span class="value">06 Mei 2026 15:00 WIB</span></div>
+          </div>
+
+          <div class="divider"></div>
+
+          <table class="items">
+            <thead>
+              <tr>
+                <th style="width: 40%">Detail Pesanan</th>
+                <th class="num" style="width: 9%">Qty</th>
+                <th style="width: 17%">Ukuran</th>
+                <th style="width: 16%">Bahan</th>
+                <th class="num" style="width: 18%">Subtotal</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>
+                  <span class="name">Banner Flexi 280gr</span>
+                  <span class="meta-text">Finishing: Mata ayam</span>
+                  <span class="meta-text">Catatan: Dominan merah, file dari customer</span>
+                  <span class="meta-text">Harga: 35.000 / pcs</span>
+                </td>
+                <td class="num">2</td>
+                <td>2 x 1 m</td>
+                <td>Flexi</td>
+                <td class="num">70.000</td>
+              </tr>
+              <tr>
+                <td>
+                  <span class="name">Stiker Vinyl</span>
+                  <span class="meta-text">Finishing: Laminasi doff</span>
+                  <span class="meta-text">Catatan: Potong kiss cut</span>
+                  <span class="meta-text">Harga: 18.000 / lembar</span>
+                </td>
+                <td class="num">5</td>
+                <td>A3</td>
+                <td>Vinyl Glossy</td>
+                <td class="num">90.000</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <div class="divider"></div>
+
+          <div class="totals summary-list">
+            <div class="row"><span class="label">Subtotal</span><span class="value">160.000</span></div>
+            <div class="row grand-total"><span>Total</span><span>160.000</span></div>
+            <div class="row"><span class="label">DP</span><span class="value">100.000</span></div>
+            <div class="row"><span class="label">Sisa Bayar</span><span class="value strong">60.000</span></div>
+            <div class="row"><span class="label">Metode Bayar</span><span class="value">Transfer BCA</span></div>
+            <div class="row"><span class="label">Status Order</span><span class="value">Sedang Diproses</span></div>
+          </div>
+
+          <div class="divider"></div>
+
+          <div class="footer-note">
+            Terima kasih. Nota ini menjadi bukti transaksi dan pengambilan pesanan.
+          </div>
+        </article>
+      </section>
+
+      <section class="paper paper-58">
+        <article class="thermal">
+          <div class="center">
+            <div class="title">Laporan Ringkasan</div>
+            <div class="strong">Periode 01-05-2026 s/d 04-05-2026</div>
+          </div>
+
+          <div class="divider"></div>
+
+          <div class="summary-list">
+            <div class="row"><span class="label">Total Transaksi</span><span class="value strong">47</span></div>
+            <div class="row"><span class="label">Total Penjualan</span><span class="value strong">8.750.000</span></div>
+            <div class="row"><span class="label">Pembayaran Masuk</span><span class="value">6.300.000</span></div>
+            <div class="row"><span class="label">Piutang</span><span class="value">2.450.000</span></div>
+          </div>
+
+          <div class="section-title">Status Order</div>
+          <div class="status-list">
+            <div class="row"><span class="label">Draft</span><span class="value">3</span></div>
+            <div class="row"><span class="label">Proses</span><span class="value">18</span></div>
+            <div class="row"><span class="label">Selesai</span><span class="value">21</span></div>
+            <div class="row"><span class="label">Diambil</span><span class="value">5</span></div>
+          </div>
+
+          <div class="section-title">Metode Bayar</div>
+          <table class="compact-table">
+            <tbody>
+              <tr><td>Cash</td><td class="num">2.150.000</td></tr>
+              <tr><td>Transfer</td><td class="num">3.450.000</td></tr>
+              <tr><td>QRIS</td><td class="num">700.000</td></tr>
+            </tbody>
+          </table>
+
+          <div class="section-title">Produk / Kategori</div>
+          <table class="compact-table">
+            <tbody>
+              <tr><td>Banner</td><td class="num">16 order</td></tr>
+              <tr><td>Stiker</td><td class="num">14 order</td></tr>
+              <tr><td>Brosur</td><td class="num">9 order</td></tr>
+              <tr><td>Lainnya</td><td class="num">8 order</td></tr>
+            </tbody>
+          </table>
+        </article>
+      </section>
+
+      <section class="paper paper-80">
+        <article class="thermal">
+          <div class="center">
+            <div class="title">Laporan Ringkasan</div>
+            <div class="strong">Periode 01 Mei 2026 - 04 Mei 2026</div>
+          </div>
+
+          <div class="divider-thick"></div>
+
+          <div class="report-grid">
+            <div>
+              <div class="section-title">Ikhtisar Penjualan</div>
+              <div class="summary-list">
+                <div class="row"><span class="label">Total Transaksi</span><span class="value strong">47</span></div>
+                <div class="row"><span class="label">Total Penjualan</span><span class="value strong">8.750.000</span></div>
+                <div class="row"><span class="label">Pembayaran Masuk</span><span class="value">6.300.000</span></div>
+                <div class="row"><span class="label">Piutang</span><span class="value">2.450.000</span></div>
+              </div>
+            </div>
+
+            <div>
+              <div class="section-title">Jumlah Order</div>
+              <table class="compact-table">
+                <tbody>
+                  <tr><td>Draft</td><td class="num">3</td></tr>
+                  <tr><td>Menunggu Desain</td><td class="num">4</td></tr>
+                  <tr><td>Proses Produksi</td><td class="num">14</td></tr>
+                  <tr><td>Selesai</td><td class="num">21</td></tr>
+                  <tr><td>Diambil</td><td class="num">5</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div class="divider"></div>
+
+          <div class="report-grid">
+            <div>
+              <div class="section-title">Metode Pembayaran</div>
+              <table class="compact-table">
+                <tbody>
+                  <tr><td>Cash</td><td class="num">2.150.000</td></tr>
+                  <tr><td>Transfer BCA</td><td class="num">2.900.000</td></tr>
+                  <tr><td>Transfer Mandiri</td><td class="num">550.000</td></tr>
+                  <tr><td>QRIS</td><td class="num">700.000</td></tr>
+                </tbody>
+              </table>
+            </div>
+
+            <div>
+              <div class="section-title">Ringkasan Produk</div>
+              <table class="compact-table">
+                <thead>
+                  <tr>
+                    <th>Kategori</th>
+                    <th class="num">Order</th>
+                    <th class="num">Omzet</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr><td>Banner</td><td class="num">16</td><td class="num">3.200.000</td></tr>
+                  <tr><td>Stiker</td><td class="num">14</td><td class="num">2.150.000</td></tr>
+                  <tr><td>Brosur</td><td class="num">9</td><td class="num">1.750.000</td></tr>
+                  <tr><td>Lainnya</td><td class="num">8</td><td class="num">1.650.000</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </article>
+      </section>
+    </div>
+  </body>
+</html>

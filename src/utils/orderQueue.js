@@ -1,9 +1,21 @@
 const STORAGE_KEY = 'pos_order_queue_v1';
+const DRAFT_TTL_MS = 24 * 60 * 60 * 1000;
 
 let memoryQueue = [];
 
 const canUseLocalStorage = () => {
   return typeof globalThis !== 'undefined' && typeof globalThis.localStorage !== 'undefined';
+};
+
+const filterExpiredQueue = (queue) => {
+  const now = Date.now();
+  return (Array.isArray(queue) ? queue : []).filter((item) => {
+    const createdAt = new Date(item?.created_at || 0).getTime();
+    if (!Number.isFinite(createdAt) || createdAt <= 0) {
+      return true;
+    }
+    return now - createdAt < DRAFT_TTL_MS;
+  });
 };
 
 export const loadOrderQueue = () => {
@@ -14,11 +26,16 @@ export const loadOrderQueue = () => {
         return [];
       }
       const parsed = JSON.parse(raw);
-      return Array.isArray(parsed) ? parsed : [];
+      const cleaned = filterExpiredQueue(parsed);
+      if (cleaned.length !== (Array.isArray(parsed) ? parsed.length : 0)) {
+        persistQueue(cleaned);
+      }
+      return cleaned;
     } catch (error) {
       return [];
     }
   }
+  memoryQueue = filterExpiredQueue(memoryQueue);
   return memoryQueue;
 };
 
@@ -57,5 +74,5 @@ export const shiftOrderQueue = () => {
 };
 
 export const setOrderQueue = (queue) => {
-  persistQueue(Array.isArray(queue) ? queue : []);
+  persistQueue(filterExpiredQueue(queue));
 };

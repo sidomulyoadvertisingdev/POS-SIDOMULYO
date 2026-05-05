@@ -1,4 +1,4 @@
-﻿import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { ActivityIndicator, Alert, Image, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, Vibration, View, useWindowDimensions } from 'react-native';
 import { Asset } from 'expo-asset';
 import CartList from '../components/CartList';
@@ -15,13 +15,20 @@ import {
 } from '../utils/orderPayload';
 import {
   createPosCustomer,
+  createPosCashFlow,
+  createPosInvoicePayment,
   createPosOrder,
   deletePosOrder,
   fetchPosBankAccounts,
+  fetchPosCashFlows,
+  fetchPosCashFlowTypes,
+  fetchPosCloserOrder,
   fetchPosCustomers,
   fetchPosCustomerTypes,
+  fetchPosFinanceRecipients,
   fetchPosFinishings,
   fetchPosMaterials,
+  fetchPosClosingSummary,
   fetchPosOrderDetail,
   fetchPosOrders,
   fetchPosOrderTransactions,
@@ -29,16 +36,31 @@ import {
   fetchPosProductionMaterials,
   fetchPosProductDetail,
   fetchPosProducts,
+  fetchPosSettings,
   pickupPosOrder,
   fetchAuthMe,
   getApiBaseUrl,
   previewPosPricing,
+  submitPosCloserOrder,
   updatePosProductionItemStatus,
   updatePosOrderStatus,
 } from '../services/erpApi';
 import { appEnv } from '../config/appEnv';
 import { enqueueOrderPayload, loadOrderQueue, setOrderQueue } from '../utils/orderQueue';
 import { appendOrderAuditLog, loadOrderAuditLogs } from '../utils/orderAuditLog';
+import {
+  createPrinterProfile,
+  createBrowserPrintOptions,
+  DEFAULT_PRINTER_PROFILES,
+  generateTestReceipt,
+  isBrowserPrintProfile,
+  normalizePrinterProfile,
+  PrinterSettingsForm,
+  printReceipt,
+  renderReceiptHtml,
+  renderReceiptText,
+  writeHtmlToPrintWindow,
+} from '../printing';
 
 const formatDate = (date) => {
   return date.toLocaleDateString('id-ID', {
@@ -46,6 +68,59 @@ const formatDate = (date) => {
     month: '2-digit',
     year: 'numeric',
   });
+};
+const formatDateText = (value) => {
+  if (!value) return '-';
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    return String(value || '-');
+  }
+  return formatDate(parsed);
+};
+const diffDaysFromNow = (value) => {
+  if (!value) return 0;
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    return 0;
+  }
+  const now = new Date();
+  const start = new Date(parsed.getFullYear(), parsed.getMonth(), parsed.getDate()).getTime();
+  const end = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  return Math.max(0, Math.round((end - start) / 86400000));
+};
+const formatIsoDate = (date) => {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+};
+const DRAFT_AUTO_DELETE_HOURS = 24;
+const DRAFT_AUTO_DELETE_MS = DRAFT_AUTO_DELETE_HOURS * 60 * 60 * 1000;
+const getDraftExpiryMeta = (createdAt, nowTs = Date.now()) => {
+  const createdTs = new Date(createdAt || 0).getTime();
+  if (!Number.isFinite(createdTs) || createdTs <= 0) {
+    return {
+      isValid: false,
+      isExpired: false,
+      remainingMs: 0,
+      label: `Auto hapus ${DRAFT_AUTO_DELETE_HOURS} jam`,
+    };
+  }
+  const expiresAtTs = createdTs + DRAFT_AUTO_DELETE_MS;
+  const remainingMs = Math.max(0, expiresAtTs - nowTs);
+  const totalMinutes = Math.ceil(remainingMs / 60000);
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  const compact =
+    hours > 0
+      ? `${hours}j${minutes > 0 ? ` ${minutes}m` : ''}`
+      : `${Math.max(1, minutes)}m`;
+  return {
+    isValid: true,
+    isExpired: remainingMs <= 0,
+    remainingMs,
+    label: remainingMs <= 0 ? 'Draft kadaluarsa' : `Auto hapus ${compact} lagi`,
+  };
 };
 
 const sanitizeNumericInput = (value) => value.replace(/[^0-9]/g, '');
@@ -348,9 +423,13 @@ const isLbMaxBreakdown = (item) => {
 const isBundlingDiscountBreakdown = (item) => {
   return String(item?.source || '').toLowerCase() === 'bundling_discount';
 };
+const isMataAyamAddonBreakdown = (item) => {
+  return String(item?.source || '').toLowerCase() === 'addon_mata_ayam'
+    || String(item?.meta?.addon_type || '').toLowerCase() === 'mata_ayam';
+};
 const extractDisplayFromBreakdown = (breakdown = []) => {
   const finishingNames = breakdown
-    .filter((row) => !isLbMaxBreakdown(row) && !isBundlingDiscountBreakdown(row))
+    .filter((row) => !isLbMaxBreakdown(row) && !isBundlingDiscountBreakdown(row) && !isMataAyamAddonBreakdown(row))
     .map((row) => String(row?.name || '').trim())
     .filter(Boolean);
   const lbMaxNames = breakdown
@@ -512,6 +591,31 @@ const extractNamesFromMixedList = (rows, nameMapById) => {
     .filter(Boolean);
   return Array.from(new Set(names));
 };
+const extractFinishingLabelsFromPayload = (rows, nameMapById) => {
+  const list = Array.isArray(rows) ? rows : [];
+  const labels = list
+    .map((row) => {
+      if (!row || typeof row !== 'object') {
+        return '';
+      }
+      const baseName = toLabel(
+        row?.name,
+        row?.label,
+        row?.title,
+        row?.sku_name,
+        nameMapById.get(Number(row?.id || row?.product_id || row?.finishing_id || row?.source_product_id || 0)),
+      );
+      if (!baseName) {
+        return '';
+      }
+      const mataAyamQty = Math.max(0, Number(row?.mata_ayam_qty || 0) || 0);
+      return mataAyamQty > 0 ? `${baseName} + Mata Ayam x${mataAyamQty}` : baseName;
+    })
+    .map((label) => String(label || '').trim())
+    .filter(Boolean);
+
+  return Array.from(new Set(labels));
+};
 const buildMaterialDisplay = (backendItem, materialMapById) => {
   const primaryId = Number(
     backendItem?.material_product_id ||
@@ -611,9 +715,9 @@ const restoreDraftItemDisplay = (backendItem, materialMapById, finishingNameMapB
     ? `${formatMeterNumber(widthMeter)} x ${formatMeterNumber(lengthMeter)} m`
     : '';
   const sizeText = toLabel(
+    backendItem?.size_text,
     draftForm?.size_text,
     specs?.size_text,
-    backendItem?.size_text,
     backendItem?.size,
     backendItem?.dimension,
     backendItem?.dimensions,
@@ -624,9 +728,11 @@ const restoreDraftItemDisplay = (backendItem, materialMapById, finishingNameMapB
     '-',
   );
 
-  const finishingFromPayload = extractNamesFromMixedList(
+  const finishingFromPayload = extractFinishingLabelsFromPayload(
+    parseJsonArray(backendItem?.finishings),
+    finishingNameMapById,
+  ).join(', ') || extractNamesFromMixedList(
     [
-      ...parseJsonArray(backendItem?.finishings),
       ...parseJsonArray(backendItem?.finishing_ids),
       ...parseJsonArray(backendItem?.finishing_id),
       ...parseJsonArray(backendItem?.finishing_products),
@@ -643,11 +749,11 @@ const restoreDraftItemDisplay = (backendItem, materialMapById, finishingNameMapB
   ).join(', ');
 
   const finishingText = toLabel(
-    draftForm?.finishing,
-    specs?.finishing,
-    backendItem?.finishing,
     backendItem?.finishing_text,
     backendItem?.finishing_label,
+    backendItem?.finishing,
+    draftForm?.finishing,
+    specs?.finishing,
     backendItem?.finishing_name,
     meta?.finishing,
     meta?.finishing_name,
@@ -657,6 +763,7 @@ const restoreDraftItemDisplay = (backendItem, materialMapById, finishingNameMapB
     '-',
   );
   const lbMaxText = toLabel(
+    backendItem?.lb_max_text,
     draftForm?.lb_max,
     specs?.lb_max,
     lbMaxFromPayload,
@@ -664,11 +771,11 @@ const restoreDraftItemDisplay = (backendItem, materialMapById, finishingNameMapB
     '-',
   );
   const materialText = toLabel(
-    draftForm?.material,
-    specs?.material,
-    backendItem?.material,
     backendItem?.material_text,
     backendItem?.material_label,
+    backendItem?.material,
+    draftForm?.material,
+    specs?.material,
     backendItem?.material_display,
     backendItem?.material_product_label,
     meta?.material,
@@ -688,6 +795,97 @@ const restoreDraftItemDisplay = (backendItem, materialMapById, finishingNameMapB
     lbMaxText,
     materialText,
     pages,
+  };
+};
+const buildCartItemFromDraftSource = (sourceItem, itemKey, materialMapById, finishingNameMapById, productNameMapById) => {
+  const breakdown = Array.isArray(sourceItem?.finishing_breakdown) ? sourceItem.finishing_breakdown : [];
+  const restored = restoreDraftItemDisplay(sourceItem, materialMapById, finishingNameMapById);
+  const snapshot = parseJsonObject(sourceItem?.spec_snapshot) || {};
+  const draftForm = parseJsonObject(snapshot?.draft_form) || parseJsonObject(sourceItem?.draft_form) || {};
+  const specs = parseJsonObject(snapshot?.specs) || parseJsonObject(sourceItem?.specs) || {};
+  const originalFlow = parseJsonObject(snapshot?.original_flow) || {};
+  const productId = Number(
+    sourceItem?.product_id
+    || sourceItem?.pos_product_id
+    || sourceItem?.product?.id
+    || sourceItem?.pos_product?.id
+    || 0
+  );
+  const materialId = Number(sourceItem?.material_product_id || sourceItem?.material_id || 0);
+  const materialCandidates = Array.isArray(sourceItem?.material_candidate_ids)
+    ? sourceItem.material_candidate_ids.map((id) => Number(id)).filter((id) => id > 0)
+    : Array.isArray(sourceItem?.material_product_ids)
+      ? sourceItem.material_product_ids.map((id) => Number(id)).filter((id) => id > 0)
+      : [];
+  const subtotal = Number(sourceItem?.subtotal || sourceItem?.line_total || sourceItem?.total || 0);
+  const finishingTotal = Number(sourceItem?.finishing_total || 0);
+  const expressFee = Number(sourceItem?.express_fee || 0);
+  const lineTotal = roundMoney(subtotal + finishingTotal + expressFee);
+  const materialText = restored.materialText || '-';
+
+  return {
+    id: itemKey,
+    product: toLabel(
+      sourceItem?.product_name,
+      draftForm?.product_name,
+      sourceItem?.product?.name,
+      productNameMapById.get(productId),
+      sourceItem?.name,
+      '-',
+    ),
+    qty: Math.max(Number(sourceItem?.qty || sourceItem?.quantity || draftForm?.qty || 1) || 1, 1),
+    size: restored.sizeText || '-',
+    finishing: restored.finishingText || '-',
+    lbMax: restored.lbMaxText || '-',
+    pages: Math.max(Number(restored.pages || sourceItem?.pages || draftForm?.pages || 1) || 1, 1),
+    material: materialText,
+    note: toLabel(
+      sourceItem?.notes,
+      sourceItem?.note,
+      draftForm?.note,
+      specs?.note,
+      '-',
+    ),
+    lineTotal,
+    total: lineTotal,
+    pricingSummary: buildPricingSummaryFromBackendItem(sourceItem, materialText),
+    backendItem: {
+      product_id: productId,
+      qty: Math.max(Number(sourceItem?.qty || sourceItem?.quantity || draftForm?.qty || 1) || 1, 1),
+      input_width_mm: Number(sourceItem?.input_width_mm || 0) || null,
+      input_height_mm: Number(sourceItem?.input_height_mm || 0) || null,
+      internal_width_mm: Number(sourceItem?.internal_width_mm || 0) || null,
+      internal_height_mm: Number(sourceItem?.internal_height_mm || 0) || null,
+      input_area_m2: Number(sourceItem?.input_area_m2 || 0) || null,
+      internal_area_m2: Number(sourceItem?.internal_area_m2 || 0) || null,
+      extra_margin_cm: Number(sourceItem?.extra_margin_cm || 0) || 0,
+      calc_unit: String(sourceItem?.calc_unit || 'unit'),
+      subtotal: roundMoney(subtotal),
+      finishing_total: roundMoney(finishingTotal),
+      express_fee: roundMoney(expressFee),
+      negotiated_price: Number(sourceItem?.negotiated_price || 0) > 0 ? roundMoney(sourceItem.negotiated_price) : null,
+      bottom_price_enabled: Boolean(sourceItem?.bottom_price_enabled),
+      bottom_price: roundMoney(Number(sourceItem?.bottom_price || 0)),
+      bottom_price_min_qty: Math.max(0, Number(sourceItem?.bottom_price_min_qty || 0) || 0),
+      requires_production: Boolean(
+        originalFlow?.requires_production
+        ?? draftForm?.requires_production
+        ?? sourceItem?.requires_production
+        ?? true,
+      ),
+      requires_design: Boolean(
+        originalFlow?.requires_design
+        ?? draftForm?.requires_design
+        ?? sourceItem?.requires_design
+        ?? true,
+      ),
+      material_product_id: materialId > 0 ? materialId : null,
+      material_product_ids: materialCandidates,
+      finishings: Array.isArray(sourceItem?.finishings) ? sourceItem.finishings : [],
+      finishing_breakdown: breakdown,
+      lb_max: Array.isArray(sourceItem?.lb_max) ? sourceItem.lb_max : [],
+      spec_snapshot: sourceItem?.spec_snapshot || null,
+    },
   };
 };
 const calculateDraftItemsTotal = (items = []) => {
@@ -716,7 +914,9 @@ const enforceDesignFirstFlow = (backendItem = {}) => {
 const PREPARE_LOADING_TEXT = 'tunggu dulu ya kaka BosLeonardo lagi kirim data';
 const REPRINT_SPEC_CACHE_KEY = 'pos_reprint_spec_cache_v1';
 const REPRINT_SPEC_CACHE_MAX = 120;
+const PRINTER_PROFILE_STORAGE_KEY = 'pos_printer_profile_v1';
 let memoryReprintSpecCache = [];
+let memoryPrinterProfile = null;
 const canUseLocalStorage = () => {
   return typeof globalThis !== 'undefined' && typeof globalThis.localStorage !== 'undefined';
 };
@@ -781,6 +981,52 @@ const findReprintSpecSnapshot = ({ orderId, invoiceNo }) => {
     return rows.find((row) => String(row?.invoiceNo || '').trim() === safeInvoiceNo) || null;
   }
   return null;
+};
+const getDefaultPrinterProfile = () => normalizePrinterProfile({
+  ...DEFAULT_PRINTER_PROFILES.browserFallback,
+});
+const loadStoredPrinterProfile = () => {
+  if (canUseLocalStorage()) {
+    try {
+      const raw = globalThis.localStorage.getItem(PRINTER_PROFILE_STORAGE_KEY);
+      if (!raw) return null;
+      const parsed = JSON.parse(raw);
+      if (!parsed || typeof parsed !== 'object') {
+        return null;
+      }
+      return normalizePrinterProfile({
+        ...getDefaultPrinterProfile(),
+        ...parsed,
+      });
+    } catch (_error) {
+      return null;
+    }
+  }
+  return memoryPrinterProfile ? normalizePrinterProfile(memoryPrinterProfile) : null;
+};
+const persistPrinterProfile = (profile) => {
+  if (!profile || typeof profile !== 'object') {
+    if (canUseLocalStorage()) {
+      try {
+        globalThis.localStorage.removeItem(PRINTER_PROFILE_STORAGE_KEY);
+      } catch (_error) {
+        // ignore storage errors
+      }
+    }
+    memoryPrinterProfile = null;
+    return;
+  }
+
+  const next = normalizePrinterProfile(profile);
+  if (canUseLocalStorage()) {
+    try {
+      globalThis.localStorage.setItem(PRINTER_PROFILE_STORAGE_KEY, JSON.stringify(next));
+    } catch (_error) {
+      // ignore storage errors
+    }
+  } else {
+    memoryPrinterProfile = next;
+  }
 };
 const isNotebookLikeProductName = (name) => /(nota\s*book|notebook|buku\s*nota|\bbook\b|\bbuku\b)/i.test(String(name || ''));
 const humanizeStatusLabel = (value) => {
@@ -1595,6 +1841,25 @@ const extractProductFinishings = (payload) => {
   }
   return [];
 };
+const extractPosConfiguredFinishings = (payload) => {
+  const direct = Array.isArray(payload?.pos_finishings) ? payload.pos_finishings : null;
+  if (direct) {
+    return direct;
+  }
+  const inData = Array.isArray(payload?.data?.pos_finishings) ? payload.data.pos_finishings : null;
+  if (inData) {
+    return inData;
+  }
+  const inProduct = Array.isArray(payload?.product?.pos_finishings) ? payload.product.pos_finishings : null;
+  if (inProduct) {
+    return inProduct;
+  }
+  const inDataProduct = Array.isArray(payload?.data?.product?.pos_finishings) ? payload.data.product.pos_finishings : null;
+  if (inDataProduct) {
+    return inDataProduct;
+  }
+  return [];
+};
 const collectMaterialIds = (...sources) => {
   const ids = [];
   sources.forEach((source) => {
@@ -2005,9 +2270,9 @@ const buildSelectedMaterialStockMessage = (usedMaterialInfo, productName = '') =
   const minStock = Number(usedMaterialInfo?.materialMinStock || 0) || 0;
   const lines = [];
   if (stock <= 0) {
-    lines.push('Stok material tidak tersedia, item tidak bisa disimpan.');
+    lines.push('Stok material tidak tersedia. Item tetap bisa disimpan sebagai draft sementara.');
   } else {
-    lines.push('Stok material sudah menyentuh batas minimum, item belum boleh disimpan.');
+    lines.push('Stok material sudah menyentuh batas minimum. Item sebaiknya disimpan dulu sebagai draft.');
   }
   if (targetProduct) {
     lines.push('Produk: ' + targetProduct + '.');
@@ -2019,6 +2284,7 @@ const buildSelectedMaterialStockMessage = (usedMaterialInfo, productName = '') =
   if (minStock > 0) {
     lines.push('Batas minimum: ' + formatMeterNumber(minStock) + '.');
   }
+  lines.push('Jika bahan masih menunggu disiapkan, lanjutkan dengan Simpan Draft.');
   return lines.join('\n');
 };
 const buildSelectedMaterialLowStockWarning = (usedMaterialInfo, productName = '') => {
@@ -2058,9 +2324,79 @@ const resolveSelectedMaterialWarning = (usedMaterialInfo, productName = '') => {
   if (!usedMaterialInfo?.hasExplicitMaterialStock) {
     return '';
   }
+  const stock = Number(usedMaterialInfo?.materialStock || 0) || 0;
+  if (stock <= 0) {
+    return buildSelectedMaterialStockMessage(usedMaterialInfo, productName);
+  }
   return buildSelectedMaterialLowStockWarning(usedMaterialInfo, productName);
 };
 const PAYMENT_METHOD_LABELS = ['Cash', 'Transfer', 'QRIS', 'Card'];
+const DEFAULT_CASH_FLOW_QUICK_CATEGORIES = {
+  expense: [
+    'Beli ATK',
+    'Beli konsumsi',
+    'Beli galon',
+    'Operasional mendadak',
+    'Ambil owner',
+    'Biaya kurir',
+  ],
+  income: [
+    'Titipan uang',
+    'Pengembalian supplier',
+    'Tambahan modal kas',
+    'Setoran lain',
+    'Penerimaan operasional',
+  ],
+};
+const DEFAULT_RECEIPT_LOGO_MODULE = require('../../assets/logo-sidomulyo.png');
+const DEFAULT_RECEIPT_SETTINGS = {
+  brand_name: 'POS Kasir',
+  brand_tagline: '',
+  receipt_logo_url: '',
+  receipt_title: 'Nota Penjualan',
+  receipt_store_address: '',
+  receipt_store_phone: '',
+  receipt_header_text: '',
+  receipt_footer: 'Terima kasih sudah berbelanja.',
+  receipt_show_order_id: true,
+  receipt_show_cashier: true,
+  receipt_show_customer: true,
+  receipt_show_payment_detail: true,
+};
+const resolveDefaultReceiptLogoUrl = () => {
+  try {
+    return String(Asset.fromModule(DEFAULT_RECEIPT_LOGO_MODULE)?.uri || '').trim();
+  } catch (_error) {
+    return '';
+  }
+};
+const normalizeReceiptSettings = (value = null) => {
+  const raw = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+  const nested = raw?.receipt && typeof raw.receipt === 'object' && !Array.isArray(raw.receipt) ? raw.receipt : {};
+  const resolvedLogoUrl = toLabel(
+    raw.receipt_logo_url,
+    raw.brand_logo,
+    raw.logo_url,
+    raw.logo,
+    nested.logo_url,
+    nested.logo,
+    DEFAULT_RECEIPT_SETTINGS.receipt_logo_url,
+  );
+  return {
+    brand_name: toLabel(raw.brand_name, nested.brand_name, DEFAULT_RECEIPT_SETTINGS.brand_name),
+    brand_tagline: toLabel(raw.brand_tagline, nested.brand_tagline, DEFAULT_RECEIPT_SETTINGS.brand_tagline),
+    receipt_logo_url: resolvedLogoUrl || resolveDefaultReceiptLogoUrl(),
+    receipt_title: toLabel(raw.receipt_title, nested.title, DEFAULT_RECEIPT_SETTINGS.receipt_title),
+    receipt_store_address: toLabel(raw.receipt_store_address, nested.store_address, DEFAULT_RECEIPT_SETTINGS.receipt_store_address),
+    receipt_store_phone: toLabel(raw.receipt_store_phone, nested.store_phone, DEFAULT_RECEIPT_SETTINGS.receipt_store_phone),
+    receipt_header_text: toLabel(raw.receipt_header_text, nested.header_text, DEFAULT_RECEIPT_SETTINGS.receipt_header_text),
+    receipt_footer: toLabel(raw.receipt_footer, nested.footer, DEFAULT_RECEIPT_SETTINGS.receipt_footer),
+    receipt_show_order_id: raw.receipt_show_order_id ?? nested.show_order_id ?? DEFAULT_RECEIPT_SETTINGS.receipt_show_order_id,
+    receipt_show_cashier: raw.receipt_show_cashier ?? nested.show_cashier ?? DEFAULT_RECEIPT_SETTINGS.receipt_show_cashier,
+    receipt_show_customer: raw.receipt_show_customer ?? nested.show_customer ?? DEFAULT_RECEIPT_SETTINGS.receipt_show_customer,
+    receipt_show_payment_detail: raw.receipt_show_payment_detail ?? nested.show_payment_detail ?? DEFAULT_RECEIPT_SETTINGS.receipt_show_payment_detail,
+  };
+};
 
 const normalizePaymentMethodLabel = (value) => {
   const text = normalizeText(value);
@@ -2069,6 +2405,19 @@ const normalizePaymentMethodLabel = (value) => {
   if (['qris', 'qr'].includes(text)) return 'QRIS';
   if (['card', 'kartu', 'debit', 'credit card'].includes(text)) return 'Card';
   return value;
+};
+const humanizePaymentMethod = (value) => {
+  const normalized = normalizePaymentMethodLabel(value);
+  const text = String(normalized || '').trim();
+  return text || 'Lainnya';
+};
+const formatCashFlowSourceLabel = (value) => {
+  const source = String(value || '').trim().toLowerCase();
+  if (source === 'backend') return 'Backend';
+  if (source === 'recent') return 'Riwayat';
+  if (source === 'fallback') return 'Cepat';
+  if (source === 'manual') return 'Manual';
+  return 'Custom';
 };
 
 const formatBackendValidationError = (error) => {
@@ -2186,7 +2535,33 @@ const normalizeBankAccountRow = (row) => {
     row?.rekening,
     row?.number,
   );
-  const displayName = label || [bankName, accountName].filter(Boolean).join(' - ') || accountName || bankName || `Bank #${id}`;
+  const detail = toLabel(
+    row?.detail,
+    row?.payment_detail,
+    row?.description,
+    row?.keterangan,
+  );
+  const displayTitle = [code, accountName].filter(Boolean).join(' - ')
+    || accountName
+    || bankName
+    || label
+    || `Bank #${id}`;
+  const subtitleParts = [];
+  if (bankName && !displayTitle.toLowerCase().includes(bankName.toLowerCase())) {
+    subtitleParts.push(bankName);
+  }
+  if (accountNumber) {
+    subtitleParts.push(`No Rek: ${accountNumber}`);
+  }
+  const displaySubtitle = subtitleParts.join(' | ');
+  const displayDetail = detail && detail !== displaySubtitle ? detail : '';
+  const displayName = label || displayTitle;
+  const paymentType = normalizeText(
+    row?.type
+    || row?.account_type
+    || row?.payment_type
+    || '',
+  );
   return {
     ...row,
     id,
@@ -2195,7 +2570,12 @@ const normalizeBankAccountRow = (row) => {
     bankName,
     accountName,
     accountNumber,
+    detail,
+    displayTitle,
+    displaySubtitle,
+    displayDetail,
     displayName,
+    paymentType,
   };
 };
 const isDraftCandidate = (row) => {
@@ -2204,7 +2584,10 @@ const isDraftCandidate = (row) => {
     return true;
   }
   const notes = String(row?.notes || '').toLowerCase();
-  return notes.includes('mode: simpan draft');
+  if (!notes.includes('mode: simpan draft')) {
+    return false;
+  }
+  return !notes.includes('mode: proses orderan');
 };
 const resolveAppVersionLabel = () => {
   const raw = appEnv.appVersion;
@@ -2227,7 +2610,28 @@ const isDraftPayload = (payload) => {
     return true;
   }
   const notes = String(payload?.notes || '').toLowerCase();
-  return notes.includes('mode: simpan draft');
+  if (!notes.includes('mode: simpan draft')) {
+    return false;
+  }
+  return !notes.includes('mode: proses orderan');
+};
+
+const stripWorkflowSystemNotes = (value) => {
+  const text = String(value || '');
+  if (!text.trim()) {
+    return '';
+  }
+  return text
+    .split(/\r?\n/)
+    .map((line) => String(line || '').trim())
+    .filter((line) => line && !/^customer\s*:/i.test(line))
+    .filter((line) => line && !/^tanggal order\s*:/i.test(line))
+    .filter((line) => line && !/^mode\s*:/i.test(line))
+    .filter((line) => line && !/^lanjutan draft id\s*:/i.test(line))
+    .filter((line) => line && !/^diskon order\s*:/i.test(line))
+    .map((line) => line.replace(/^catatan\s*:\s*/i, '').trim())
+    .filter(Boolean)
+    .join('\n');
 };
 
 const extractUserDisplayName = (user) => {
@@ -2301,7 +2705,9 @@ const SalesScreen = ({ currentUser, onLogout }) => {
   const [activeMenu, setActiveMenu] = useState('pos');
   const [currentDraftSourceId, setCurrentDraftSourceId] = useState(null);
   const [draftInvoices, setDraftInvoices] = useState([]);
+  const [draftTimeTick, setDraftTimeTick] = useState(() => Date.now());
   const [invoiceFilter, setInvoiceFilter] = useState('all');
+  const [receivableStatusFilter, setReceivableStatusFilter] = useState('all');
   const [invoiceSearch, setInvoiceSearch] = useState('');
   const [isDraftLoading, setIsDraftLoading] = useState(false);
   const [isDeletingDraftId, setIsDeletingDraftId] = useState(null);
@@ -2310,6 +2716,34 @@ const SalesScreen = ({ currentUser, onLogout }) => {
   const [productionStatusFilter, setProductionStatusFilter] = useState('all');
   const [productionSearch, setProductionSearch] = useState('');
   const [updatingProductionItemId, setUpdatingProductionItemId] = useState(null);
+  const [closingReportDate, setClosingReportDate] = useState(formatIsoDate(new Date()));
+  const [closingReport, setClosingReport] = useState(null);
+  const [closingRecord, setClosingRecord] = useState(null);
+  const [isClosingReportLoading, setIsClosingReportLoading] = useState(false);
+  const [financeRecipients, setFinanceRecipients] = useState([]);
+  const [isFinanceRecipientsLoading, setIsFinanceRecipientsLoading] = useState(false);
+  const [cashFlowTypes, setCashFlowTypes] = useState([]);
+  const [isCashFlowTypesLoading, setIsCashFlowTypesLoading] = useState(false);
+  const [cashFlowRows, setCashFlowRows] = useState([]);
+  const [isCashFlowRowsLoading, setIsCashFlowRowsLoading] = useState(false);
+  const [cashFlowTransactionType, setCashFlowTransactionType] = useState('expense');
+  const [cashFlowHistoryFilter, setCashFlowHistoryFilter] = useState('all');
+  const [cashFlowTypeId, setCashFlowTypeId] = useState(null);
+  const [cashFlowCategory, setCashFlowCategory] = useState('');
+  const [cashFlowAmount, setCashFlowAmount] = useState('');
+  const [cashFlowNote, setCashFlowNote] = useState('');
+  const [isCashFlowSubmitting, setIsCashFlowSubmitting] = useState(false);
+  const [isClosingSubmitLoading, setIsClosingSubmitLoading] = useState(false);
+  const [closingOpeningCash, setClosingOpeningCash] = useState('');
+  const [closingActualCash, setClosingActualCash] = useState('');
+  const [closingFinanceRecipientId, setClosingFinanceRecipientId] = useState(null);
+  const [closingFinanceRecipient, setClosingFinanceRecipient] = useState('');
+  const [closingShiftNote, setClosingShiftNote] = useState('');
+  const [damageProductSearch, setDamageProductSearch] = useState('');
+  const [selectedDamageProductId, setSelectedDamageProductId] = useState(null);
+  const [damageQtyInput, setDamageQtyInput] = useState('1');
+  const [damageNoteInput, setDamageNoteInput] = useState('');
+  const [closingDamageItems, setClosingDamageItems] = useState([]);
 
   const [backendReady, setBackendReady] = useState(false);
   const [products, setProducts] = useState([]);
@@ -2353,11 +2787,91 @@ const SalesScreen = ({ currentUser, onLogout }) => {
   });
   const [isOrderPreviewOpen, setIsOrderPreviewOpen] = useState(false);
   const [isOrderPreviewSubmitting, setIsOrderPreviewSubmitting] = useState(false);
+  const [posSettings, setPosSettings] = useState(DEFAULT_RECEIPT_SETTINGS);
+  const [printerProfile, setPrinterProfile] = useState(() => loadStoredPrinterProfile() || getDefaultPrinterProfile());
+  const [hasSavedPrinterProfile, setHasSavedPrinterProfile] = useState(() => Boolean(loadStoredPrinterProfile()));
   const [bankAccounts, setBankAccounts] = useState([]);
-  const [isBankAccountLoading, setIsBankAccountLoading] = useState(false);
-  const [isBankPickerOpen, setIsBankPickerOpen] = useState(false);
   const [selectedBankAccountId, setSelectedBankAccountId] = useState(null);
-  const [bankPickerAction, setBankPickerAction] = useState('save');
+  const selectedBankAccountRow = useMemo(
+    () => bankAccounts.find((row) => Number(row?.id || 0) === Number(selectedBankAccountId || 0)) || null,
+    [bankAccounts, selectedBankAccountId],
+  );
+  const paymentMethodHelperText = useMemo(() => {
+    const method = mapPaymentMethodToBackend(paymentMethod);
+    const selectedAccountName = String(
+      selectedBankAccountRow?.displayTitle
+      || selectedBankAccountRow?.displayName
+      || ''
+    ).trim();
+
+    if (method === 'cash') {
+      return selectedAccountName
+        ? `Pembayaran tunai akan otomatis masuk ke akun kas penjualan: ${selectedAccountName}.`
+        : 'Pembayaran tunai akan otomatis masuk ke akun kas penjualan sesuai mapping backend.';
+    }
+
+    if (method === 'qris') {
+      return selectedAccountName
+        ? `Pembayaran QRIS akan otomatis dicatat ke rekening/akun tujuan: ${selectedAccountName}.`
+        : 'Pembayaran QRIS akan otomatis dicatat ke rekening/akun tujuan sesuai mapping backend.';
+    }
+
+    if (method === 'card') {
+      return selectedAccountName
+        ? `Pembayaran kartu akan otomatis dicatat ke akun penampung: ${selectedAccountName}.`
+        : 'Pembayaran kartu akan otomatis dicatat ke akun penampung sesuai mapping backend.';
+    }
+
+    return selectedAccountName
+      ? `Pembayaran transfer akan otomatis dicatat ke rekening tujuan: ${selectedAccountName}.`
+      : 'Pembayaran transfer akan otomatis dicatat ke rekening tujuan sesuai mapping backend.';
+  }, [paymentMethod, selectedBankAccountRow]);
+  const [receivablePaymentModal, setReceivablePaymentModal] = useState({
+    visible: false,
+    orderId: 0,
+    invoiceId: 0,
+    invoiceNo: '',
+    customerName: 'Pelanggan umum',
+    customerPhone: '',
+    dueTotal: 0,
+    amount: '',
+    method: 'Cash',
+    selectedAccountId: null,
+    accountOptions: [],
+    isLoadingAccounts: false,
+    isSubmitting: false,
+  });
+  const selectedReceivableAccountRow = useMemo(
+    () => (Array.isArray(receivablePaymentModal.accountOptions) ? receivablePaymentModal.accountOptions : [])
+      .find((row) => Number(row?.id || 0) === Number(receivablePaymentModal.selectedAccountId || 0)) || null,
+    [receivablePaymentModal.accountOptions, receivablePaymentModal.selectedAccountId],
+  );
+  const receivablePaymentHelperText = useMemo(() => {
+    const method = mapPaymentMethodToBackend(receivablePaymentModal.method);
+    const selectedAccountName = String(
+      selectedReceivableAccountRow?.displayTitle
+      || selectedReceivableAccountRow?.displayName
+      || ''
+    ).trim();
+    if (method === 'cash') {
+      return selectedAccountName
+        ? `Pelunasan tunai akan masuk ke akun kas: ${selectedAccountName}.`
+        : 'Pelunasan tunai akan masuk ke akun kas yang dipilih.';
+    }
+    if (method === 'qris') {
+      return selectedAccountName
+        ? `Pelunasan QRIS akan dicatat ke rekening tujuan: ${selectedAccountName}.`
+        : 'Pelunasan QRIS akan dicatat ke rekening tujuan yang dipilih.';
+    }
+    if (method === 'card') {
+      return selectedAccountName
+        ? `Pelunasan kartu akan dicatat ke akun penampung: ${selectedAccountName}.`
+        : 'Pelunasan kartu akan dicatat ke akun penampung yang dipilih.';
+    }
+    return selectedAccountName
+      ? `Pelunasan transfer akan dicatat ke rekening tujuan: ${selectedAccountName}.`
+      : 'Pelunasan transfer akan dicatat ke rekening tujuan yang dipilih.';
+  }, [receivablePaymentModal.method, selectedReceivableAccountRow]);
   const [pickupModal, setPickupModal] = useState({
     visible: false,
     orderId: 0,
@@ -2397,6 +2911,266 @@ const SalesScreen = ({ currentUser, onLogout }) => {
   const userDisplayName = useMemo(() => extractUserDisplayName(currentUser), [currentUser]);
   const userRoleLabel = useMemo(() => extractUserRoleLabel(currentUser), [currentUser]);
   const userInitial = useMemo(() => String(userDisplayName || 'U').trim().charAt(0).toUpperCase(), [userDisplayName]);
+  const activePrinterProfile = useMemo(
+    () => normalizePrinterProfile(printerProfile || getDefaultPrinterProfile()),
+    [printerProfile],
+  );
+  const printerStatusTone = hasSavedPrinterProfile ? 'active' : 'fallback';
+  const printerStatusLabel = hasSavedPrinterProfile ? 'Printer Kasir Aktif' : 'Fallback Browser';
+  const printerTargetSummary = useMemo(() => {
+    if (!hasSavedPrinterProfile) {
+      return {
+        primary: 'Browser Print',
+        secondary: 'Popup browser standar',
+      };
+    }
+    const profile = activePrinterProfile;
+    if (profile.connection === 'lan' || profile.connection === 'wifi') {
+      return {
+        primary: `${String(profile.connection || '').toUpperCase()} Thermal`,
+        secondary: `${profile.ipAddress || '-'}:${profile.port || 9100}`,
+      };
+    }
+    if (profile.connection === 'qz_tray') {
+      return {
+        primary: 'QZ Tray',
+        secondary: profile.printerName || profile.name || 'Printer belum dipilih',
+      };
+    }
+    if (profile.connection === 'local_service') {
+      return {
+        primary: 'Local Service',
+        secondary: profile.printerName || profile.name || 'Service printer lokal',
+      };
+    }
+    if (profile.connection === 'bluetooth') {
+      return {
+        primary: 'Bluetooth',
+        secondary: profile.printerName || profile.name || 'Printer bluetooth',
+      };
+    }
+    if (profile.connection === 'usb') {
+      return {
+        primary: 'USB Printer',
+        secondary: profile.printerName || profile.name || 'Printer USB',
+      };
+    }
+    return {
+      primary: 'Browser Print',
+      secondary: profile.name || 'Popup browser standar',
+    };
+  }, [activePrinterProfile, hasSavedPrinterProfile]);
+  const printerProfileSummary = useMemo(() => {
+    if (!hasSavedPrinterProfile) {
+      return 'Belum ada printer kasir khusus. Cetak akan tetap memakai popup browser biasa.';
+    }
+    const profile = activePrinterProfile;
+    const target = profile.connection === 'lan' || profile.connection === 'wifi'
+      ? `${profile.ipAddress || '-'}:${profile.port || 9100}`
+      : (profile.printerName || profile.connection || '-');
+    return `${profile.name} | ${profile.type} | ${profile.paperWidth} | ${target}`;
+  }, [activePrinterProfile, hasSavedPrinterProfile]);
+  const printerPaperSummary = useMemo(() => {
+    const profile = activePrinterProfile;
+    const paperLabel = profile.paperWidth === 'custom'
+      ? 'Custom / Browser'
+      : profile.paperWidth === '58mm'
+        ? 'Thermal 58mm'
+        : 'Thermal 80mm';
+    return `${paperLabel} | ${profile.charsPerLine || '-'} karakter per baris`;
+  }, [activePrinterProfile]);
+
+  const handlePrinterProfileChange = (nextProfile) => {
+    const normalized = normalizePrinterProfile({
+      ...createPrinterProfile({
+        id: activePrinterProfile?.id || DEFAULT_PRINTER_PROFILES.browserFallback.id,
+        name: activePrinterProfile?.name || DEFAULT_PRINTER_PROFILES.browserFallback.name,
+        type: activePrinterProfile?.type || DEFAULT_PRINTER_PROFILES.browserFallback.type,
+        connection: activePrinterProfile?.connection || DEFAULT_PRINTER_PROFILES.browserFallback.connection,
+      }),
+      ...(nextProfile || {}),
+    });
+    setPrinterProfile(normalized);
+    setHasSavedPrinterProfile(true);
+    persistPrinterProfile(normalized);
+  };
+  const handleResetPrinterToBrowser = () => {
+    const fallbackProfile = getDefaultPrinterProfile();
+    setPrinterProfile(fallbackProfile);
+    setHasSavedPrinterProfile(false);
+    persistPrinterProfile(null);
+    openNotice('Printer Kasir', 'Printer kasir khusus dinonaktifkan. Cetak kembali memakai browser print.', null, {
+      autoCloseMs: 2200,
+    });
+  };
+  const handleRestoreRecommendedPrinterDefaults = () => {
+    const recommended = normalizePrinterProfile({
+      ...DEFAULT_PRINTER_PROFILES.browserFallback,
+      name: 'Browser Print',
+    });
+    setPrinterProfile(recommended);
+    setHasSavedPrinterProfile(false);
+    persistPrinterProfile(null);
+    openNotice('Printer Kasir', 'Form printer dikembalikan ke mode browser standar.', null, {
+      autoCloseMs: 2200,
+    });
+  };
+  const confirmDisablePrinterProfile = () => {
+    if (!hasSavedPrinterProfile) {
+      handleRestoreRecommendedPrinterDefaults();
+      return;
+    }
+    openNoticeActions(
+      'Nonaktifkan Printer Kasir',
+      'Cetak thermal/QZ/LAN akan dimatikan dan transaksi kembali memakai popup browser. Lanjutkan?',
+      [
+        { label: 'Batal', role: 'secondary' },
+        { label: 'Nonaktifkan', role: 'danger', onPress: handleResetPrinterToBrowser },
+      ],
+    );
+  };
+
+  const loadClosingReport = async (overrideDate = null) => {
+    const reportDate = String(overrideDate || closingReportDate || formatIsoDate(new Date())).trim();
+    if (!reportDate) {
+      openNotice('Laporan Close Order', 'Tanggal laporan wajib diisi.');
+      return;
+    }
+    if (!backendReady) {
+      setClosingReport(null);
+      return;
+    }
+    try {
+      setIsClosingReportLoading(true);
+      const payload = await fetchPosClosingSummary({ date: reportDate });
+      setClosingReport(payload && typeof payload === 'object' ? payload : null);
+    } catch (error) {
+      setClosingReport(null);
+      openNotice('Laporan Close Order', `Gagal memuat laporan closing: ${error.message}`);
+    } finally {
+      setIsClosingReportLoading(false);
+    }
+  };
+
+  const loadFinanceRecipients = async () => {
+    if (!backendReady) {
+      setFinanceRecipients([]);
+      return;
+    }
+    try {
+      setIsFinanceRecipientsLoading(true);
+      const rows = await fetchPosFinanceRecipients();
+      const normalizedRows = (Array.isArray(rows) ? rows : [])
+        .filter((row) => normalizeText(row?.role_name) === 'admin_keuangan')
+        .map((row) => ({
+          ...row,
+          id: Number(row?.id || 0),
+          name: String(row?.name || '').trim(),
+          email: String(row?.email || '').trim(),
+          outletName: String(row?.outlet_name || '').trim(),
+        }))
+        .filter((row) => row.id > 0 && row.name);
+      setFinanceRecipients(normalizedRows);
+      if (!(Number(closingFinanceRecipientId || 0) > 0) && normalizedRows.length > 0) {
+        setClosingFinanceRecipientId(normalizedRows[0].id);
+        setClosingFinanceRecipient(normalizedRows[0].name);
+      }
+    } catch (error) {
+      setFinanceRecipients([]);
+      openNotice('Laporan Close Order', `Gagal memuat admin keuangan: ${error.message}`);
+    } finally {
+      setIsFinanceRecipientsLoading(false);
+    }
+  };
+
+  const loadCloserOrderRecord = async (overrideDate = null) => {
+    const reportDate = String(overrideDate || closingReportDate || formatIsoDate(new Date())).trim();
+    if (!backendReady) {
+      setClosingRecord(null);
+      return;
+    }
+    try {
+      const payload = await fetchPosCloserOrder({ date: reportDate });
+      const row = payload && typeof payload === 'object' ? payload : null;
+      setClosingRecord(row);
+      if (row) {
+        setClosingOpeningCash(sanitizeCurrencyInput(String(Math.max(0, Number(row?.opening_cash || 0)))));
+        setClosingActualCash(sanitizeCurrencyInput(String(Math.max(0, Number(row?.cashier_actual_cash || 0)))));
+        setClosingFinanceRecipientId(Number(row?.finance_user?.id || 0) || null);
+        setClosingFinanceRecipient(String(row?.finance_user?.name || '').trim());
+        setClosingShiftNote(String(row?.cashier_note || '').trim());
+        setClosingDamageItems(
+          (Array.isArray(row?.damage_items) ? row.damage_items : []).map((item) => ({
+            id: Number(item?.id || 0) || `damage-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+            productId: Number(item?.product_id || 0) || null,
+            productName: String(item?.product_name || '').trim(),
+            qty: Math.max(0, Number(item?.qty || 0)) || 0,
+            note: String(item?.cashier_note || '').trim(),
+            estimatedTotalValue: roundMoney(Number(item?.estimated_total_value || 0)),
+            auditStatus: String(item?.audit_status || 'reported'),
+            responsibility: String(item?.responsibility || ''),
+          })),
+        );
+      } else {
+        setClosingDamageItems([]);
+      }
+    } catch (_error) {
+      setClosingRecord(null);
+    }
+  };
+
+  const loadCashFlowTypes = async (transactionType = null) => {
+    if (!backendReady) {
+      setCashFlowTypes([]);
+      return;
+    }
+    try {
+      setIsCashFlowTypesLoading(true);
+      const rows = await fetchPosCashFlowTypes({
+        type: transactionType || cashFlowTransactionType || '',
+        active_only: true,
+      });
+      setCashFlowTypes(Array.isArray(rows) ? rows : []);
+    } catch (error) {
+      setCashFlowTypes([]);
+      openNotice('Kas Masuk / Keluar', `Gagal memuat tipe transaksi: ${error.message}`);
+    } finally {
+      setIsCashFlowTypesLoading(false);
+    }
+  };
+
+  const loadCashFlowRows = async (overrideDate = null) => {
+    const reportDate = String(overrideDate || closingReportDate || formatIsoDate(new Date())).trim();
+    if (!backendReady) {
+      setCashFlowRows([]);
+      return;
+    }
+    try {
+      setIsCashFlowRowsLoading(true);
+      const payload = await fetchPosCashFlows({
+        date_from: reportDate,
+        date_to: reportDate,
+        per_page: 20,
+      });
+      const rows = Array.isArray(payload?.data) ? payload.data : (Array.isArray(payload) ? payload : []);
+      setCashFlowRows(rows);
+    } catch (error) {
+      setCashFlowRows([]);
+      openNotice('Kas Masuk / Keluar', `Gagal memuat riwayat kas: ${error.message}`);
+    } finally {
+      setIsCashFlowRowsLoading(false);
+    }
+  };
+
+  const loadClosingWorkspace = async (overrideDate = null) => {
+    const reportDate = String(overrideDate || closingReportDate || formatIsoDate(new Date())).trim();
+    await Promise.all([
+      loadClosingReport(reportDate),
+      loadCashFlowRows(reportDate),
+      loadCloserOrderRecord(reportDate),
+      loadFinanceRecipients(),
+    ]);
+  };
 
   const openNotice = (title, message, onClose = null, options = {}) => {
     setNoticeModal({
@@ -2475,6 +3249,42 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         pages: Math.max(Number(restored.pages || item?.pages || 1) || 1, 1),
       };
     });
+  };
+  const normalizeOrderDetailRow = (payload, fallbackRow = null) => {
+    const detailData = payload?.data && typeof payload.data === 'object' ? payload.data : null;
+    const nestedOrder = detailData?.order && typeof detailData.order === 'object' ? detailData.order : null;
+    const detailRow = Array.isArray(payload)
+      ? payload[0]
+      : (detailData && !Array.isArray(detailData) ? detailData : payload);
+    const detailItems = Array.isArray(detailRow?.items)
+      ? detailRow.items
+      : Array.isArray(detailRow?.order_items)
+        ? detailRow.order_items
+        : Array.isArray(detailData?.items)
+          ? detailData.items
+          : Array.isArray(detailData?.order_items)
+            ? detailData.order_items
+            : Array.isArray(nestedOrder?.items)
+              ? nestedOrder.items
+              : Array.isArray(nestedOrder?.order_items)
+                ? nestedOrder.order_items
+                : [];
+    if (!detailRow || typeof detailRow !== 'object') {
+      return fallbackRow;
+    }
+    return {
+      ...(fallbackRow && typeof fallbackRow === 'object' ? fallbackRow : {}),
+      ...(nestedOrder || {}),
+      ...detailRow,
+      customer: detailRow?.customer || nestedOrder?.customer || fallbackRow?.customer || null,
+      invoice: detailRow?.invoice || nestedOrder?.invoice || fallbackRow?.invoice || null,
+      pickup: detailRow?.pickup || nestedOrder?.pickup || fallbackRow?.pickup || null,
+      production: detailRow?.production || nestedOrder?.production || fallbackRow?.production || null,
+      payment: detailRow?.payment || nestedOrder?.payment || fallbackRow?.payment || null,
+      items: detailItems.length > 0
+        ? detailItems
+        : (Array.isArray(fallbackRow?.items) ? fallbackRow.items : []),
+    };
   };
   const playSynthNotificationTone = () => {
     if (Platform.OS === 'web') {
@@ -2593,10 +3403,19 @@ const SalesScreen = ({ currentUser, onLogout }) => {
   };
 
   const buildOrderPreviewSnapshot = () => {
+    const paymentTargetName = String(
+      selectedBankAccountRow?.displayTitle
+      || selectedBankAccountRow?.displayName
+      || ''
+    ).trim();
     return {
+      draftNo: currentDraftSourceId ? `DRF-${currentDraftSourceId}` : '-',
       transactionDate,
       customerName: String(selectedCustomer?.name || 'Pelanggan umum'),
+      customerPhone: String(selectedCustomer?.phone || selectedCustomer?.mobile || selectedCustomer?.whatsapp || '-'),
+      cashierName: String(currentUser?.name || 'Kasir'),
       paymentMethod: normalizePaymentMethodLabel(paymentMethod),
+      paymentTargetName,
       paymentStatus,
       paymentAmount: paidAmount,
       discountAmount: finalDiscount,
@@ -2607,91 +3426,424 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         no: index + 1,
         product: String(item?.product || '-'),
         qty: Number(item?.qty || 0),
+        price: Number(
+          item?.pricingSummary?.grandTotal
+          || item?.pricingSummary?.printSubtotal
+          || item?.lineTotal
+          || item?.total
+          || 0,
+        ) / Math.max(Number(item?.qty || 0) || 1, 1),
         size: String(item?.size || '-'),
         finishing: String(item?.finishing || '-'),
         lbMax: String(item?.lbMax || '-'),
         material: String(item?.material || '-'),
+        pages: Math.max(Number(item?.pages || 1) || 1, 1),
+        note: String(item?.note || item?.notes || '-'),
         total: Number(item?.total || item?.lineTotal || 0),
       })),
     };
   };
 
-  const printOrderPreview = (snapshot, submitResult) => {
-    if (Platform.OS !== 'web') {
+  const formatClipboardMoney = (value) => formatRupiah(Number(value || 0) || 0);
+
+  const appendClipboardSection = (lines, title, values = []) => {
+    lines.push(title);
+    values.filter(Boolean).forEach((value) => lines.push(value));
+    lines.push('');
+  };
+
+  const buildInvoiceClipboardText = (receiptData, options = {}) => {
+    const estimatedDoneAt = String(options?.estimatedDoneAt || '-').trim() || '-';
+    const customerPhone = String(options?.customerPhone || '-').trim() || '-';
+    const items = Array.isArray(receiptData?.items) ? receiptData.items : [];
+    const paidAmount = Number(receiptData?.summary?.paid || 0) || 0;
+    const remainingDue = Number(receiptData?.summary?.remainingDue || 0) || 0;
+    const paymentAmountLabel = remainingDue > 0
+      ? 'DP'
+      : (paidAmount > 0 ? 'Pembayaran' : 'Bayar');
+    const lines = [];
+
+    appendClipboardSection(lines, 'INVOICE', [
+      `No. Invoice: ${receiptData?.transaction?.invoiceNo || '-'}`,
+      `Tanggal: ${receiptData?.transaction?.date || '-'}`,
+      `Pelanggan: ${receiptData?.transaction?.customer || '-'}`,
+      `No. HP: ${customerPhone}`,
+      `Status Pembayaran: ${receiptData?.transaction?.paymentStatus || '-'}`,
+      `Metode Pembayaran: ${receiptData?.payment?.method || '-'}`,
+      `Estimasi Selesai: ${estimatedDoneAt}`,
+    ]);
+
+    appendClipboardSection(lines, 'DETAIL PESANAN', items.flatMap((item, index) => ([
+      `${index + 1}. ${item?.name || '-'}`,
+      `   Qty: ${item?.qty || 0}`,
+      `   Ukuran: ${item?.size || '-'}`,
+      `   Bahan: ${item?.material || '-'}`,
+      `   Finishing: ${item?.finishing || '-'}`,
+      `   Catatan: ${item?.notes || '-'}`,
+      `   Harga: ${formatClipboardMoney(item?.price || 0)}`,
+      `   Subtotal: ${formatClipboardMoney(item?.total || 0)}`,
+      ...(item?.pages > 1 ? [`   Halaman: ${item.pages}`] : []),
+    ])));
+
+    appendClipboardSection(lines, 'RINGKASAN PEMBAYARAN', [
+      `Subtotal: ${formatClipboardMoney(receiptData?.summary?.subtotal || 0)}`,
+      `Total: ${formatClipboardMoney(receiptData?.summary?.grandTotal || 0)}`,
+      `${paymentAmountLabel}: ${formatClipboardMoney(paidAmount)}`,
+      `Sisa Bayar: ${formatClipboardMoney(remainingDue)}`,
+    ]);
+
+    return lines.join('\n').trim();
+  };
+
+  const buildOrderClipboardText = (snapshot, options = {}) => {
+    const estimatedDoneAt = String(options?.estimatedDoneAt || '-').trim() || '-';
+    const items = Array.isArray(snapshot?.items) ? snapshot.items : [];
+    const lines = [];
+
+    appendClipboardSection(lines, 'DETAIL PESANAN', [
+      `No. Invoice: ${snapshot?.invoiceNo || snapshot?.draftNo || '-'}`,
+      `Tanggal: ${snapshot?.transactionDate || '-'}`,
+      `Pelanggan: ${snapshot?.customerName || '-'}`,
+      `No. HP: ${snapshot?.customerPhone || '-'}`,
+      `Estimasi Selesai: ${estimatedDoneAt}`,
+    ]);
+
+    items.forEach((item, index) => {
+      lines.push(`${index + 1}. ${item?.product || '-'}`);
+      lines.push(`   Qty: ${item?.qty || 0}`);
+      lines.push(`   Ukuran: ${item?.size || '-'}`);
+      lines.push(`   Bahan: ${item?.material || '-'}`);
+      lines.push(`   Finishing: ${item?.finishing || '-'}`);
+      lines.push(`   Catatan: ${item?.note || '-'}`);
+      if (Number(item?.pages || 0) > 1) {
+        lines.push(`   Halaman: ${item.pages}`);
+      }
+      lines.push(`   Harga: ${formatClipboardMoney(item?.price || 0)}`);
+      lines.push(`   Subtotal: ${formatClipboardMoney(item?.total || 0)}`);
+      lines.push('');
+    });
+
+    return lines.join('\n').trim();
+  };
+
+  const copyTextToClipboard = async (text) => {
+    const value = String(text || '').trim();
+    if (!value) {
+      throw new Error('Teks yang akan disalin kosong.');
+    }
+
+    if (typeof globalThis?.navigator?.clipboard?.writeText === 'function') {
+      await globalThis.navigator.clipboard.writeText(value);
       return;
     }
-    const rows = (snapshot?.items || [])
-      .map((item) => `
-        <tr>
-          <td>${item.no}</td>
-          <td>${escapeHtml(item.product)}</td>
-          <td style="text-align:center;">${item.qty}</td>
-          <td>${escapeHtml(item.size)}</td>
-          <td>${escapeHtml(item.finishing)}</td>
-          <td>${escapeHtml(item.material)}</td>
-          <td style="text-align:right;">${formatRupiah(item.total)}</td>
-        </tr>
-      `)
-      .join('');
 
-    const printWindow = globalThis?.open?.('', '_blank', 'width=980,height=760');
-    if (!printWindow) {
-      openNotice('Cetak Nota', 'Popup browser diblokir. Izinkan popup untuk mencetak nota.');
+    if (typeof document !== 'undefined') {
+      const textarea = document.createElement('textarea');
+      textarea.value = value;
+      textarea.setAttribute('readonly', 'true');
+      textarea.style.position = 'fixed';
+      textarea.style.opacity = '0';
+      document.body.appendChild(textarea);
+      textarea.select();
+      document.execCommand('copy');
+      document.body.removeChild(textarea);
       return;
     }
 
+    throw new Error('Clipboard tidak tersedia di environment ini.');
+  };
+
+  const handleCopyOrderSnapshot = async (snapshot, noticeTitle = 'Salin Pesanan') => {
+    try {
+      await copyTextToClipboard(buildOrderClipboardText(snapshot));
+      openNotice(noticeTitle, 'Detail pesanan berhasil disalin. Tinggal paste ke WhatsApp customer atau tim produksi.', null, {
+        autoCloseMs: 2000,
+      });
+    } catch (error) {
+      openNotice(noticeTitle, `Gagal menyalin detail pesanan: ${error.message}`);
+    }
+  };
+
+  const buildReceiptDataFromPreview = (snapshot, submitResult, receiptSettingsInput = null) => {
+    const receiptSettings = normalizeReceiptSettings(receiptSettingsInput || posSettings);
     const invoiceNo = String(submitResult?.invoiceNo || '-');
-    const backendOrderId = String(submitResult?.backendOrderId || '-');
-    const html = `
-<!doctype html>
-<html>
-<head>
-  <meta charset="utf-8" />
-  <title>Nota Penjualan</title>
-  <style>
-    body { font-family: Arial, sans-serif; margin: 20px; color: #222; }
-    h1 { font-size: 18px; margin: 0 0 8px 0; }
-    .meta { font-size: 12px; margin-bottom: 10px; }
-    table { width: 100%; border-collapse: collapse; font-size: 12px; }
-    th, td { border: 1px solid #999; padding: 6px; vertical-align: top; }
-    th { background: #edf2ff; }
-    .totals { margin-top: 10px; font-size: 12px; }
-  </style>
-</head>
-<body>
-  <h1>Nota Penjualan</h1>
-  <div class="meta">Invoice: ${escapeHtml(invoiceNo)} | Order ID: ${escapeHtml(backendOrderId)} | Tanggal: ${escapeHtml(snapshot.transactionDate)}</div>
-  <div class="meta">Pelanggan: ${escapeHtml(snapshot.customerName)}</div>
-  <table>
-    <thead>
-      <tr>
-        <th>No</th>
-        <th>Produk</th>
-        <th>Qty</th>
-        <th>Ukuran</th>
-        <th>Finishing</th>
-        <th>Bahan</th>
-        <th>Total</th>
-      </tr>
-    </thead>
-    <tbody>${rows}</tbody>
-  </table>
-  <div class="totals">Subtotal: ${formatRupiah(snapshot.subtotal)}</div>
-  <div class="totals">Diskon: ${formatRupiah(snapshot.discountAmount)}</div>
-  <div class="totals"><strong>Total: ${formatRupiah(snapshot.grandTotal)}</strong></div>
-  <div class="totals">Metode Bayar: ${escapeHtml(snapshot.paymentMethod)} | Status: ${escapeHtml(snapshot.paymentStatus)}</div>
-  <div class="totals">Nominal Bayar: ${formatRupiah(snapshot.paymentAmount)}</div>
-  <div class="totals">Catatan: ${escapeHtml(snapshot.notes)}</div>
-</body>
-</html>
-    `;
-    printWindow.document.open();
-    printWindow.document.write(html);
-    printWindow.document.close();
-    printWindow.focus();
-    setTimeout(() => {
-      printWindow.print();
-    }, 300);
+    const orderId = String(submitResult?.backendOrderId || '').trim();
+    return {
+      store: {
+        title: receiptSettings.receipt_title,
+        name: receiptSettings.brand_name,
+        logoUrl: receiptSettings.receipt_logo_url,
+        tagline: receiptSettings.brand_tagline,
+        address: receiptSettings.receipt_store_address,
+        phone: receiptSettings.receipt_store_phone,
+        headerText: receiptSettings.receipt_header_text,
+        footer: receiptSettings.receipt_footer,
+      },
+      transaction: {
+        invoiceNo,
+        orderId,
+        date: String(snapshot?.transactionDate || ''),
+        cashier: String(snapshot?.cashierName || ''),
+        customer: String(snapshot?.customerName || ''),
+        paymentStatus: String(snapshot?.paymentStatus || ''),
+      },
+      items: Array.isArray(snapshot?.items)
+        ? snapshot.items.map((item) => ({
+          name: String(item?.product || '-'),
+          qty: Number(item?.qty || 0) || 0,
+          price: Number(item?.price || 0) || 0,
+          size: String(item?.size || '-'),
+          material: String(item?.material || '-'),
+          finishing: String(item?.finishing || '-'),
+          lbMax: String(item?.lbMax || '-'),
+          pages: Math.max(Number(item?.pages || 0) || 0, 0) || undefined,
+          notes: String(item?.note || '-'),
+          total: Number(item?.total || 0) || 0,
+        }))
+        : [],
+      summary: {
+        subtotal: Number(snapshot?.subtotal || 0) || 0,
+        discount: Number(snapshot?.discountAmount || 0) || 0,
+        grandTotal: Number(snapshot?.grandTotal || 0) || 0,
+        paid: Number(snapshot?.paymentAmount || 0) || 0,
+        change: Math.max(0, (Number(snapshot?.paymentAmount || 0) || 0) - (Number(snapshot?.grandTotal || 0) || 0)),
+        remainingDue: Math.max(0, (Number(snapshot?.grandTotal || 0) || 0) - (Number(snapshot?.paymentAmount || 0) || 0)),
+      },
+      payment: {
+        method: String(snapshot?.paymentMethod || ''),
+        amount: Number(snapshot?.paymentAmount || 0) || 0,
+        targetAccount: String(snapshot?.paymentTargetName || ''),
+      },
+      layout: {
+        showOrderId: Boolean(receiptSettings.receipt_show_order_id),
+        showCashier: Boolean(receiptSettings.receipt_show_cashier),
+        showCustomer: Boolean(receiptSettings.receipt_show_customer),
+        showPaymentDetail: Boolean(receiptSettings.receipt_show_payment_detail),
+      },
+    };
+  };
+
+  const mapReceiptItemFromSource = (item, index = 0) => {
+    const restored = restoreDraftItemDisplay(item, materialMapById, finishingNameMapById);
+    const productName = toLabel(
+      item?.productName,
+      item?.product,
+      item?.product_name,
+      item?.product?.name,
+      item?.name,
+      `Item #${index + 1}`,
+    );
+    const qty = Math.max(Number(item?.qty || item?.quantity || 1) || 1, 1);
+    const rawLineTotal = Number(
+      item?.lineTotal
+      ?? item?.line_total
+      ?? item?.total
+      ?? item?.subtotal
+      ?? 0,
+    ) || 0;
+    const finishingTotal = Number(item?.finishing_total || 0) || 0;
+    const expressFee = Number(item?.express_fee || 0) || 0;
+    const lineTotal = roundMoney(rawLineTotal + finishingTotal + expressFee);
+    const directPrice = Number(item?.price || 0) || 0;
+    const pricingSummary = item?.pricingSummary && typeof item.pricingSummary === 'object'
+      ? item.pricingSummary
+      : buildPricingSummaryFromBackendItem(item, restored.materialText || '');
+
+    const resolvedUnitPrice = directPrice > 0
+      ? directPrice
+      : roundMoney(
+          (
+            Number(pricingSummary?.grandTotal || 0)
+            || Number(pricingSummary?.printSubtotal || 0)
+            || lineTotal
+          ) / qty,
+        );
+
+    return {
+      name: productName,
+      qty,
+      price: resolvedUnitPrice,
+      size: toLabel(item?.size, item?.sizeText, restored.sizeText, '-'),
+      material: toLabel(item?.material, item?.materialText, restored.materialText, '-'),
+      finishing: toLabel(item?.finishing, item?.finishingText, restored.finishingText, '-'),
+      lbMax: toLabel(item?.lbMax, item?.lbMaxText, restored.lbMaxText, '-'),
+      pages: Math.max(Number(item?.pages || restored.pages || 0) || 0, 0) || undefined,
+      notes: toLabel(item?.note, item?.notes, '-'),
+      total: lineTotal,
+    };
+  };
+
+  const buildReceiptDataFromOrderRow = (sourceRow, items = [], receiptSettingsInput = null) => {
+    const receiptSettings = normalizeReceiptSettings(receiptSettingsInput || posSettings);
+    const total = Number(
+      sourceRow?.invoice?.total
+      || sourceRow?.total
+      || sourceRow?.grand_total
+      || calculateDraftItemsTotal(items)
+      || 0
+    );
+    const paidTotal = Number(sourceRow?.invoice?.paid_total || sourceRow?.paid_total || 0) || 0;
+    const dueTotal = Number(sourceRow?.invoice?.due_total || sourceRow?.due_total || 0) || 0;
+    const resolvedBankAccountId = Number(
+      sourceRow?.bank_account_id
+      || sourceRow?.invoice?.bank_account_id
+      || sourceRow?.payment?.bank_account_id
+      || 0
+    );
+    const resolvedPaymentTarget = bankAccounts.find((row) => Number(row?.id || 0) === resolvedBankAccountId) || null;
+    const paymentTargetName = String(
+      resolvedPaymentTarget?.displayTitle
+      || resolvedPaymentTarget?.displayName
+      || ''
+    ).trim();
+    const paymentMethodLabel = normalizePaymentMethodLabel(
+      sourceRow?.invoice?.payment_method
+      || sourceRow?.payment_method
+      || sourceRow?.payment?.method
+      || sourceRow?.payment?.payment_method
+      || ''
+    );
+    const paymentStatusLabel = dueTotal > 0
+      ? (paidTotal > 0 ? 'DP / Piutang' : 'Piutang')
+      : (paidTotal > 0 ? 'Lunas' : '');
+    return {
+      store: {
+        title: receiptSettings.receipt_title,
+        name: receiptSettings.brand_name,
+        logoUrl: receiptSettings.receipt_logo_url,
+        tagline: receiptSettings.brand_tagline,
+        address: receiptSettings.receipt_store_address,
+        phone: receiptSettings.receipt_store_phone,
+        headerText: receiptSettings.receipt_header_text,
+        footer: receiptSettings.receipt_footer,
+      },
+      transaction: {
+        invoiceNo: String(sourceRow?.invoice?.invoice_no || '-'),
+        orderId: String(sourceRow?.id || ''),
+        date: String(sourceRow?.created_at || ''),
+        cashier: String(sourceRow?.cashier?.name || currentUser?.name || 'Kasir'),
+        customer: String(sourceRow?.customer?.name || 'Pelanggan umum'),
+        paymentStatus: paymentStatusLabel,
+      },
+      items: Array.isArray(items)
+        ? items.map((item, index) => mapReceiptItemFromSource(item, index))
+        : [],
+      summary: {
+        subtotal: total,
+        grandTotal: total,
+        paid: paidTotal > 0 ? paidTotal : undefined,
+        remainingDue: dueTotal > 0 ? dueTotal : 0,
+      },
+      payment: paymentMethodLabel ? {
+        method: paymentMethodLabel,
+        amount: paidTotal,
+        targetAccount: paymentTargetName,
+      } : undefined,
+      layout: {
+        showOrderId: Boolean(receiptSettings.receipt_show_order_id),
+        showCashier: Boolean(receiptSettings.receipt_show_cashier),
+        showCustomer: Boolean(receiptSettings.receipt_show_customer),
+        showPaymentDetail: Boolean(receiptSettings.receipt_show_payment_detail),
+      },
+    };
+  };
+
+  const buildBrowserReceiptPreviewHtml = (receiptData, profileInput = null) => {
+    const profile = normalizePrinterProfile(profileInput || activePrinterProfile || DEFAULT_PRINTER_PROFILES.browserFallback);
+    const receiptTitle = String(receiptData?.store?.title || 'Nota Penjualan').trim() || 'Nota Penjualan';
+    const receiptText = renderReceiptText(receiptData, profile);
+    return renderReceiptHtml(receiptText, profile, receiptTitle, {
+      logoUrl: receiptData?.store?.logoUrl,
+      hideTitleText: Boolean(receiptData?.store?.logoUrl),
+      titleText: receiptTitle,
+    });
+  };
+
+  const buildBrowserPrintOptionsFromReceipt = (receiptData, noticeTitle = 'Receipt') => {
+    const receiptTitle = String(receiptData?.store?.title || noticeTitle || 'Receipt').trim() || 'Receipt';
+    const logoUrl = String(receiptData?.store?.logoUrl || '').trim();
+    return {
+      title: receiptTitle,
+      logoUrl,
+      hideTitleText: Boolean(logoUrl),
+      titleText: receiptTitle,
+    };
+  };
+
+  const printReceiptViaBrowserFallback = async ({
+    noticeTitle,
+    receiptData,
+    profileInput = activePrinterProfile,
+    shouldTryPrinterProfile = true,
+    forceBrowserPrint = false,
+    onPrinterFailureMessage,
+    onPrinted,
+  }) => {
+    if (forceBrowserPrint || !shouldTryPrinterProfile) {
+      const html = buildBrowserReceiptPreviewHtml(receiptData, profileInput);
+      const written = writeHtmlToPrintWindow(html, {
+        title: noticeTitle,
+      });
+      if (!written) {
+        openNotice(noticeTitle, 'Dokumen cetak gagal ditampilkan di popup browser.');
+      }
+      return written;
+    }
+
+    try {
+      const printed = await printReceipt(
+        receiptData,
+        profileInput,
+        createBrowserPrintOptions(profileInput, null, buildBrowserPrintOptionsFromReceipt(receiptData, noticeTitle)),
+      );
+      if (typeof onPrinted === 'function') {
+        onPrinted(printed);
+      }
+      return true;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown printing error';
+      if (typeof onPrinterFailureMessage === 'function') {
+        onPrinterFailureMessage(message);
+      }
+      const html = buildBrowserReceiptPreviewHtml(receiptData, profileInput);
+      const written = writeHtmlToPrintWindow(html, {
+        title: noticeTitle,
+      });
+      if (!written) {
+        openNotice(noticeTitle, 'Dokumen cetak gagal ditampilkan di popup browser.');
+      }
+      return written;
+    }
+  };
+
+  const printHtmlDocument = (html, noticeTitle) => {
+    if (!html) {
+      return false;
+    }
+    const written = writeHtmlToPrintWindow(html, {
+      title: noticeTitle,
+    });
+    if (!written) {
+      openNotice(noticeTitle, 'Dokumen cetak gagal ditampilkan di popup browser.');
+    }
+    return written;
+  };
+
+  const printOrderPreview = async (snapshot, submitResult) => {
+    const receiptData = buildReceiptDataFromPreview(snapshot, submitResult, {
+      ...posSettings,
+      ...(submitResult?.receipt && typeof submitResult.receipt === 'object' ? { receipt: submitResult.receipt } : {}),
+    });
+    await printReceiptViaBrowserFallback({
+      noticeTitle: 'Cetak Nota',
+      receiptData,
+      profileInput: activePrinterProfile,
+      shouldTryPrinterProfile: hasSavedPrinterProfile,
+      forceBrowserPrint: true,
+      onPrinterFailureMessage: (message) => {
+        openNotice('Cetak Nota', `Printer kasir gagal dipakai, fallback ke browser. Detail: ${message}`);
+      },
+    });
   };
 
   useEffect(() => {
@@ -2720,13 +3872,14 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       try {
         setIsPreparingApp(true);
         setPrepareMessage(PREPARE_LOADING_TEXT);
-        const [productsRows, finishingRows, materialsRows, productionMaterialsRows, customerRows, customerTypeRows] = await Promise.all([
+        const [productsRows, finishingRows, materialsRows, productionMaterialsRows, customerRows, customerTypeRows, posSettingsPayload] = await Promise.all([
           fetchPosProducts(),
           fetchPosFinishings().catch(() => []),
           fetchPosMaterials(),
           fetchPosProductionMaterials().catch(() => []),
           fetchPosCustomers(),
           fetchPosCustomerTypes().catch(() => []),
+          fetchPosSettings().catch(() => null),
         ]);
 
         setProducts(toDataRows(productsRows));
@@ -2760,6 +3913,12 @@ const SalesScreen = ({ currentUser, onLogout }) => {
           return String(a.name || '').localeCompare(String(b.name || ''), 'id');
         });
         setCustomerTypes(mergedTypes);
+        if (posSettingsPayload && typeof posSettingsPayload === 'object' && !Array.isArray(posSettingsPayload)) {
+          setPosSettings((prev) => ({
+            ...prev,
+            ...normalizeReceiptSettings(posSettingsPayload),
+          }));
+        }
         setBackendReady(true);
         setHealthStatus({
           state: 'online',
@@ -3230,6 +4389,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
           price: Number(row?.price || 0),
           price_reseller: Number(row?.price_reseller || 0),
           price_express: Number(row?.price_express || 0),
+          price_type: String(row?.price_type || meta?.finishing_price_type || 'flat'),
           unit_hint: String(meta?.finishing_unit_hint || meta?.unit_hint || 'flat'),
           lb_max_width_cm: Number(meta?.finishing_lb_max_width_cm ?? meta?.lb_max_width_cm ?? 0),
           source: 'catalog',
@@ -3271,6 +4431,11 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     () => (selectedIsStrictSticker ? 'sticker' : 'mmt'),
     [selectedIsStrictSticker],
   );
+  const autoApplyMmtFinishing = useMemo(() => {
+    return isPrintingProductType(selectedProductType)
+      && !selectedIsStrictSticker
+      && !selectedProductFixedSizeMode.enabled;
+  }, [selectedProductType, selectedIsStrictSticker, selectedProductFixedSizeMode.enabled]);
   const effectiveFinishingOptions = useMemo(() => {
     const productFinishings = selectedProductFinishings.map((row) => ({
       id: Number(row.id || 0),
@@ -3279,6 +4444,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       price: Number(row.price || row.unit_price || row.selling_price || 0),
       price_reseller: Number(row.price_reseller || 0),
       price_express: Number(row.price_express || 0),
+      price_type: String(row.price_type || row.meta?.finishing_price_type || 'flat'),
       unit_hint: String(row.unit_hint || row.meta?.finishing_unit_hint || row.meta?.unit_hint || 'flat'),
       lb_max_width_cm: Number(row.lb_max_width_cm || row.meta?.finishing_lb_max_width_cm || row.meta?.lb_max_width_cm || 0),
       source: 'product',
@@ -3312,9 +4478,76 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       return sideGroups.length > 0 || ['right_left', 'top_bottom', 'all_sides', 'sambungan'].includes(String(option?.axis_group || ''));
     };
 
+    const catalogByName = new Map();
+    printingFinishingCatalog.forEach((option) => {
+      const key = normalizeText(option?.name || '');
+      if (!key || catalogByName.has(key)) {
+        return;
+      }
+      catalogByName.set(key, option);
+    });
+
+    const hydratedProductFinishings = productFinishings.map((option) => {
+      const catalogMatch = catalogByName.get(normalizeText(option?.name || ''));
+      if (!catalogMatch) {
+        return option;
+      }
+
+      const optionHasAxis = hasSelectableAxis(option);
+      const shouldHydrateFromCatalog = Number(option?.price || 0) <= 0
+        || (!optionHasAxis && hasSelectableAxis(catalogMatch))
+        || !String(option?.unit_hint || '').trim();
+
+      if (!shouldHydrateFromCatalog) {
+        return option;
+      }
+
+      const catalogPriceType = String(catalogMatch.price_type || '').trim() || 'flat';
+      const catalogUnitHint = String(catalogMatch.unit_hint || '').trim() || 'flat';
+      const optionPrice = Number(option.price || 0);
+      const useCatalogPricingMeta = selectedFinishingDomain === 'mmt' && optionPrice <= 0;
+
+      return {
+        ...option,
+        id: Number(catalogMatch.id || option.id || 0),
+        sku: String(option.sku || catalogMatch.sku || '').trim(),
+        price: optionPrice > 0 ? optionPrice : Number(catalogMatch.price || 0),
+        price_reseller: Number(option.price_reseller || 0) > 0
+          ? Number(option.price_reseller || 0)
+          : Number(catalogMatch.price_reseller || 0),
+        price_express: Number(option.price_express || 0) > 0
+          ? Number(option.price_express || 0)
+          : Number(catalogMatch.price_express || 0),
+        price_type: useCatalogPricingMeta
+          ? catalogPriceType
+          : optionPrice > 0
+          ? (String(option.price_type || '').trim() || catalogPriceType)
+          : catalogPriceType,
+        unit_hint: useCatalogPricingMeta
+          ? catalogUnitHint
+          : optionPrice > 0
+          ? (String(option.unit_hint || '').trim() || catalogUnitHint)
+          : catalogUnitHint,
+        lb_max_width_cm: Number(option.lb_max_width_cm || 0) > 0
+          ? Number(option.lb_max_width_cm || 0)
+          : Number(catalogMatch.lb_max_width_cm || 0),
+        source: 'catalog',
+        axis_group: optionHasAxis ? String(option.axis_group || '') : String(catalogMatch.axis_group || ''),
+        side_groups: Array.isArray(option.side_groups) && option.side_groups.length > 0
+          ? option.side_groups
+          : (Array.isArray(catalogMatch.side_groups) ? catalogMatch.side_groups : []),
+        recommendation_groups: Array.isArray(option.recommendation_groups) && option.recommendation_groups.length > 0
+          ? option.recommendation_groups
+          : (Array.isArray(catalogMatch.recommendation_groups) ? catalogMatch.recommendation_groups : []),
+        domain: String(option.domain || '').trim() || String(catalogMatch.domain || '').trim() || 'shared',
+        requires_mata_ayam: option.requires_mata_ayam === true || catalogMatch.requires_mata_ayam === true,
+        payload_key: 'product_id',
+      };
+    }).filter((row) => row.id > 0 && row.name);
+
     if (isPrintingProductType(selectedProductType)) {
-      if (productFinishings.length > 0) {
-        return productFinishings.filter((option) => matchesFinishingDomain(option) && hasSelectableAxis(option));
+      if (hydratedProductFinishings.length > 0) {
+        return hydratedProductFinishings.filter((option) => matchesFinishingDomain(option) && hasSelectableAxis(option));
       }
 
       if (selectedIsStrictSticker) {
@@ -3715,7 +4948,6 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         const fallback = await fetchPosOrders();
         rows = toDataRows(fallback);
       }
-      rows = rows.filter((row) => isDraftInvoiceRow(row) || isProcessingInvoiceRow(row) || isCompletedInvoiceRow(row));
       setDraftInvoices([...queueRows, ...rows]);
     } catch (error) {
       setDraftInvoices(queueRows);
@@ -3733,6 +4965,13 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     }
   }, [activeMenu, backendReady]);
 
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setDraftTimeTick(Date.now());
+    }, 60000);
+    return () => clearInterval(timer);
+  }, []);
+
   const loadProductionItems = async (override = {}) => {
     if (!backendReady) {
       setProductionRows([]);
@@ -3747,7 +4986,9 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         status,
         search,
       });
-      setProductionRows(toDataRows(payload));
+      setProductionRows(
+        toDataRows(payload).filter((row) => !isDraftCandidate(row?.order || row)),
+      );
     } catch (error) {
       setProductionRows([]);
       openNotice('Produksi', `Gagal memuat data produksi: ${error.message}`);
@@ -3761,6 +5002,28 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       loadProductionItems();
     }
   }, [activeMenu, backendReady]);
+
+  useEffect(() => {
+    if (activeMenu === 'report') {
+      loadClosingWorkspace();
+      loadCashFlowTypes();
+    }
+  }, [activeMenu, backendReady]);
+
+  useEffect(() => {
+    const matchedRecipient = (Array.isArray(financeRecipients) ? financeRecipients : [])
+      .find((row) => Number(row?.id || 0) === Number(closingFinanceRecipientId || 0)) || null;
+    if (matchedRecipient?.name) {
+      setClosingFinanceRecipient(matchedRecipient.name);
+    }
+  }, [financeRecipients, closingFinanceRecipientId]);
+
+  useEffect(() => {
+    if (activeMenu === 'report') {
+      loadCashFlowTypes(cashFlowTransactionType);
+      setCashFlowTypeId(null);
+    }
+  }, [cashFlowTransactionType]);
 
   useEffect(() => {
     if (activeMenu !== 'production') {
@@ -3780,7 +5043,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     productionPollingRef.current = true;
     try {
       const payload = await fetchPosProductionItems({ status: 'all' });
-      const rows = toDataRows(payload);
+      const rows = toDataRows(payload).filter((row) => !isDraftCandidate(row?.order || row));
       const nextSnapshot = new Map();
       const changes = [];
 
@@ -3925,32 +5188,15 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         return;
       }
 
-      const cartFromQueue = queueItems.map((backendItem, idx) => {
-        const restored = restoreDraftItemDisplay(backendItem, materialMapById, finishingNameMapById);
-        const subtotal = Number(backendItem?.subtotal || 0);
-        const finishingTotal = Number(backendItem?.finishing_total || 0);
-        const expressFee = Number(backendItem?.express_fee || 0);
-        const lineTotal = roundMoney(subtotal + finishingTotal + expressFee);
-        const materialText = restored.materialText || '-';
-        return {
-          id: `queue-item-${idx}-${Date.now()}`,
-          product: toLabel(
-            backendItem?.product_name,
-            productNameMapById.get(Number(backendItem?.product_id || 0)),
-            `Produk #${Number(backendItem?.product_id || 0)}`,
-          ),
-          qty: Number(backendItem?.qty || 1) || 1,
-          size: restored.sizeText,
-          finishing: restored.finishingText,
-          lbMax: restored.lbMaxText,
-          pages: restored.pages,
-          material: materialText,
-          lineTotal,
-          total: lineTotal,
-          pricingSummary: buildPricingSummaryFromBackendItem(backendItem, materialText),
+      const cartFromQueue = queueItems
+        .map((backendItem, idx) => buildCartItemFromDraftSource(
           backendItem,
-        };
-      });
+          `queue-item-${idx}-${Date.now()}`,
+          materialMapById,
+          finishingNameMapById,
+          productNameMapById,
+        ))
+        .filter((item) => Number(item?.backendItem?.product_id || 0) > 0);
 
       setCartItems(cartFromQueue);
       setCurrentDraftSourceId(null);
@@ -3976,8 +5222,8 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       setDiscountMode('percent');
       setPaymentMethod(normalizePaymentMethodLabel(payload?.payment?.method || 'Cash'));
       setPaymentAmount(String(Math.max(0, Number(payload?.payment?.amount || 0))));
-      setPaymentNotes(String(payload?.payment?.note || ''));
-      setLastSyncInfo('');
+      setPaymentNotes(stripWorkflowSystemNotes(payload?.payment?.note || payload?.notes || ''));
+      setLastSyncInfo(`Lanjut Draft Antrian${payload?.invoice_no ? ` | ${payload.invoice_no}` : ''}`);
       setActiveMenu('pos');
       return;
     }
@@ -3988,75 +5234,32 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     }
 
     try {
-      const order = await fetchPosOrderDetail(selectedId);
+      let order = row;
+      const detailPayload = await fetchPosOrderDetail(selectedId);
+      order = normalizeOrderDetailRow(detailPayload, row) || row;
       if (!isDraftCandidate(order)) {
         openNotice('Invoice', 'Order ini bukan kandidat draft yang bisa dilanjutkan.');
         return;
       }
-      const rows = Array.isArray(order?.items) ? order.items : [];
+      const rows = Array.isArray(order?.items)
+        ? order.items
+        : Array.isArray(order?.order_items)
+          ? order.order_items
+          : [];
       if (rows.length === 0) {
         openNotice('Invoice', 'Order draft tidak memiliki item.');
         return;
       }
 
-      const cartFromDraft = rows.map((item) => {
-        const breakdown = Array.isArray(item?.finishing_breakdown) ? item.finishing_breakdown : [];
-        const restored = restoreDraftItemDisplay(item, materialMapById, finishingNameMapById);
-        const materialId = Number(item?.material_product_id || item?.material_id || 0);
-        const materialCandidates = Array.isArray(item?.material_candidate_ids)
-          ? item.material_candidate_ids.map((id) => Number(id)).filter((id) => id > 0)
-          : Array.isArray(item?.material_product_ids)
-            ? item.material_product_ids.map((id) => Number(id)).filter((id) => id > 0)
-          : [];
-        const subtotal = Number(item?.subtotal || 0);
-        const finishingTotal = Number(item?.finishing_total || 0);
-        const expressFee = Number(item?.express_fee || 0);
-        const lineTotal = roundMoney(subtotal + finishingTotal + expressFee);
-        const materialText = restored.materialText || '-';
-        return {
-          id: `draft-${selectedId}-${item?.id || Math.random().toString(36).slice(2, 7)}`,
-          product: toLabel(
-            item?.product_name,
-            productNameMapById.get(Number(item?.product_id || 0)),
-            '-',
-          ),
-          qty: Number(item?.qty || 1) || 1,
-          size: restored.sizeText,
-          finishing: restored.finishingText,
-          lbMax: restored.lbMaxText,
-          pages: restored.pages,
-          material: materialText,
-          lineTotal,
-          total: lineTotal,
-          pricingSummary: buildPricingSummaryFromBackendItem(item, materialText),
-          backendItem: {
-            product_id: Number(item?.product_id || 0),
-            qty: Number(item?.qty || 1) || 1,
-            input_width_mm: Number(item?.input_width_mm || 0) || null,
-            input_height_mm: Number(item?.input_height_mm || 0) || null,
-            internal_width_mm: Number(item?.internal_width_mm || 0) || null,
-            internal_height_mm: Number(item?.internal_height_mm || 0) || null,
-            input_area_m2: Number(item?.input_area_m2 || 0) || null,
-            internal_area_m2: Number(item?.internal_area_m2 || 0) || null,
-            extra_margin_cm: Number(item?.extra_margin_cm || 0) || 0,
-            calc_unit: String(item?.calc_unit || 'unit'),
-            subtotal: roundMoney(subtotal),
-            finishing_total: roundMoney(finishingTotal),
-            express_fee: roundMoney(expressFee),
-            negotiated_price: Number(item?.negotiated_price || 0) > 0 ? roundMoney(item.negotiated_price) : null,
-            bottom_price_enabled: Boolean(item?.bottom_price_enabled),
-            bottom_price: roundMoney(Number(item?.bottom_price || 0)),
-            bottom_price_min_qty: Math.max(0, Number(item?.bottom_price_min_qty || 0) || 0),
-            requires_production: String(item?.production_status || '').toLowerCase() !== 'not_required',
-            requires_design: Boolean(item?.requires_design),
-            material_product_id: materialId > 0 ? materialId : null,
-            material_product_ids: materialCandidates,
-            finishing_breakdown: breakdown,
-            lb_max: Array.isArray(item?.lb_max) ? item.lb_max : [],
-            spec_snapshot: item?.spec_snapshot || null,
-          },
-        };
-      }).filter((row) => Number(row?.backendItem?.product_id || 0) > 0);
+      const cartFromDraft = rows
+        .map((item) => buildCartItemFromDraftSource(
+          item,
+          `draft-${selectedId}-${item?.id || Math.random().toString(36).slice(2, 7)}`,
+          materialMapById,
+          finishingNameMapById,
+          productNameMapById,
+        ))
+        .filter((row) => Number(row?.backendItem?.product_id || 0) > 0);
 
       if (cartFromDraft.length === 0) {
         openNotice('Invoice', 'Item draft tidak valid untuk dilanjutkan.');
@@ -4066,7 +5269,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       setCartItems(cartFromDraft);
       setCurrentDraftSourceId(selectedId);
       setOrderNumber('');
-      setSelectedCustomerId(Number(order?.customer?.id || 0) || null);
+      setSelectedCustomerId(Number(order?.customer?.id || order?.customer_id || 0) || null);
       setProductName('');
       setSelectedProductId(null);
       setNegotiatedPriceInput('');
@@ -4085,9 +5288,14 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       setDiscountPercent('0');
       setDiscountAmount('0');
       setDiscountMode('percent');
-      setPaymentMethod(normalizePaymentMethodLabel(order?.payment?.method || 'Cash'));
-      setPaymentAmount(String(Math.max(0, Number(order?.invoice?.paid_total || 0))));
-      setPaymentNotes('');
+      setPaymentMethod(normalizePaymentMethodLabel(
+        order?.payment?.method
+        || order?.payment_method
+        || order?.invoice?.payment_method
+        || 'Cash',
+      ));
+      setPaymentAmount(String(Math.max(0, Number(order?.invoice?.paid_total || order?.paid_total || 0))));
+      setPaymentNotes(stripWorkflowSystemNotes(order?.payment?.note || order?.notes || ''));
       setLastSyncInfo(
         `Lanjut Draft #${selectedId}${order?.invoice?.invoice_no ? ` | ${order.invoice.invoice_no}` : ''}`,
       );
@@ -4283,13 +5491,27 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       const mataAyamQty = option?.requires_mata_ayam === true
         ? Math.max(0, Math.floor(Number(selectedFinishingMataAyamQtyById?.[id] || 0)))
         : 0;
+      const optionPrice = Math.max(0, Number(
+        option?.price
+        || option?.unit_price
+        || option?.selling_price
+        || option?.harga
+        || 0,
+      ) || 0);
+      const optionPayload = {
+        qty: qtyNumber,
+        mata_ayam_qty: mataAyamQty,
+        name: String(option?.name || '').trim(),
+        price: optionPrice,
+        price_type: String(option?.price_type || option?.unit_hint || '').trim(),
+      };
       if (option?.payload_key === 'product_id' || option?.source === 'catalog') {
-        return { product_id: id, qty: qtyNumber, mata_ayam_qty: mataAyamQty };
+        return { ...optionPayload, product_id: id };
       }
-      return { id, qty: qtyNumber, mata_ayam_qty: mataAyamQty };
+      return { ...optionPayload, id };
     });
 
-    if (selectedIsStrictSticker) {
+    if (selectedIsStrictSticker || selectedFinishingDomain === 'mmt') {
       return rows;
     }
 
@@ -4517,10 +5739,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     setPaymentMethod('Cash');
     setPaymentAmount('');
     setPaymentNotes('');
-    setIsBankPickerOpen(false);
-    setIsBankAccountLoading(false);
     setSelectedBankAccountId(null);
-    setBankPickerAction('save');
     setLastSyncInfo('');
     setQueueCount(loadOrderQueue().length);
     setLastPayloadPreview(null);
@@ -4619,7 +5838,6 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       const materialStockMessage = validateSelectedMaterialStock(usedMaterialInfo, targetProduct);
       if (materialStockMessage) {
         openNotice('Stok Material', materialStockMessage);
-        return;
       }
       const sourceMeta = toSourceMeta(productDetail || product);
       const negotiationConfig = resolveA3NegotiationConfig(product, productDetail);
@@ -4643,6 +5861,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
 
       const backendItem = {
         product_id: Number(product.id),
+        product_name: String(buildSelectedProductLabel(product) || product.name || '').trim(),
         qty: qtyNumber,
         input_width_mm: size.widthMm || null,
         input_height_mm: size.heightMm || null,
@@ -4659,10 +5878,20 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         requires_design: Boolean(product.requires_production ?? true),
         material_product_id: materialId || null,
         material_product_ids: materialCandidateIds,
+        size_text: size.displayText,
+        material_text: materialText,
+        finishing_text: selectedFinishingDisplay || '-',
+        lb_max_text: selectedLbMaxSummary || '-',
+        pages: pageNumber,
+        note: '-',
         lb_max: buildLbMaxPayload() || [],
         finishing_breakdown: Array.isArray(pricing.finishing_breakdown) ? pricing.finishing_breakdown : [],
         spec_snapshot: {
           type: 'custom_order',
+          original_flow: {
+            requires_production: Boolean(product.requires_production ?? true),
+            requires_design: Boolean(product.requires_production ?? true),
+          },
           sales_schema: String(sourceMeta?.sales_schema || '').trim().toLowerCase() || null,
           sticker_rule: pricing?.rule && typeof pricing.rule === 'object'
             ? {
@@ -4684,7 +5913,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
             material: materialText,
           },
           draft_form: {
-            product_name: product.name,
+            product_name: String(buildSelectedProductLabel(product) || product.name || '').trim(),
             qty: qtyNumber,
             size_text: size.displayText,
             width_meter: size.widthMeter,
@@ -4695,6 +5924,9 @@ const SalesScreen = ({ currentUser, onLogout }) => {
             lb_max_json: JSON.stringify(Array.isArray(pricingPayload?.lb_max) ? pricingPayload.lb_max : []),
             pages: pageNumber,
             material: materialText,
+            note: '-',
+            requires_production: Boolean(product.requires_production ?? true),
+            requires_design: Boolean(product.requires_production ?? true),
           },
         },
       };
@@ -4721,15 +5953,18 @@ const SalesScreen = ({ currentUser, onLogout }) => {
           : null,
         negotiation: negotiationState,
       });
-      if (!itemPricingSummary.stickerNotice && stickerOrderingNotice) {
-        itemPricingSummary.stickerNotice = stickerOrderingNotice;
+      const warningNotes = [itemPricingSummary.stickerNotice, materialStockMessage, stickerOrderingNotice]
+        .filter((text) => String(text || '').trim() !== '')
+        .join('\n');
+      if (warningNotes) {
+        itemPricingSummary.stickerNotice = warningNotes;
       }
 
       setCartItems((prevItems) => [
         ...prevItems,
         {
           id: itemId,
-          product: String(product.name || ''),
+          product: String(buildSelectedProductLabel(product) || product.name || ''),
           qty: qtyNumber,
           size: size.displayText,
           finishing: selectedFinishingDisplay || '-',
@@ -4927,6 +6162,20 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         const mergedSnapshot = {
           ...currentSpec,
           type: currentSpec?.type || 'custom_order',
+          original_flow: {
+            requires_production: Boolean(
+              currentSpec?.original_flow?.requires_production
+              ?? currentDraftForm?.requires_production
+              ?? item?.backendItem?.requires_production
+              ?? true,
+            ),
+            requires_design: Boolean(
+              currentSpec?.original_flow?.requires_design
+              ?? currentDraftForm?.requires_design
+              ?? item?.backendItem?.requires_design
+              ?? true,
+            ),
+          },
           specs: {
             ...currentSpecs,
             size_text: toLabel(currentSpecs?.size_text, item?.size, '-'),
@@ -4939,24 +6188,58 @@ const SalesScreen = ({ currentUser, onLogout }) => {
           },
           draft_form: {
             ...currentDraftForm,
-            product_name: toLabel(currentDraftForm?.product_name, item?.product, ''),
+            product_name: toLabel(item?.product, currentDraftForm?.product_name, ''),
             qty: Math.max(Number(currentDraftForm?.qty || item?.qty || item?.backendItem?.qty || 1) || 1, 1),
-            size_text: toLabel(currentDraftForm?.size_text, item?.size, '-'),
+            size_text: toLabel(item?.size, currentDraftForm?.size_text, '-'),
             width_meter: firstPositiveNumber(currentDraftForm?.width_meter, widthMeter),
             length_meter: firstPositiveNumber(currentDraftForm?.length_meter, lengthMeter),
-            finishing: toLabel(currentDraftForm?.finishing, item?.finishing, '-'),
-            lb_max: toLabel(currentDraftForm?.lb_max, item?.lbMax, '-'),
+            finishing: toLabel(item?.finishing, currentDraftForm?.finishing, '-'),
+            lb_max: toLabel(item?.lbMax, currentDraftForm?.lb_max, '-'),
             pages: Math.max(Number(currentDraftForm?.pages || item?.pages || 1) || 1, 1),
-            material: toLabel(currentDraftForm?.material, item?.material, '-'),
+            material: toLabel(item?.material, currentDraftForm?.material, '-'),
+            note: toLabel(item?.note, item?.notes, currentDraftForm?.note, '-'),
+            requires_production: Boolean(
+              currentDraftForm?.requires_production
+              ?? currentSpec?.original_flow?.requires_production
+              ?? item?.backendItem?.requires_production
+              ?? true,
+            ),
+            requires_design: Boolean(
+              currentDraftForm?.requires_design
+              ?? currentSpec?.original_flow?.requires_design
+              ?? item?.backendItem?.requires_design
+              ?? true,
+            ),
           },
         };
 
+        const originalRequiresProduction = Boolean(
+          mergedSnapshot?.original_flow?.requires_production
+          ?? item?.backendItem?.requires_production
+          ?? true,
+        );
+        const originalRequiresDesign = Boolean(
+          mergedSnapshot?.original_flow?.requires_design
+          ?? item?.backendItem?.requires_design
+          ?? true,
+        );
+
         return enforceDesignFirstFlow({
           ...item.backendItem,
+          product_name: toLabel(item?.backendItem?.product_name, item?.product, ''),
           ...(hasNegotiatedPrice ? { negotiated_price: roundMoney(adjustedSubtotal / itemQty) } : {}),
           subtotal: adjustedSubtotal,
           finishing_total: originalFinishing,
           express_fee: originalExpress,
+          size_text: toLabel(item?.backendItem?.size_text, item?.size, '-'),
+          material_text: toLabel(item?.backendItem?.material_text, item?.material, '-'),
+          finishing_text: toLabel(item?.backendItem?.finishing_text, item?.finishing, '-'),
+          lb_max_text: toLabel(item?.backendItem?.lb_max_text, item?.lbMax, '-'),
+          pages: Math.max(Number(item?.backendItem?.pages || item?.pages || 1) || 1, 1),
+          note: toLabel(item?.backendItem?.note, item?.note, item?.notes, '-'),
+          requires_production: isDraftMode ? false : originalRequiresProduction,
+          requires_design: isDraftMode ? false : originalRequiresDesign,
+          production_status: isDraftMode ? 'not_required' : item?.backendItem?.production_status,
           spec_snapshot: mergedSnapshot,
         });
       });
@@ -4970,7 +6253,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
             ? Math.min(paidAmount, grandTotal)
             : 0;
       if (!isDraftMode && paymentAmountPayload > 0 && !(bankAccountId > 0)) {
-        openNotice('Bank Penampung', 'Akun bank penampung wajib dipilih sebelum proses order.');
+        openNotice('Akun Pembayaran', 'Akun pembayaran wajib dipilih sebelum proses order.');
         return null;
       }
 
@@ -5003,6 +6286,12 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       const created = await createPosOrder(payload);
       const backendOrderId = Number(created?.id || 0) || null;
       const invoiceNo = created?.invoice?.invoice_no || '-';
+      if (created?.receipt && typeof created.receipt === 'object' && !Array.isArray(created.receipt)) {
+        setPosSettings((prev) => ({
+          ...prev,
+          ...normalizeReceiptSettings({ receipt: created.receipt }),
+        }));
+      }
       setOrderNumber(String(invoiceNo || '').trim());
       saveReprintSpecSnapshot({
         orderId: backendOrderId || 0,
@@ -5010,6 +6299,14 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         items: buildReprintSnapshotItems(adjustedItems),
       });
       let draftStatusWarning = '';
+      if (!isDraftMode && backendOrderId && Number(currentDraftSourceId || 0) > 0) {
+        try {
+          await deletePosOrder(Number(currentDraftSourceId || 0));
+          setDraftInvoices((prev) => prev.filter((draft) => Number(draft?.id || 0) !== Number(currentDraftSourceId || 0)));
+        } catch (cleanupError) {
+          draftStatusWarning = `\nCatatan: draft sumber belum berhasil dihapus otomatis (${cleanupError.message}).`;
+        }
+      }
       if (mode === 'draft' && backendOrderId) {
         try {
           await updatePosOrderStatus(backendOrderId, 'draft');
@@ -5046,7 +6343,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         resetTransaction,
       );
       loadDraftInvoices();
-      return { ok: true, backendOrderId, invoiceNo };
+      return { ok: true, backendOrderId, invoiceNo, receipt: created?.receipt || null };
     } catch (error) {
       const status = Number(error?.status || 0);
       const shouldQueue = status === 0 || status >= 500 || /network|fetch|timeout|Failed to fetch/i.test(String(error?.message || ''));
@@ -5159,7 +6456,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         || lowerValidationMessage.includes('akun bank penampungan')
         || lowerValidationMessage.includes('akun bank');
       if (isBankAccountValidation) {
-        openNotice('Bank Penampung', validationMessage || 'Akun bank penampung penjualan wajib dipilih.');
+            openNotice('Akun Pembayaran', validationMessage || 'Akun pembayaran penjualan wajib dipilih.');
         return null;
       }
       const clearMessage = failedItemName
@@ -5172,72 +6469,208 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     }
   };
 
-  const openBankPickerForProcess = async (action = 'save') => {
-    setBankPickerAction(action === 'print' ? 'print' : 'save');
-    setIsBankPickerOpen(true);
-    setIsBankAccountLoading(true);
+  const loadPaymentAccountOptionsForMethod = async (methodLabel) => {
+    const rows = await fetchPosBankAccounts();
+    const allOptions = toDataRows(rows)
+      .map((row) => normalizeBankAccountRow(row))
+      .filter((row) => Number(row?.id || 0) > 0);
+    const currentMethod = mapPaymentMethodToBackend(methodLabel);
+    const filteredOptions = allOptions.filter((row) => {
+      const type = String(row?.paymentType || '').trim().toLowerCase();
+      if (!type) {
+        return false;
+      }
+      if (currentMethod === 'cash') {
+        return type === 'cash';
+      }
+      if (currentMethod === 'qris') {
+        return type === 'qris';
+      }
+      if (currentMethod === 'card') {
+        return type === 'card';
+      }
+      return type === 'transfer';
+    });
+    if (filteredOptions.length > 0) {
+      return filteredOptions;
+    }
+    return currentMethod === 'cash' ? [] : allOptions;
+  };
+
+  const resolveAutoPaymentAccountId = async (methodLabel) => {
+    const currentMethod = mapPaymentMethodToBackend(methodLabel);
+    const options = await loadPaymentAccountOptionsForMethod(methodLabel);
+    if (options.length === 0) {
+      openNotice(
+        currentMethod === 'cash' ? 'Akun Kas Penjualan' : 'Akun Pembayaran',
+        currentMethod === 'cash'
+          ? 'Belum ada akun kas yang cocok untuk pembayaran cash. Siapkan akun kas di accounting agar cash penjualan masuk ke kas yang benar.'
+          : `Belum ada akun pembayaran yang cocok untuk metode ${normalizePaymentMethodLabel(methodLabel)}.`,
+      );
+      return 0;
+    }
+
+    const currentId = Number(selectedBankAccountId || 0);
+    const matchingCurrent = options.find((row) => Number(row?.id || 0) === currentId) || null;
+    const selectedRow = matchingCurrent || options[0] || null;
+    const selectedId = Number(selectedRow?.id || 0);
+
+    setBankAccounts(options);
+    setSelectedBankAccountId(selectedId > 0 ? selectedId : null);
+
+    return selectedId;
+  };
+
+  const handleOpenReceivablePaymentModal = async (row) => {
+    const invoiceId = Number(row?.invoice?.id || 0);
+    const dueTotal = roundMoney(Number(row?.invoice?.due_total || 0));
+    if (!(invoiceId > 0) || dueTotal <= 0) {
+      openNotice('Piutang Pelanggan', 'Invoice ini tidak memiliki sisa piutang untuk dibayar.');
+      return;
+    }
+
+    setReceivablePaymentModal({
+      visible: true,
+      orderId: Number(row?.id || 0),
+      invoiceId,
+      invoiceNo: String(row?.invoice?.invoice_no || '-'),
+      customerName: String(row?.customer?.name || 'Pelanggan umum'),
+      customerPhone: String(row?.customer?.phone || '').trim(),
+      dueTotal,
+      amount: String(Math.max(0, dueTotal)),
+      method: 'Cash',
+      selectedAccountId: null,
+      accountOptions: [],
+      isLoadingAccounts: true,
+      isSubmitting: false,
+    });
+
     try {
-      const rows = await fetchPosBankAccounts();
-      const options = toDataRows(rows)
-        .map((row) => normalizeBankAccountRow(row))
-        .filter((row) => Number(row?.id || 0) > 0);
-      setBankAccounts(options);
+      const options = await loadPaymentAccountOptionsForMethod('Cash');
       if (options.length === 0) {
-        setIsBankPickerOpen(false);
-        openNotice('Bank Penampung', 'Data akun bank penampung belum tersedia di backend.');
+        setReceivablePaymentModal((prev) => ({
+          ...prev,
+          isLoadingAccounts: false,
+          accountOptions: [],
+          selectedAccountId: null,
+        }));
+        openNotice('Piutang Pelanggan', 'Belum ada akun kas yang cocok untuk pembayaran tunai piutang.');
         return;
       }
-      const currentId = Number(selectedBankAccountId || 0);
-      const exists = options.some((row) => Number(row.id) === currentId);
-      setSelectedBankAccountId(exists ? currentId : Number(options[0].id));
+      setReceivablePaymentModal((prev) => ({
+        ...prev,
+        isLoadingAccounts: false,
+        accountOptions: options,
+        selectedAccountId: Number(options[0]?.id || 0) || null,
+      }));
     } catch (error) {
-      setIsBankPickerOpen(false);
-      openNotice('Bank Penampung', `Gagal memuat daftar akun bank: ${error.message}`);
-    } finally {
-      setIsBankAccountLoading(false);
+      setReceivablePaymentModal((prev) => ({
+        ...prev,
+        isLoadingAccounts: false,
+      }));
+      openNotice('Piutang Pelanggan', `Gagal memuat akun pembayaran: ${error.message}`);
+    }
+  };
+
+  const handleCloseReceivablePaymentModal = () => {
+    if (receivablePaymentModal.isSubmitting) {
+      return;
+    }
+    setReceivablePaymentModal((prev) => ({
+      ...prev,
+      visible: false,
+    }));
+  };
+
+  const handleChangeReceivablePaymentMethod = async (value) => {
+    const nextMethod = normalizePaymentMethodLabel(value);
+    setReceivablePaymentModal((prev) => ({
+      ...prev,
+      method: nextMethod,
+      isLoadingAccounts: true,
+      selectedAccountId: null,
+      accountOptions: [],
+    }));
+    try {
+      const options = await loadPaymentAccountOptionsForMethod(nextMethod);
+      setReceivablePaymentModal((prev) => ({
+        ...prev,
+        method: nextMethod,
+        isLoadingAccounts: false,
+        accountOptions: options,
+        selectedAccountId: Number(options[0]?.id || 0) || null,
+      }));
+    } catch (error) {
+      setReceivablePaymentModal((prev) => ({
+        ...prev,
+        isLoadingAccounts: false,
+      }));
+      openNotice('Piutang Pelanggan', `Gagal memuat akun pembayaran: ${error.message}`);
+    }
+  };
+
+  const handleSubmitReceivablePayment = async () => {
+    const invoiceId = Number(receivablePaymentModal.invoiceId || 0);
+    const accountId = Number(receivablePaymentModal.selectedAccountId || 0);
+    const amount = roundMoney(parseCurrencyInput(receivablePaymentModal.amount));
+    const dueTotal = roundMoney(Number(receivablePaymentModal.dueTotal || 0));
+
+    if (!(invoiceId > 0)) {
+      openNotice('Piutang Pelanggan', 'Invoice piutang tidak valid.');
+      return;
+    }
+    if (amount <= 0) {
+      openNotice('Piutang Pelanggan', 'Nominal pembayaran piutang wajib diisi.');
+      return;
+    }
+    if (amount > dueTotal) {
+      openNotice('Piutang Pelanggan', 'Nominal pembayaran melebihi sisa piutang pelanggan.');
+      return;
+    }
+    if (!(accountId > 0)) {
+      openNotice('Piutang Pelanggan', 'Pilih akun pembayaran terlebih dahulu.');
+      return;
+    }
+
+    setReceivablePaymentModal((prev) => ({
+      ...prev,
+      isSubmitting: true,
+    }));
+    try {
+      await createPosInvoicePayment(invoiceId, {
+        method: mapPaymentMethodToBackend(receivablePaymentModal.method),
+        bank_account_id: accountId,
+        amount,
+        transaction_type: amount >= dueTotal ? 'pelunasan' : 'angsuran',
+        paid_at: new Date().toISOString(),
+      });
+      setReceivablePaymentModal((prev) => ({
+        ...prev,
+        visible: false,
+        isSubmitting: false,
+      }));
+      await loadDraftInvoices();
+      await loadClosingWorkspace(closingReportDate);
+      openNotice(
+        'Piutang Pelanggan',
+        `Pembayaran piutang untuk ${receivablePaymentModal.customerName} sebesar ${formatRupiah(amount)} berhasil dicatat.`,
+        null,
+        { autoCloseMs: 2200 },
+      );
+    } catch (error) {
+      setReceivablePaymentModal((prev) => ({
+        ...prev,
+        isSubmitting: false,
+      }));
+      openNotice('Piutang Pelanggan', formatBackendValidationError(error));
     }
   };
 
   const handleSaveTransaction = async () => {
-    await submitTransaction('draft');
-  };
-
-  const handleCloseBankPicker = () => {
-    if (isSubmitting || isOrderPreviewSubmitting) {
-      return;
-    }
-    setIsBankPickerOpen(false);
-  };
-
-  const handleConfirmSaveWithBankAccount = async () => {
-    const bankId = Number(
-      selectedBankAccountId
-      || bankAccounts?.[0]?.id
-      || 0,
-    );
-    if (bankId <= 0) {
-      openNotice('Validasi', 'Pilih akun bank penampung terlebih dahulu.');
-      return;
-    }
-    const shouldPrint = bankPickerAction === 'print';
-    const snapshot = shouldPrint ? buildOrderPreviewSnapshot() : null;
-    setIsBankPickerOpen(false);
-    try {
-      setIsOrderPreviewSubmitting(true);
-      const result = await submitTransaction('process', { bankAccountId: bankId });
-      if (result?.ok) {
-        setSelectedBankAccountId(bankId);
-        setIsOrderPreviewOpen(false);
-        if (shouldPrint && snapshot) {
-          printOrderPreview(snapshot, result);
-        }
-        if (!result?.queuedOffline) {
-          setActiveMenu('production');
-          loadProductionItems();
-        }
-      }
-    } finally {
-      setIsOrderPreviewSubmitting(false);
+    const result = await submitTransaction('draft');
+    if (result?.ok) {
+      setActiveMenu('draft');
+      await loadDraftInvoices();
     }
   };
 
@@ -5258,6 +6691,10 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       openNotice('Validasi', 'Pilih pelanggan terlebih dahulu sebelum memproses pesanan.');
       return;
     }
+    const bankId = await resolveAutoPaymentAccountId(paymentMethod);
+    if (!(bankId > 0)) {
+      return;
+    }
     setIsOrderPreviewOpen(true);
   };
 
@@ -5266,7 +6703,50 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       openNotice('Informasi', 'Transaksi sedang diproses, mohon tunggu.');
       return;
     }
-    await openBankPickerForProcess(action);
+    if (action === 'copy_order') {
+      const snapshot = buildOrderPreviewSnapshot();
+      await handleCopyOrderSnapshot(snapshot, 'Salin Pesanan');
+      return;
+    }
+    const bankId = await resolveAutoPaymentAccountId(paymentMethod);
+    if (!(bankId > 0)) {
+      return;
+    }
+    const shouldPrint = action === 'print';
+    const shouldCopyInvoice = action === 'copy_invoice';
+    const snapshot = (shouldPrint || shouldCopyInvoice) ? buildOrderPreviewSnapshot() : null;
+    try {
+      setIsOrderPreviewSubmitting(true);
+      const result = await submitTransaction('process', { bankAccountId: bankId });
+      if (result?.ok) {
+        setIsOrderPreviewOpen(false);
+        if (shouldPrint && snapshot) {
+          await printOrderPreview(snapshot, result);
+        }
+        if (shouldCopyInvoice && snapshot) {
+          const receiptData = buildReceiptDataFromPreview(snapshot, result, {
+            ...posSettings,
+            ...(result?.receipt && typeof result.receipt === 'object' ? { receipt: result.receipt } : {}),
+          });
+          try {
+            await copyTextToClipboard(buildInvoiceClipboardText(receiptData, {
+              customerPhone: snapshot?.customerPhone,
+            }));
+            openNotice('Salin Invoice', 'Invoice final berhasil disalin. Tinggal paste ke WhatsApp customer.', null, {
+              autoCloseMs: 2200,
+            });
+          } catch (copyError) {
+            openNotice('Salin Invoice', `Invoice sudah dibuat, tetapi gagal disalin: ${copyError.message}`);
+          }
+        }
+        if (!result?.queuedOffline) {
+          setActiveMenu('production');
+          loadProductionItems();
+        }
+      }
+    } finally {
+      setIsOrderPreviewSubmitting(false);
+    }
   };
 
   const handleCancelTransaction = () => {
@@ -5316,9 +6796,13 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     const searchedRows = keyword
       ? rows.filter((row) => {
         const customerName = normalizeText(row?.customer?.name || '');
+        const customerPhone = normalizeText(row?.customer?.phone || '');
         const invoiceNo = normalizeText(row?.invoice?.invoice_no || '');
         const orderId = normalizeText(row?.id || '');
-        return customerName.includes(keyword) || invoiceNo.includes(keyword) || orderId.includes(keyword);
+        return customerName.includes(keyword)
+          || customerPhone.includes(keyword)
+          || invoiceNo.includes(keyword)
+          || orderId.includes(keyword);
       })
       : rows;
     if (invoiceFilter === 'draft') {
@@ -5327,8 +6811,112 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     if (invoiceFilter === 'processing') {
       return searchedRows.filter((row) => isProcessingInvoiceRow(row));
     }
+    if (invoiceFilter === 'receivable') {
+      return searchedRows
+        .filter((row) => Number(row?.invoice?.due_total || 0) > 0)
+        .filter((row) => {
+          if (receivableStatusFilter === 'payable') {
+            return Boolean(row?.invoice?.can_pay);
+          }
+          if (receivableStatusFilter === 'blocked') {
+            return !Boolean(row?.invoice?.can_pay);
+          }
+          return true;
+        });
+    }
     return searchedRows;
-  }, [draftInvoices, invoiceFilter, invoiceSearch]);
+  }, [draftInvoices, invoiceFilter, invoiceSearch, receivableStatusFilter]);
+  const receivableInvoiceRows = useMemo(() => {
+    const keyword = normalizeText(invoiceSearch);
+    return (Array.isArray(draftInvoices) ? draftInvoices : [])
+      .filter((row) => Number(row?.invoice?.due_total || 0) > 0)
+      .filter((row) => {
+        if (!keyword) {
+          return true;
+        }
+        const customerName = normalizeText(row?.customer?.name || '');
+        const customerPhone = normalizeText(row?.customer?.phone || '');
+        const invoiceNo = normalizeText(row?.invoice?.invoice_no || '');
+        const orderId = normalizeText(row?.id || '');
+        return customerName.includes(keyword)
+          || customerPhone.includes(keyword)
+          || invoiceNo.includes(keyword)
+          || orderId.includes(keyword);
+      });
+  }, [draftInvoices, invoiceSearch]);
+  const receivableCustomerSummary = useMemo(() => {
+    const keyword = normalizeText(invoiceSearch);
+    if (!keyword) {
+      return null;
+    }
+    const rows = receivableInvoiceRows;
+    if (rows.length === 0) {
+      return null;
+    }
+    const uniqueCustomers = Array.from(new Set(
+      rows.map((row) => `${String(row?.customer?.name || 'Pelanggan umum').trim()}|${String(row?.customer?.phone || '').trim()}`)
+        .filter(Boolean),
+    ));
+    const oldestRow = [...rows].sort((a, b) => {
+      const aTime = new Date(a?.created_at || 0).getTime() || 0;
+      const bTime = new Date(b?.created_at || 0).getTime() || 0;
+      return aTime - bTime;
+    })[0] || null;
+    const summary = rows.reduce((acc, row) => {
+      acc.totalDue += Number(row?.invoice?.due_total || 0);
+      acc.totalAmount += Number(row?.invoice?.total || 0);
+      acc.totalInvoice += 1;
+      return acc;
+    }, {
+      customerName: String(rows[0]?.customer?.name || 'Pelanggan umum'),
+      customerPhone: String(rows[0]?.customer?.phone || '').trim(),
+      totalDue: 0,
+      totalAmount: 0,
+      totalInvoice: 0,
+    });
+    return {
+      ...summary,
+      totalDue: roundMoney(summary.totalDue),
+      totalAmount: roundMoney(summary.totalAmount),
+      customerCount: uniqueCustomers.length,
+      oldestInvoiceNo: String(oldestRow?.invoice?.invoice_no || '-'),
+      oldestInvoiceDate: String(oldestRow?.created_at || ''),
+      oldestInvoiceAgeDays: diffDaysFromNow(oldestRow?.created_at),
+    };
+  }, [invoiceSearch, receivableInvoiceRows]);
+  const receivablePortfolioSummary = useMemo(() => {
+    if (invoiceFilter !== 'receivable') {
+      return null;
+    }
+    const rows = filteredInvoices.filter((row) => Number(row?.invoice?.due_total || 0) > 0);
+    if (rows.length === 0) {
+      return null;
+    }
+    const totals = rows.reduce((acc, row) => {
+      acc.totalDue += Number(row?.invoice?.due_total || 0);
+      acc.totalPaid += Number(row?.invoice?.paid_total || 0);
+      acc.totalInvoices += 1;
+      if (Boolean(row?.invoice?.can_pay)) {
+        acc.totalPayable += 1;
+      } else {
+        acc.totalBlocked += 1;
+      }
+      return acc;
+    }, {
+      totalDue: 0,
+      totalPaid: 0,
+      totalInvoices: 0,
+      totalPayable: 0,
+      totalBlocked: 0,
+    });
+    return {
+      totalInvoices: totals.totalInvoices,
+      totalDue: roundMoney(totals.totalDue),
+      totalPaid: roundMoney(totals.totalPaid),
+      totalPayable: totals.totalPayable,
+      totalBlocked: totals.totalBlocked,
+    };
+  }, [filteredInvoices, invoiceFilter]);
   const closeInvoiceDetailModal = () => {
     setInvoiceDetailModal({
       visible: false,
@@ -5352,36 +6940,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     if (selectedOrderId > 0) {
       try {
         const detailPayload = await fetchPosOrderDetail(selectedOrderId);
-        const detailData = detailPayload?.data && typeof detailPayload.data === 'object' ? detailPayload.data : null;
-        const nestedOrder = detailData?.order && typeof detailData.order === 'object' ? detailData.order : null;
-        const detailRow = Array.isArray(detailPayload)
-          ? detailPayload[0]
-          : (detailData && !Array.isArray(detailData) ? detailData : detailPayload);
-        const detailItems = Array.isArray(detailRow?.items)
-          ? detailRow.items
-          : Array.isArray(detailRow?.order_items)
-            ? detailRow.order_items
-            : Array.isArray(detailData?.items)
-              ? detailData.items
-              : Array.isArray(detailData?.order_items)
-                ? detailData.order_items
-                : Array.isArray(nestedOrder?.items)
-                  ? nestedOrder.items
-                  : Array.isArray(nestedOrder?.order_items)
-                    ? nestedOrder.order_items
-                    : [];
-        if (detailRow && typeof detailRow === 'object') {
-          sourceRow = {
-            ...row,
-            ...(nestedOrder || {}),
-            ...detailRow,
-            customer: detailRow?.customer || nestedOrder?.customer || row?.customer,
-            invoice: detailRow?.invoice || nestedOrder?.invoice || row?.invoice,
-            pickup: detailRow?.pickup || nestedOrder?.pickup || row?.pickup,
-            production: detailRow?.production || nestedOrder?.production || row?.production,
-            items: detailItems.length > 0 ? detailItems : (Array.isArray(row?.items) ? row.items : []),
-          };
-        }
+        sourceRow = normalizeOrderDetailRow(detailPayload, row) || row;
       } catch (_error) {
         // fallback ke row list invoice
       }
@@ -5426,6 +6985,8 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       );
       const pages = Math.max(Number(restored.pages || item?.pages || 1) || 1, 1);
       const showPages = isNotebookLikeProductName(productName) || pages > 1;
+      const materialText = restored.materialText || '-';
+      const pricingSummary = buildPricingSummaryFromBackendItem(item, materialText);
       return {
         key: String(item?.id || `item-${index}`),
         productName,
@@ -5433,7 +6994,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         sizeText: restored.sizeText || '-',
         finishingText: restored.finishingText || '-',
         lbMaxText: restored.lbMaxText || '-',
-        materialText: restored.materialText || '-',
+        materialText,
         pages,
         showPages,
         productionStatus: String(item?.production_status || ''),
@@ -5555,43 +7116,12 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     }
   };
   const handleReprintInvoice = async (row) => {
-    if (Platform.OS !== 'web') {
-      openNotice('Cetak Ulang', 'Cetak ulang tersedia pada mode web.');
-      return;
-    }
     let sourceRow = row;
     const orderId = Number(row?.id || 0);
     if (orderId > 0) {
       try {
         const detailPayload = await fetchPosOrderDetail(orderId);
-        const detailData = detailPayload?.data && typeof detailPayload.data === 'object' ? detailPayload.data : null;
-        const nestedOrder = detailData?.order && typeof detailData.order === 'object' ? detailData.order : null;
-        const detailRow = Array.isArray(detailPayload)
-          ? detailPayload[0]
-          : (detailData && !Array.isArray(detailData) ? detailData : detailPayload);
-        const detailItems = Array.isArray(detailRow?.items)
-          ? detailRow.items
-          : Array.isArray(detailRow?.order_items)
-            ? detailRow.order_items
-            : Array.isArray(detailData?.items)
-              ? detailData.items
-              : Array.isArray(detailData?.order_items)
-                ? detailData.order_items
-                : Array.isArray(nestedOrder?.items)
-                  ? nestedOrder.items
-                  : Array.isArray(nestedOrder?.order_items)
-                    ? nestedOrder.order_items
-                    : [];
-        if (detailRow && typeof detailRow === 'object') {
-          sourceRow = {
-            ...row,
-            ...(nestedOrder || {}),
-            ...detailRow,
-            customer: detailRow?.customer || nestedOrder?.customer || row?.customer,
-            invoice: detailRow?.invoice || nestedOrder?.invoice || row?.invoice,
-            items: detailItems.length > 0 ? detailItems : (Array.isArray(row?.items) ? row.items : []),
-          };
-        }
+        sourceRow = normalizeOrderDetailRow(detailPayload, row) || row;
       } catch (_error) {
         // fallback pakai data list invoice bila detail order gagal diambil
       }
@@ -5656,40 +7186,6 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         };
       });
     }
-    const isMmtOrSticker = (name) => /(mmt|sticker|stiker)/i.test(String(name || ''));
-    const isNotebookLike = (name) => /(nota\s*book|notebook|buku\s*nota|nota\b)/i.test(String(name || ''));
-    const allMmtOrSticker = itemDetails.length > 0 && itemDetails.every((item) => isMmtOrSticker(item.productName));
-    const showSpecColumns = !allMmtOrSticker;
-    const showPagesColumn = showSpecColumns && itemDetails.some((item) => item.pages > 1 || isNotebookLike(item.productName));
-
-    const tableHeaders = [
-      'No',
-      'Produk',
-      'Qty',
-      ...(showSpecColumns ? ['Ukuran', 'Finishing', 'Bahan'] : []),
-      ...(showPagesColumn ? ['Hal.'] : []),
-      'Status Produksi',
-      'Total',
-    ];
-
-    const rowsHtml = itemDetails.map((item, idx) => {
-      const cells = [
-        `<td>${idx + 1}</td>`,
-        `<td>${escapeHtml(item.productName)}</td>`,
-        `<td style="text-align:center;">${item.qty}</td>`,
-      ];
-      if (showSpecColumns) {
-        cells.push(`<td>${escapeHtml(item.sizeText)}</td>`);
-        cells.push(`<td>${escapeHtml(item.finishingText)}</td>`);
-        cells.push(`<td>${escapeHtml(item.materialText)}</td>`);
-      }
-      if (showPagesColumn) {
-        cells.push(`<td style="text-align:center;">${item.pages}</td>`);
-      }
-      cells.push(`<td style="text-align:center;color:${item.statusColor};font-weight:700;">${escapeHtml(item.statusText)}</td>`);
-      cells.push(`<td style="text-align:right;">${formatRupiah(item.lineTotal)}</td>`);
-      return `<tr>${cells.join('')}</tr>`;
-    }).join('');
     const total = Number(
       sourceRow?.invoice?.total
       || sourceRow?.total
@@ -5697,52 +7193,632 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       || calculateDraftItemsTotal(items)
       || 0,
     );
-    const printWindow = globalThis?.open?.('', '_blank', 'width=980,height=760');
-    if (!printWindow) {
-      openNotice('Cetak Ulang', 'Popup browser diblokir. Izinkan popup untuk cetak ulang.');
+    const receiptData = buildReceiptDataFromOrderRow(sourceRow, items, posSettings);
+    await printReceiptViaBrowserFallback({
+      noticeTitle: 'Cetak Ulang',
+      receiptData,
+      profileInput: activePrinterProfile,
+      shouldTryPrinterProfile: hasSavedPrinterProfile,
+      forceBrowserPrint: true,
+      onPrinterFailureMessage: (message) => {
+        openNotice('Cetak Ulang', `Printer kasir gagal dipakai, fallback ke browser. Detail: ${message}`);
+      },
+    });
+  };
+
+  const handleTestPrint = async () => {
+    const profile = activePrinterProfile;
+    const receiptSettings = normalizeReceiptSettings(posSettings);
+    const baseReceipt = generateTestReceipt(profile);
+    const receiptData = {
+      ...baseReceipt,
+      store: {
+        ...baseReceipt.store,
+        title: receiptSettings.receipt_title || baseReceipt.store.title,
+        name: receiptSettings.brand_name || baseReceipt.store.name,
+        logoUrl: receiptSettings.receipt_logo_url || baseReceipt.store.logoUrl,
+        tagline: receiptSettings.brand_tagline || baseReceipt.store.tagline,
+        address: receiptSettings.receipt_store_address || baseReceipt.store.address,
+        phone: receiptSettings.receipt_store_phone || baseReceipt.store.phone,
+        headerText: receiptSettings.receipt_header_text || baseReceipt.store.headerText,
+        footer: receiptSettings.receipt_footer || baseReceipt.store.footer,
+      },
+      layout: {
+        showOrderId: Boolean(receiptSettings.receipt_show_order_id),
+        showCashier: Boolean(receiptSettings.receipt_show_cashier),
+        showCustomer: Boolean(receiptSettings.receipt_show_customer),
+        showPaymentDetail: Boolean(receiptSettings.receipt_show_payment_detail),
+      },
+    };
+
+    const printed = await printReceiptViaBrowserFallback({
+      noticeTitle: 'Test Printer',
+      receiptData,
+      profileInput: profile,
+      onPrinterFailureMessage: () => {},
+    }).catch((error) => {
+      openNotice('Test Printer', `Test print gagal: ${error.message}`);
+      return false;
+    });
+
+    if (printed) {
+      setHasSavedPrinterProfile(true);
+      persistPrinterProfile(profile);
+      openNotice('Test Printer', `Test print berhasil dikirim ke profile ${profile.name}.`, null, { autoCloseMs: 2200 });
+    }
+  };
+
+  const closingPaymentRows = useMemo(
+    () => Array.isArray(closingReport?.payments?.breakdown) ? closingReport.payments.breakdown : [],
+    [closingReport],
+  );
+  const closingPaymentMethodSummary = useMemo(() => {
+    const totals = {
+      cash: 0,
+      transfer: 0,
+      qris: 0,
+      card: 0,
+      other: 0,
+    };
+    closingPaymentRows.forEach((row) => {
+      const method = String(row?.method || '').trim().toLowerCase();
+      const amount = roundMoney(Number(row?.total_amount || 0));
+      if (method === 'cash') {
+        totals.cash += amount;
+      } else if (method === 'transfer') {
+        totals.transfer += amount;
+      } else if (method === 'qris') {
+        totals.qris += amount;
+      } else if (method === 'card') {
+        totals.card += amount;
+      } else {
+        totals.other += amount;
+      }
+    });
+    return {
+      cash: roundMoney(totals.cash),
+      transfer: roundMoney(totals.transfer),
+      qris: roundMoney(totals.qris),
+      card: roundMoney(totals.card),
+      other: roundMoney(totals.other),
+    };
+  }, [closingPaymentRows]);
+  const closingCashInHandSummary = useMemo(() => {
+    const cashSales = roundMoney(Number(closingReport?.payments?.cash_total || 0));
+    const cashReceivable = roundMoney(Number(closingReport?.receivable_collections?.cash_total || 0));
+    const cashIncomeOther = roundMoney(Number(closingReport?.external_cash?.income_total || 0));
+    const cashExpenseOther = roundMoney(Number(closingReport?.external_cash?.expense_total || 0));
+    const physicalCashExpected = roundMoney(cashSales + cashReceivable + cashIncomeOther - cashExpenseOther);
+    return {
+      cashSales,
+      cashReceivable,
+      cashIncomeOther,
+      cashExpenseOther,
+      physicalCashExpected,
+    };
+  }, [closingReport]);
+  const closingNonCashSummary = useMemo(() => {
+    const nonCashSales = roundMoney(Number(closingReport?.payments?.non_cash_total || 0));
+    const nonCashReceivable = roundMoney(Number(closingReport?.receivable_collections?.non_cash_total || 0));
+    return {
+      nonCashSales,
+      nonCashReceivable,
+      total: roundMoney(nonCashSales + nonCashReceivable),
+    };
+  }, [closingReport]);
+  const availableCashFlowTypes = useMemo(
+    () => (Array.isArray(cashFlowTypes) ? cashFlowTypes : []).filter((row) => String(row?.transaction_type || '') === String(cashFlowTransactionType || '')),
+    [cashFlowTransactionType, cashFlowTypes],
+  );
+  const filteredCashFlowRows = useMemo(() => {
+    const rows = Array.isArray(cashFlowRows) ? cashFlowRows : [];
+    if (!['income', 'expense'].includes(String(cashFlowHistoryFilter || ''))) {
+      return rows;
+    }
+    return rows.filter((row) => String(row?.transaction_type || '').toLowerCase() === String(cashFlowHistoryFilter || '').toLowerCase());
+  }, [cashFlowHistoryFilter, cashFlowRows]);
+  const selectedCashFlowType = useMemo(
+    () => availableCashFlowTypes.find((row) => Number(row?.id || 0) === Number(cashFlowTypeId || 0)) || null,
+    [availableCashFlowTypes, cashFlowTypeId],
+  );
+  const recentCashFlowCategories = useMemo(
+    () => Array.from(new Set(
+      (Array.isArray(cashFlowRows) ? cashFlowRows : [])
+        .filter((row) => String(row?.transaction_type || '') === String(cashFlowTransactionType || ''))
+        .map((row) => String(row?.category || '').trim())
+        .filter(Boolean),
+    )).slice(0, 6),
+    [cashFlowRows, cashFlowTransactionType],
+  );
+  const quickCashFlowCategories = useMemo(() => {
+    const backendTypeRows = availableCashFlowTypes.map((row) => ({
+      key: `type-${row?.id || row?.name || ''}`,
+      label: String(row?.name || '-'),
+      typeId: Number(row?.id || 0) || null,
+      manualCategory: '',
+      source: 'backend',
+    }));
+    const fallbackRows = (DEFAULT_CASH_FLOW_QUICK_CATEGORIES[cashFlowTransactionType] || []).map((label) => ({
+      key: `fallback-${cashFlowTransactionType}-${label}`,
+      label,
+      typeId: null,
+      manualCategory: label,
+      source: 'fallback',
+    }));
+    const recentRows = recentCashFlowCategories.map((label) => ({
+      key: `recent-${cashFlowTransactionType}-${label}`,
+      label,
+      typeId: null,
+      manualCategory: label,
+      source: 'recent',
+    }));
+    const merged = [...backendTypeRows, ...recentRows, ...fallbackRows];
+    const seen = new Set();
+    return merged.filter((row) => {
+      const signature = normalizeText(row.label);
+      if (!signature || seen.has(signature)) {
+        return false;
+      }
+      seen.add(signature);
+      return true;
+    }).slice(0, 12);
+  }, [availableCashFlowTypes, cashFlowTransactionType, recentCashFlowCategories]);
+  const closingExternalRows = useMemo(
+    () => Array.isArray(closingReport?.external_cash?.transactions) ? closingReport.external_cash.transactions : [],
+    [closingReport],
+  );
+  const closingReceivableSettlementRows = useMemo(
+    () => Array.isArray(closingReport?.receivable_collections?.settlements) ? closingReport.receivable_collections.settlements : [],
+    [closingReport],
+  );
+  const closingReceivableBreakdownRows = useMemo(
+    () => Array.isArray(closingReport?.receivable_collections?.breakdown) ? closingReport.receivable_collections.breakdown : [],
+    [closingReport],
+  );
+  const selectedFinanceRecipientRow = useMemo(
+    () => (Array.isArray(financeRecipients) ? financeRecipients : [])
+      .find((row) => Number(row?.id || 0) === Number(closingFinanceRecipientId || 0)) || null,
+    [financeRecipients, closingFinanceRecipientId],
+  );
+  const filteredDamageProductOptions = useMemo(() => {
+    const keyword = normalizeText(damageProductSearch);
+    const rows = Array.isArray(products) ? products : [];
+    const filtered = keyword
+      ? rows.filter((row) => {
+        const name = normalizeText(row?.name || '');
+        const sku = normalizeText(row?.sku || '');
+        return name.includes(keyword) || sku.includes(keyword);
+      })
+      : rows;
+
+    return filtered
+      .slice(0, 12)
+      .map((row) => ({
+        id: Number(row?.id || 0),
+        name: String(row?.name || '').trim(),
+        unitValue: roundMoney(Number(row?.price_regular || row?.price || row?.price_reseller || row?.bottom_price || 0)),
+      }))
+      .filter((row) => row.id > 0 && row.name);
+  }, [damageProductSearch, products]);
+  const selectedDamageProductRow = useMemo(
+    () => filteredDamageProductOptions.find((row) => Number(row?.id || 0) === Number(selectedDamageProductId || 0))
+      || (Array.isArray(products) ? products : []).map((row) => ({
+        id: Number(row?.id || 0),
+        name: String(row?.name || '').trim(),
+        unitValue: roundMoney(Number(row?.price_regular || row?.price || row?.price_reseller || row?.bottom_price || 0)),
+      })).find((row) => Number(row?.id || 0) === Number(selectedDamageProductId || 0))
+      || null,
+    [filteredDamageProductOptions, products, selectedDamageProductId],
+  );
+  const closingTopProducts = useMemo(
+    () => Array.isArray(closingReport?.top_products) ? closingReport.top_products : [],
+    [closingReport],
+  );
+  const closingStatusRows = useMemo(
+    () => Array.isArray(closingReport?.sales?.status_breakdown) ? closingReport.sales.status_breakdown : [],
+    [closingReport],
+  );
+  const closingDamageSummary = useMemo(() => {
+    const rows = Array.isArray(closingDamageItems) ? closingDamageItems : [];
+    return rows.reduce((acc, row) => {
+      const qty = Math.max(0, Number(row?.qty || 0)) || 0;
+      const estimatedTotalValue = roundMoney(Number(row?.estimatedTotalValue || 0));
+      acc.itemCount += 1;
+      acc.totalQty += qty;
+      acc.totalEstimatedValue = roundMoney(acc.totalEstimatedValue + estimatedTotalValue);
+      if (String(row?.auditStatus || '').trim().toLowerCase() !== 'reported') {
+        acc.auditedCount += 1;
+      }
+      return acc;
+    }, {
+      itemCount: 0,
+      totalQty: 0,
+      totalEstimatedValue: 0,
+      auditedCount: 0,
+    });
+  }, [closingDamageItems]);
+  const closingOpeningCashValue = useMemo(() => parseCurrencyInput(closingOpeningCash), [closingOpeningCash]);
+  const closingActualCashValue = useMemo(() => parseCurrencyInput(closingActualCash), [closingActualCash]);
+  const closingExpectedCashValue = useMemo(() => {
+    if (!closingReport) return 0;
+    return roundMoney(closingOpeningCashValue + Number(closingReport?.closing?.net_cash_movement || 0));
+  }, [closingOpeningCashValue, closingReport]);
+  const closingCashDifferenceValue = useMemo(
+    () => roundMoney(closingActualCashValue - closingExpectedCashValue),
+    [closingActualCashValue, closingExpectedCashValue],
+  );
+  const pendingCashOutAfterInput = useMemo(() => {
+    if (String(cashFlowTransactionType || '') !== 'expense') {
+      return closingExpectedCashValue;
+    }
+    return roundMoney(closingExpectedCashValue - parseCurrencyInput(cashFlowAmount));
+  }, [cashFlowAmount, cashFlowTransactionType, closingExpectedCashValue]);
+  const cashOutWarningText = useMemo(() => {
+    const amount = parseCurrencyInput(cashFlowAmount);
+    if (String(cashFlowTransactionType || '') !== 'expense' || amount <= 0) {
+      return '';
+    }
+    if (amount > closingExpectedCashValue && closingExpectedCashValue > 0) {
+      return `Nominal kas keluar melebihi saldo kas sistem saat ini (${formatRupiah(closingExpectedCashValue)}).`;
+    }
+    if (pendingCashOutAfterInput < 0) {
+      return `Setelah transaksi ini, saldo kas sistem menjadi minus ${formatRupiah(Math.abs(pendingCashOutAfterInput))}.`;
+    }
+    if (closingExpectedCashValue > 0 && amount >= (closingExpectedCashValue * 0.7)) {
+      return `Nominal kas keluar cukup besar dibanding saldo kas sistem saat ini (${formatRupiah(closingExpectedCashValue)}).`;
+    }
+    return '';
+  }, [cashFlowAmount, cashFlowTransactionType, closingExpectedCashValue, pendingCashOutAfterInput]);
+  const closingSummaryText = useMemo(() => {
+    if (!closingReport) {
+      return '';
+    }
+    const reportDate = String(closingReport?.date || closingReportDate || '-');
+    const cashierName = String(currentUser?.name || 'Kasir').trim() || 'Kasir';
+    return [
+      `LAPORAN TUTUP TOKO`,
+      `Tanggal: ${reportDate}`,
+      `Kasir: ${cashierName}`,
+      '',
+      `Penjualan bruto: ${formatRupiah(closingReport?.sales?.gross_total || 0)}`,
+      `Pembayaran penjualan hari ini: ${formatRupiah(closingReport?.sales?.payment_received_total || 0)}`,
+      `Pelunasan piutang hari ini: ${formatRupiah(closingReport?.receivable_collections?.total || 0)}`,
+      `Piutang / belum lunas: ${formatRupiah(closingReport?.sales?.outstanding_total || 0)}`,
+      `Rata-rata transaksi: ${formatRupiah(closingReport?.sales?.average_ticket || 0)}`,
+      '',
+      `Tunai seharusnya di kasir: ${formatRupiah(closingCashInHandSummary.physicalCashExpected)}`,
+      `Non tunai masuk rekening: ${formatRupiah(closingNonCashSummary.total)}`,
+      `Kas masuk lain: ${formatRupiah(closingReport?.external_cash?.income_total || 0)}`,
+      `Kas keluar: ${formatRupiah(closingReport?.external_cash?.expense_total || 0)}`,
+      `Pergerakan kas bersih: ${formatRupiah(closingReport?.closing?.net_cash_movement || 0)}`,
+      `Saldo awal kas: ${formatRupiah(closingOpeningCashValue)}`,
+      `Saldo kas sistem: ${formatRupiah(closingExpectedCashValue)}`,
+      `Uang fisik akhir: ${formatRupiah(closingActualCashValue)}`,
+      `Selisih kas: ${formatRupiah(closingCashDifferenceValue)}`,
+    ].join('\n');
+  }, [
+    closingActualCashValue,
+    closingCashDifferenceValue,
+    closingCashInHandSummary.physicalCashExpected,
+    closingExpectedCashValue,
+    closingNonCashSummary.total,
+    closingOpeningCashValue,
+    closingReport,
+    closingReportDate,
+    currentUser?.name,
+  ]);
+
+  const handleCopyClosingSummary = async () => {
+    if (!closingSummaryText) {
+      openNotice('Laporan Close Order', 'Belum ada ringkasan laporan yang bisa disalin.');
       return;
     }
-    const html = `
+    try {
+      const clipboard = globalThis?.navigator?.clipboard;
+      if (!clipboard || typeof clipboard.writeText !== 'function') {
+        throw new Error('Clipboard belum tersedia di perangkat ini.');
+      }
+      await clipboard.writeText(closingSummaryText);
+      openNotice('Laporan Close Order', 'Ringkasan laporan berhasil disalin. Tinggal kirim ke finance.', null, {
+        autoCloseMs: 2200,
+      });
+    } catch (error) {
+      openNotice('Laporan Close Order', `Gagal menyalin ringkasan: ${error.message}`);
+    }
+  };
+
+  const handleSubmitCloserOrder = async () => {
+    if (!closingReport) {
+      openNotice('Laporan Close Order', 'Generate laporan dulu sebelum kirim ke finance.');
+      return;
+    }
+    const financeUserId = Number(closingFinanceRecipientId || 0);
+    if (!(financeUserId > 0)) {
+      openNotice('Laporan Close Order', 'Pilih admin keuangan penerima close order terlebih dahulu.');
+      return;
+    }
+
+    try {
+      setIsClosingSubmitLoading(true);
+      const payload = await submitPosCloserOrder({
+        report_date: String(closingReport?.date || closingReportDate || formatIsoDate(new Date())),
+        finance_user_id: financeUserId,
+        opening_cash: closingOpeningCashValue,
+        expected_cash: closingExpectedCashValue,
+        cashier_actual_cash: closingActualCashValue,
+        cashier_note: closingShiftNote || '',
+        damage_items: closingDamageItems.map((row) => ({
+          product_id: Number(row?.productId || 0),
+          qty: Math.max(0, Number(row?.qty || 0)),
+          note: String(row?.note || '').trim(),
+        })).filter((row) => row.product_id > 0 && row.qty > 0),
+        report_snapshot: {
+          sales: closingReport?.sales || null,
+          payments: closingReport?.payments || null,
+          receivable_collections: closingReport?.receivable_collections || null,
+          external_cash: closingReport?.external_cash || null,
+          closing: closingReport?.closing || null,
+          top_products: closingReport?.top_products || [],
+        },
+      });
+      setClosingRecord(payload && typeof payload === 'object' ? payload : null);
+      openNotice('Laporan Close Order', 'Close order berhasil dikirim ke admin keuangan untuk divalidasi.', null, {
+        autoCloseMs: 2200,
+      });
+    } catch (error) {
+      openNotice('Laporan Close Order', `Gagal mengirim close order: ${error.message}`);
+    } finally {
+      setIsClosingSubmitLoading(false);
+    }
+  };
+
+  const handleAddDamageItem = () => {
+    const productId = Number(selectedDamageProductId || 0);
+    const qty = Math.max(0, Number(String(damageQtyInput || '0').replace(',', '.')) || 0);
+    if (!(productId > 0) || qty <= 0) {
+      openNotice('Barang Rusak', 'Pilih produk dan isi qty barang rusak terlebih dahulu.');
+      return;
+    }
+
+    const productRow = selectedDamageProductRow;
+    const productName = String(productRow?.name || '').trim();
+    const unitValue = roundMoney(Number(productRow?.unitValue || 0));
+
+    setClosingDamageItems((prev) => ([
+      ...prev,
+      {
+        id: `damage-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+        productId,
+        productName,
+        qty,
+        note: String(damageNoteInput || '').trim(),
+        estimatedTotalValue: roundMoney(unitValue * qty),
+        auditStatus: 'reported',
+        responsibility: '',
+      },
+    ]));
+    setSelectedDamageProductId(null);
+    setDamageProductSearch('');
+    setDamageQtyInput('1');
+    setDamageNoteInput('');
+  };
+
+  const handleSubmitCashFlow = async () => {
+    const amount = parseCurrencyInput(cashFlowAmount);
+    const occurredAt = String(closingReportDate || formatIsoDate(new Date())).trim();
+    const manualCategory = String(cashFlowCategory || '').trim();
+    if (!occurredAt) {
+      openNotice('Kas Masuk / Keluar', 'Tanggal transaksi wajib diisi.');
+      return;
+    }
+    if (amount <= 0) {
+      openNotice('Kas Masuk / Keluar', 'Nominal transaksi wajib lebih dari nol.');
+      return;
+    }
+    if (!selectedCashFlowType && !manualCategory) {
+      openNotice('Kas Masuk / Keluar', 'Pilih kategori transaksi atau isi kategori manual.');
+      return;
+    }
+
+    try {
+      setIsCashFlowSubmitting(true);
+      await createPosCashFlow({
+        transaction_type: cashFlowTransactionType,
+        occurred_at: occurredAt,
+        amount,
+        income_expense_type_id: selectedCashFlowType ? Number(selectedCashFlowType.id) : null,
+        category: selectedCashFlowType ? null : manualCategory,
+        note: String(cashFlowNote || '').trim() || null,
+      });
+      setCashFlowTypeId(null);
+      setCashFlowCategory('');
+      setCashFlowAmount('');
+      setCashFlowNote('');
+      await Promise.all([
+        loadCashFlowRows(occurredAt),
+        loadClosingReport(occurredAt),
+      ]);
+      openNotice(
+        'Kas Masuk / Keluar',
+        `${cashFlowTransactionType === 'income' ? 'Kas masuk' : 'Kas keluar'} berhasil dicatat dan masuk ke laporan closing.`,
+        null,
+        { autoCloseMs: 2200 },
+      );
+    } catch (error) {
+      openNotice('Kas Masuk / Keluar', `Gagal menyimpan transaksi kas: ${formatBackendValidationError(error)}`);
+    } finally {
+      setIsCashFlowSubmitting(false);
+    }
+  };
+
+  const handleSelectQuickCashFlowCategory = (row) => {
+    const nextTypeId = Number(row?.typeId || 0) || null;
+    if (nextTypeId) {
+      setCashFlowTypeId(nextTypeId);
+      setCashFlowCategory('');
+      return;
+    }
+    setCashFlowTypeId(null);
+    setCashFlowCategory(String(row?.manualCategory || row?.label || '').trim());
+  };
+
+  const buildClosingReportHtml = () => {
+    if (!closingReport) {
+      return '';
+    }
+    const reportDate = String(closingReport?.date || closingReportDate || '-');
+    const cashierName = String(currentUser?.name || 'Kasir').trim() || 'Kasir';
+    const receiptSettings = normalizeReceiptSettings(posSettings);
+    const logoUrl = String(receiptSettings?.receipt_logo_url || '').trim();
+    const brandName = String(receiptSettings?.brand_name || 'SIDOMULYO ADVERTISING').trim() || 'SIDOMULYO ADVERTISING';
+    const brandTagline = String(receiptSettings?.brand_tagline || '').trim();
+    const financeRecipient = String(closingFinanceRecipient || '').trim() || '-';
+    const shiftNote = String(closingShiftNote || '').trim() || '-';
+    const paymentLines = closingPaymentRows.length > 0
+      ? closingPaymentRows.map((row) => `<div class="line"><span>${escapeHtml(humanizePaymentMethod(row?.method))}</span><strong>${escapeHtml(formatRupiah(row?.total_amount || 0))}</strong></div>`).join('')
+      : '<div class="muted">Belum ada pembayaran penjualan hari ini</div>';
+    const receivableLines = closingReceivableBreakdownRows.length > 0
+      ? closingReceivableBreakdownRows.map((row) => `<div class="line"><span>${escapeHtml(humanizePaymentMethod(row?.method))}</span><strong>${escapeHtml(formatRupiah(row?.total_amount || 0))}</strong></div>`).join('')
+      : '<div class="muted">Belum ada pelunasan piutang hari ini</div>';
+    const externalLines = closingExternalRows.length > 0
+      ? closingExternalRows.slice(0, 6).map((row) => `
+        <div class="mini-item">
+          <div><strong>${escapeHtml(String(row?.transaction_type || '').toLowerCase() === 'expense' ? 'Keluar' : 'Masuk')}</strong> - ${escapeHtml(String(row?.category || '-'))}</div>
+          <div class="muted">${escapeHtml(String(row?.note || '-'))}</div>
+          <div><strong>${escapeHtml(formatRupiah(row?.amount || 0))}</strong></div>
+        </div>
+      `).join('')
+      : '<div class="muted">Tidak ada kas masuk / keluar tambahan</div>';
+    const receivableRefs = closingReceivableSettlementRows.length > 0
+      ? closingReceivableSettlementRows.slice(0, 5).map((row) => `
+        <div class="mini-item">
+          <div><strong>${escapeHtml(String(row?.invoice_no || '-'))}</strong></div>
+          <div class="muted">${escapeHtml(String(row?.customer_name || 'Pelanggan umum'))} | ${escapeHtml(humanizePaymentMethod(row?.method))}</div>
+          <div><strong>${escapeHtml(formatRupiah(row?.amount || 0))}</strong></div>
+        </div>
+      `).join('')
+      : '<div class="muted">Tidak ada referensi pelunasan piutang</div>';
+    const damageLines = closingDamageItems.length > 0
+      ? closingDamageItems.map((row, index) => `
+        <div class="mini-item">
+          <div><strong>${index + 1}. ${escapeHtml(String(row?.productName || '-'))}</strong></div>
+          <div class="muted">Qty: ${escapeHtml(String(row?.qty || 0))} | Estimasi: ${escapeHtml(formatRupiah(row?.estimatedTotalValue || 0))}</div>
+          <div class="muted">Status Audit: ${escapeHtml(humanizeStatusLabel(row?.auditStatus || 'reported'))}${row?.responsibility ? ` | Beban: ${escapeHtml(humanizeStatusLabel(row.responsibility))}` : ''}</div>
+          <div>${escapeHtml(String(row?.note || '-'))}</div>
+        </div>
+      `).join('')
+      : '<div class="muted">Tidak ada barang reject / rusak yang dilaporkan.</div>';
+
+    return `
 <!doctype html>
 <html>
 <head>
   <meta charset="utf-8" />
-  <title>Cetak Ulang Invoice</title>
+  <title>Laporan Close Order ${escapeHtml(reportDate)}</title>
   <style>
-    body { font-family: Arial, sans-serif; margin: 20px; color: #222; }
-    h1 { font-size: 18px; margin: 0 0 8px 0; }
-    .meta { font-size: 12px; margin-bottom: 10px; }
-    table { width: 100%; border-collapse: collapse; font-size: 12px; }
-    th, td { border: 1px solid #999; padding: 6px; vertical-align: top; }
-    th { background: #edf2ff; }
-    .totals { margin-top: 10px; font-size: 12px; }
+    body { font-family: "Courier New", monospace; margin: 0; padding: 0; color: #111; }
+    .wrap { width: 80mm; max-width: 80mm; margin: 0 auto; padding: 8px 6px 12px; }
+    .brand { text-align: center; margin-bottom: 8px; }
+    .brand-logo { max-width: 38mm; max-height: 18mm; object-fit: contain; margin: 0 auto 4px; display: block; }
+    .brand-name { font-size: 12px; font-weight: 700; margin-bottom: 2px; }
+    .brand-tagline { font-size: 9px; margin-bottom: 4px; }
+    h1 { margin: 0 0 6px 0; font-size: 15px; text-align: center; }
+    h2 { margin: 12px 0 6px 0; font-size: 12px; text-transform: uppercase; border-top: 1px dashed #444; padding-top: 6px; }
+    .meta { font-size: 10px; margin-bottom: 2px; text-align: center; }
+    .line { display: flex; justify-content: space-between; gap: 8px; font-size: 10px; margin-bottom: 3px; }
+    .line strong { font-size: 10px; }
+    .muted { font-size: 9px; color: #444; margin-bottom: 4px; }
+    .mini-item { font-size: 10px; margin-bottom: 5px; }
+    .signatures { margin-top: 16px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+    .signature-card { text-align: center; font-size: 10px; }
+    .signature-space { height: 44px; border-bottom: 1px solid #444; margin-bottom: 5px; }
   </style>
 </head>
 <body>
-  <h1>Invoice Penjualan</h1>
-  <div class="meta">Order ID: ${escapeHtml(String(sourceRow?.id || '-'))}</div>
-  <div class="meta">Invoice: ${escapeHtml(String(sourceRow?.invoice?.invoice_no || '-'))}</div>
-  <div class="meta">Customer: ${escapeHtml(String(sourceRow?.customer?.name || 'Pelanggan umum'))}</div>
-  <div class="meta">Status Order: ${escapeHtml(formatDraftStatusLabel(normalizeInvoiceOrderStatus(sourceRow)))}</div>
-  <div class="meta">Status Produksi: ${escapeHtml(summarizeProductionStatusForInvoice(sourceRow))}</div>
-  <table>
-    <thead>
-      <tr>
-        ${tableHeaders.map((header) => `<th>${header}</th>`).join('')}
-      </tr>
-    </thead>
-    <tbody>${rowsHtml || `<tr><td colspan="${tableHeaders.length}" style="text-align:center;">Tidak ada item</td></tr>`}</tbody>
-  </table>
-  <div class="totals">Grand Total: ${formatRupiah(total)}</div>
+  <div class="wrap">
+    <div class="brand">
+      ${logoUrl ? `<img class="brand-logo" src="${escapeHtml(logoUrl)}" alt="Logo Toko" />` : ''}
+      <div class="brand-name">${escapeHtml(brandName)}</div>
+      ${brandTagline ? `<div class="brand-tagline">${escapeHtml(brandTagline)}</div>` : ''}
+    </div>
+    <h1>Laporan Close Order</h1>
+    <div class="meta">Tanggal: ${escapeHtml(reportDate)}</div>
+    <div class="meta">Kasir: ${escapeHtml(cashierName)}</div>
+    <h2>Omzet</h2>
+    <div class="line"><span>Omzet Hari Ini</span><strong>${escapeHtml(formatRupiah(closingReport?.sales?.gross_total || 0))}</strong></div>
+    <div class="line"><span>Bayar Penjualan Hari Ini</span><strong>${escapeHtml(formatRupiah(closingReport?.sales?.payment_received_total || 0))}</strong></div>
+    <div class="line"><span>Piutang Hari Ini</span><strong>${escapeHtml(formatRupiah(closingReport?.sales?.outstanding_total || 0))}</strong></div>
+
+    <h2>Pelunasan Piutang</h2>
+    <div class="line"><span>Total Pelunasan</span><strong>${escapeHtml(formatRupiah(closingReport?.receivable_collections?.total || 0))}</strong></div>
+    <div class="line"><span>Cash</span><strong>${escapeHtml(formatRupiah(closingReport?.receivable_collections?.cash_total || 0))}</strong></div>
+    <div class="line"><span>Non Cash</span><strong>${escapeHtml(formatRupiah(closingReport?.receivable_collections?.non_cash_total || 0))}</strong></div>
+    ${receivableLines}
+
+    <h2>Pembayaran</h2>
+    <div class="line"><span>Cash Sales</span><strong>${escapeHtml(formatRupiah(closingReport?.payments?.cash_total || 0))}</strong></div>
+    <div class="line"><span>Transfer Sales</span><strong>${escapeHtml(formatRupiah(closingPaymentMethodSummary.transfer))}</strong></div>
+    <div class="line"><span>QRIS Sales</span><strong>${escapeHtml(formatRupiah(closingPaymentMethodSummary.qris))}</strong></div>
+    <div class="line"><span>Card Sales</span><strong>${escapeHtml(formatRupiah(closingPaymentMethodSummary.card))}</strong></div>
+    <div class="line"><span>Non Cash Sales</span><strong>${escapeHtml(formatRupiah(closingReport?.payments?.non_cash_total || 0))}</strong></div>
+    ${closingPaymentMethodSummary.other > 0 ? `<div class="line"><span>Metode Lain</span><strong>${escapeHtml(formatRupiah(closingPaymentMethodSummary.other))}</strong></div>` : ''}
+    ${paymentLines}
+
+    <h2>Kasir vs Rekening</h2>
+    <div class="line"><span>Tunai di Kasir</span><strong>${escapeHtml(formatRupiah(closingCashInHandSummary.physicalCashExpected))}</strong></div>
+    <div class="line"><span>Non Tunai Rekening</span><strong>${escapeHtml(formatRupiah(closingNonCashSummary.total))}</strong></div>
+
+    <h2>Kas Lain</h2>
+    <div class="line"><span>Kas Masuk Lain</span><strong>${escapeHtml(formatRupiah(closingReport?.external_cash?.income_total || 0))}</strong></div>
+    <div class="line"><span>Kas Keluar</span><strong>${escapeHtml(formatRupiah(closingReport?.external_cash?.expense_total || 0))}</strong></div>
+    ${externalLines}
+
+    <h2>Barang Reject / Rusak</h2>
+    <div class="line"><span>Jumlah Item</span><strong>${escapeHtml(String(closingDamageSummary.itemCount || 0))}</strong></div>
+    <div class="line"><span>Total Qty</span><strong>${escapeHtml(String(closingDamageSummary.totalQty || 0))}</strong></div>
+    <div class="line"><span>Estimasi Nilai</span><strong>${escapeHtml(formatRupiah(closingDamageSummary.totalEstimatedValue || 0))}</strong></div>
+    <div class="line"><span>Sudah Diaudit</span><strong>${escapeHtml(String(closingDamageSummary.auditedCount || 0))}</strong></div>
+    ${damageLines}
+
+    <h2>Closing Kas</h2>
+    <div class="line"><span>Saldo Awal</span><strong>${escapeHtml(formatRupiah(closingOpeningCashValue))}</strong></div>
+    <div class="line"><span>Saldo Sistem</span><strong>${escapeHtml(formatRupiah(closingExpectedCashValue))}</strong></div>
+    <div class="line"><span>Uang Fisik</span><strong>${escapeHtml(formatRupiah(closingActualCashValue))}</strong></div>
+    <div class="line"><span>Selisih</span><strong>${escapeHtml(formatRupiah(closingCashDifferenceValue))}</strong></div>
+
+    <h2>Referensi Piutang</h2>
+    ${receivableRefs}
+
+    <h2>Serah Terima</h2>
+    <div class="mini-item"><strong>Finance:</strong> ${escapeHtml(financeRecipient)}</div>
+    <div class="mini-item"><strong>Catatan:</strong> ${escapeHtml(shiftNote)}</div>
+
+    <div class="signatures">
+      <div class="signature-card">
+        <div class="signature-space"></div>
+        <div>Kasir</div>
+      </div>
+      <div class="signature-card">
+        <div class="signature-space"></div>
+        <div>Finance</div>
+      </div>
+    </div>
+  </div>
 </body>
 </html>`;
-    printWindow.document.open();
-    printWindow.document.write(html);
-    printWindow.document.close();
-    printWindow.focus();
-    setTimeout(() => {
-      printWindow.print();
-    }, 250);
+  };
+
+  const handlePrintClosingReport = () => {
+    if (!closingReport) {
+      openNotice('Laporan Close Order', 'Generate laporan dulu sebelum dicetak.');
+      return;
+    }
+    const html = buildClosingReportHtml();
+    if (!html) {
+      openNotice('Laporan Close Order', 'HTML laporan belum berhasil dibuat.');
+      return;
+    }
+    printHtmlDocument(html, 'Cetak Laporan Close Order');
   };
 
   const orderPreviewSnapshot = buildOrderPreviewSnapshot();
@@ -5822,10 +7898,16 @@ const SalesScreen = ({ currentUser, onLogout }) => {
               <Text style={styles.greenTabText}>Produksi</Text>
             </Pressable>
             <Pressable
-              style={[styles.greenTab, activeMenu === 'debug' ? styles.greenTabActive : null]}
-              onPress={() => setActiveMenu('debug')}
+              style={[styles.greenTab, activeMenu === 'report' ? styles.greenTabActive : null]}
+              onPress={() => setActiveMenu('report')}
             >
-              <Text style={styles.greenTabText}>Menu Tools</Text>
+              <Text style={styles.greenTabText}>Laporan</Text>
+            </Pressable>
+            <Pressable
+              style={[styles.greenTab, activeMenu === 'settings' ? styles.greenTabActive : null]}
+              onPress={() => setActiveMenu('settings')}
+            >
+              <Text style={styles.greenTabText}>Pengaturan</Text>
             </Pressable>
           </View>
 
@@ -5873,6 +7955,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                 finishingAvailabilityMessage={finishingAvailabilityMessage}
                 isPrintingFinishingMode={isPrintingProductType(selectedProductType)}
                 isStrictStickerFinishingMode={selectedIsStrictSticker}
+                autoApplyFinishingSelection={autoApplyMmtFinishing}
                 onSaveSelectedFinishings={handleSaveSelectedFinishings}
                 onSaveSelectedFinishingMataAyamQtyById={handleSaveSelectedFinishingMataAyamQtyById}
                 selectedLbMaxProductId={selectedLbMaxProductId}
@@ -5912,6 +7995,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                 grandTotal={grandTotal}
                 paymentMethod={paymentMethod}
                 paymentMethodOptions={PAYMENT_METHOD_LABELS}
+                paymentMethodHelperText={paymentMethodHelperText}
                 onChangePaymentMethod={(value) => setPaymentMethod(normalizePaymentMethodLabel(value))}
                 paymentStatus={paymentStatus}
                 paymentAmount={paymentAmount}
@@ -5963,17 +8047,101 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                 >
                   <Text style={[styles.filterButtonText, invoiceFilter === 'processing' ? styles.filterButtonTextActive : null]}>Invoice Proses</Text>
                 </Pressable>
+                <Pressable
+                  style={[styles.filterButton, invoiceFilter === 'receivable' ? styles.filterButtonActive : null]}
+                  onPress={() => setInvoiceFilter('receivable')}
+                >
+                  <Text style={[styles.filterButtonText, invoiceFilter === 'receivable' ? styles.filterButtonTextActive : null]}>Piutang</Text>
+                </Pressable>
               </View>
+              {invoiceFilter === 'receivable' ? (
+                <View style={styles.filterRow}>
+                  <Pressable
+                    style={[styles.filterButton, receivableStatusFilter === 'all' ? styles.filterButtonActive : null]}
+                    onPress={() => setReceivableStatusFilter('all')}
+                  >
+                    <Text style={[styles.filterButtonText, receivableStatusFilter === 'all' ? styles.filterButtonTextActive : null]}>
+                      Semua Piutang
+                    </Text>
+                  </Pressable>
+                  <Pressable
+                    style={[styles.filterButton, receivableStatusFilter === 'payable' ? styles.filterButtonActive : null]}
+                    onPress={() => setReceivableStatusFilter('payable')}
+                  >
+                    <Text style={[styles.filterButtonText, receivableStatusFilter === 'payable' ? styles.filterButtonTextActive : null]}>
+                      Bisa Dibayar
+                    </Text>
+                  </Pressable>
+                  <Pressable
+                    style={[styles.filterButton, receivableStatusFilter === 'blocked' ? styles.filterButtonActive : null]}
+                    onPress={() => setReceivableStatusFilter('blocked')}
+                  >
+                    <Text style={[styles.filterButtonText, receivableStatusFilter === 'blocked' ? styles.filterButtonTextActive : null]}>
+                      Belum Bisa Dibayar
+                    </Text>
+                  </Pressable>
+                </View>
+              ) : null}
               <TextInput
                 value={invoiceSearch}
                 onChangeText={setInvoiceSearch}
-                placeholder="Cari nama customer / no invoice / order id..."
+                placeholder="Cari nama customer / no HP / no invoice / order id..."
                 placeholderTextColor="#777777"
                 style={styles.invoiceSearchInput}
               />
+              {receivableCustomerSummary ? (
+                <View style={styles.receivableSummaryCard}>
+                  <Text style={styles.receivableSummaryTitle}>Ringkasan Piutang Pelanggan</Text>
+                  <Text style={styles.receivableSummaryName}>
+                    {receivableCustomerSummary.customerName}
+                    {receivableCustomerSummary.customerPhone ? ` | ${receivableCustomerSummary.customerPhone}` : ''}
+                  </Text>
+                  {receivableCustomerSummary.customerCount > 1 ? (
+                    <Text style={styles.receivableSummaryWarning}>
+                      Hasil pencarian mencakup {receivableCustomerSummary.customerCount} pelanggan. Persempit nama / nomor HP agar tracking lebih spesifik.
+                    </Text>
+                  ) : null}
+                  <Text style={styles.receivableSummaryMeta}>
+                    Total invoice piutang: {receivableCustomerSummary.totalInvoice}
+                  </Text>
+                  <Text style={styles.receivableSummaryMeta}>
+                    Total nilai invoice: {formatRupiah(receivableCustomerSummary.totalAmount)}
+                  </Text>
+                  <Text style={styles.receivableSummaryMeta}>
+                    Invoice tertua: {receivableCustomerSummary.oldestInvoiceNo} | {formatDateText(receivableCustomerSummary.oldestInvoiceDate)}
+                  </Text>
+                  <Text style={styles.receivableSummaryMeta}>
+                    Umur piutang tertua: {receivableCustomerSummary.oldestInvoiceAgeDays} hari
+                  </Text>
+                  <Text style={styles.receivableSummaryAmount}>
+                    Total piutang: {formatRupiah(receivableCustomerSummary.totalDue)}
+                  </Text>
+                </View>
+              ) : null}
+              {receivablePortfolioSummary ? (
+                <View style={styles.receivableSummaryCard}>
+                  <Text style={styles.receivableSummaryTitle}>Portofolio Piutang Tampil</Text>
+                  <Text style={styles.receivableSummaryMeta}>
+                    Total invoice piutang: {receivablePortfolioSummary.totalInvoices}
+                  </Text>
+                  <Text style={styles.receivableSummaryMeta}>
+                    Bisa dibayar: {receivablePortfolioSummary.totalPayable} | Belum bisa dibayar: {receivablePortfolioSummary.totalBlocked}
+                  </Text>
+                  <Text style={styles.receivableSummaryMeta}>
+                    Total sudah dibayar: {formatRupiah(receivablePortfolioSummary.totalPaid)}
+                  </Text>
+                  <Text style={styles.receivableSummaryAmount}>
+                    Total outstanding: {formatRupiah(receivablePortfolioSummary.totalDue)}
+                  </Text>
+                </View>
+              ) : null}
               {filteredInvoices.length === 0 ? (
                 <Text style={styles.debugText}>
-                  {isDraftLoading ? 'Memuat invoice...' : 'Belum ada invoice sesuai filter.'}
+                  {isDraftLoading
+                    ? 'Memuat invoice...'
+                    : invoiceFilter === 'receivable'
+                      ? 'Belum ada invoice piutang sesuai filter.'
+                      : 'Belum ada invoice sesuai filter.'}
                 </Text>
               ) : (
                 <View style={styles.draftList}>
@@ -5993,8 +8161,11 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                     const itemCount = Array.isArray(row?.items) ? row.items.length : 0;
                     const isDeleting = String(isDeletingDraftId || '') === String(row?.id || '');
                     const isDraftRow = isDraftInvoiceRow(row);
+                    const draftExpiry = isDraftRow ? getDraftExpiryMeta(row?.created_at, draftTimeTick) : null;
                     const invoiceStatus = normalizeInvoiceOrderStatus(row);
                     const productionStage = getCurrentProductionStageForInvoice(row);
+                    const productionLabel = isDraftRow ? 'Belum Masuk Produksi' : productionStage.label;
+                    const productionColor = isDraftRow ? '#6b7280' : getProductionStatusTextColor(productionStage.key);
                     return (
                       <View key={String(row?.id || `row-${index}`)} style={styles.draftCard}>
                         <View style={styles.draftInfo}>
@@ -6012,15 +8183,30 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                               style={[
                                 styles.draftMeta,
                                 styles.productionCurrentText,
-                                { color: getProductionStatusTextColor(productionStage.key) },
+                                { color: productionColor },
                               ]}
                             >
-                              {productionStage.label}
-                              {productionStage.count > 0 ? ` (${productionStage.count} item)` : ''}
+                              {productionLabel}
+                              {!isDraftRow && productionStage.count > 0 ? ` (${productionStage.count} item)` : ''}
                             </Text>
                           </View>
                           <Text style={styles.draftMeta}>Item: {itemCount} | Total: {formatRupiah(total)}</Text>
+                          {Number(row?.invoice?.due_total || 0) > 0 ? (
+                            <Text style={styles.receivableDueText}>
+                              Piutang: {formatRupiah(row?.invoice?.due_total || 0)} | Terbayar: {formatRupiah(row?.invoice?.paid_total || 0)}
+                            </Text>
+                          ) : null}
                           <Text style={styles.draftMeta}>Tanggal: {String(row?.created_at || '-')}</Text>
+                          {isDraftRow ? (
+                            <Text
+                              style={[
+                                styles.draftExpiryMeta,
+                                draftExpiry?.isExpired ? styles.draftExpiryMetaExpired : null,
+                              ]}
+                            >
+                              {draftExpiry?.label || `Auto hapus ${DRAFT_AUTO_DELETE_HOURS} jam`}
+                            </Text>
+                          ) : null}
                         </View>
                         <View style={styles.draftActionColumn}>
                           {isDraftRow ? (
@@ -6051,6 +8237,20 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                               <Pressable style={styles.continueDraftButton} onPress={() => handleViewInvoiceDetail(row)}>
                                 <Text style={styles.continueDraftButtonText}>Detail</Text>
                               </Pressable>
+                              {Number(row?.invoice?.due_total || 0) > 0 ? (
+                                <Pressable
+                                  style={[
+                                    styles.receivablePayButton,
+                                    !Boolean(row?.invoice?.can_pay) ? styles.draftActionDisabled : null,
+                                  ]}
+                                  disabled={!Boolean(row?.invoice?.can_pay)}
+                                  onPress={() => handleOpenReceivablePaymentModal(row)}
+                                >
+                                  <Text style={styles.receivablePayButtonText}>
+                                    {Boolean(row?.invoice?.can_pay) ? 'Bayar Piutang' : 'Belum Bisa Dibayar'}
+                                  </Text>
+                                </Pressable>
+                              ) : null}
                               <Pressable style={styles.refreshButton} onPress={() => handleReprintInvoice(row)}>
                                 <Text style={styles.refreshButtonText}>Cetak Ulang</Text>
                               </Pressable>
@@ -6075,8 +8275,746 @@ const SalesScreen = ({ currentUser, onLogout }) => {
               onUpdateStatus={handleUpdateProductionStatus}
               updatingItemId={updatingProductionItemId}
             />
-          ) : (
+          ) : activeMenu === 'report' ? (
+            <View style={styles.draftPanel}>
+              <View style={styles.draftHeaderRow}>
+                <View style={styles.draftInfo}>
+                  <Text style={styles.debugTitle}>Laporan Close Order</Text>
+                  <Text style={styles.debugText}>
+                    Laporan harian order, pembayaran, piutang, dan pergerakan kas yang siap dicetak untuk finance.
+                  </Text>
+                </View>
+                <View style={styles.headerActions}>
+                  <Pressable
+                    style={styles.refreshButton}
+                    onPress={() => loadClosingWorkspace()}
+                  >
+                    <Text style={styles.refreshButtonText}>{isClosingReportLoading ? 'Memuat...' : 'Refresh'}</Text>
+                  </Pressable>
+                </View>
+              </View>
+
+              <View style={styles.filterRow}>
+                <TextInput
+                  value={closingReportDate}
+                  onChangeText={setClosingReportDate}
+                  placeholder="YYYY-MM-DD"
+                  placeholderTextColor="#6c7485"
+                  style={[styles.invoiceSearchInput, styles.reportDateInput]}
+                />
+                <Pressable style={styles.refreshButton} onPress={() => loadClosingWorkspace(closingReportDate)}>
+                  <Text style={styles.refreshButtonText}>Generate</Text>
+                </Pressable>
+                <Pressable style={styles.refreshButton} onPress={handlePrintClosingReport}>
+                  <Text style={styles.refreshButtonText}>Print Laporan</Text>
+                </Pressable>
+              </View>
+
+              {isClosingReportLoading ? (
+                <Text style={styles.debugText}>Sedang menyiapkan laporan close order...</Text>
+              ) : closingReport ? (
+                <>
+                  <View style={styles.reportSectionCard}>
+                    <Text style={styles.debugTitle}>Kas Masuk / Keluar Kasir</Text>
+                    <Text style={styles.debugText}>
+                      Catat pengeluaran mendadak, pembelian kecil, titipan uang, atau uang yang diambil dari kasir supaya laporan closing lebih jelas.
+                    </Text>
+
+                    <View style={styles.filterRow}>
+                      <Pressable
+                        style={[
+                          styles.filterButton,
+                          cashFlowTransactionType === 'expense' ? styles.filterButtonActive : null,
+                        ]}
+                        onPress={() => setCashFlowTransactionType('expense')}
+                      >
+                        <Text style={[
+                          styles.filterButtonText,
+                          cashFlowTransactionType === 'expense' ? styles.filterButtonTextActive : null,
+                        ]}
+                        >
+                          Kas Keluar
+                        </Text>
+                      </Pressable>
+                      <Pressable
+                        style={[
+                          styles.filterButton,
+                          cashFlowTransactionType === 'income' ? styles.filterButtonActive : null,
+                        ]}
+                        onPress={() => setCashFlowTransactionType('income')}
+                      >
+                        <Text style={[
+                          styles.filterButtonText,
+                          cashFlowTransactionType === 'income' ? styles.filterButtonTextActive : null,
+                        ]}
+                        >
+                          Kas Masuk
+                        </Text>
+                      </Pressable>
+                    </View>
+
+                    <View style={styles.reportSummaryGrid}>
+                      <View style={styles.reportInputGroup}>
+                        <Text style={styles.reportInputLabel}>Kategori Cepat</Text>
+                        <View style={styles.reportChipWrap}>
+                          {isCashFlowTypesLoading ? (
+                            <Text style={styles.debugText}>Memuat kategori...</Text>
+                          ) : quickCashFlowCategories.length > 0 ? quickCashFlowCategories.map((row) => {
+                            const active = row?.typeId
+                              ? Number(row.typeId) === Number(cashFlowTypeId || 0)
+                              : (!selectedCashFlowType && normalizeText(cashFlowCategory) === normalizeText(row?.manualCategory || row?.label));
+                            return (
+                              <Pressable
+                                key={String(row?.key || `cash-flow-type-${row?.label || 'type'}`)}
+                                style={[styles.reportChip, active ? styles.reportChipActive : null]}
+                                onPress={() => handleSelectQuickCashFlowCategory(row)}
+                              >
+                                <View style={styles.reportChipContent}>
+                                  <Text style={[styles.reportChipText, active ? styles.reportChipTextActive : null]}>
+                                    {String(row?.label || '-')}
+                                  </Text>
+                                  <View style={[styles.reportChipBadge, active ? styles.reportChipBadgeActive : null]}>
+                                    <Text style={[styles.reportChipBadgeText, active ? styles.reportChipBadgeTextActive : null]}>
+                                      {formatCashFlowSourceLabel(row?.source)}
+                                    </Text>
+                                  </View>
+                                </View>
+                              </Pressable>
+                            );
+                          }) : (
+                            <Text style={styles.debugText}>Belum ada kategori aktif. Isi manual di bawah.</Text>
+                          )}
+                        </View>
+                      </View>
+                      <View style={styles.reportInputGroup}>
+                        <Text style={styles.reportInputLabel}>Kategori Manual</Text>
+                        <TextInput
+                          value={selectedCashFlowType ? String(selectedCashFlowType?.name || '') : cashFlowCategory}
+                          onChangeText={setCashFlowCategory}
+                          editable={!selectedCashFlowType}
+                          placeholder="Contoh: beli galon, ambil kas owner"
+                          placeholderTextColor="#6c7485"
+                          style={[
+                            styles.reportInput,
+                            selectedCashFlowType ? styles.reportInputReadonly : null,
+                          ]}
+                        />
+                      </View>
+                      <View style={styles.reportInputGroup}>
+                        <Text style={styles.reportInputLabel}>Nominal</Text>
+                        <TextInput
+                          value={cashFlowAmount}
+                          onChangeText={(value) => setCashFlowAmount(sanitizeCurrencyInput(value))}
+                          keyboardType="numeric"
+                          placeholder="0"
+                          placeholderTextColor="#6c7485"
+                          style={styles.reportInput}
+                        />
+                      </View>
+                      <View style={styles.reportInputGroup}>
+                        <Text style={styles.reportInputLabel}>Catatan</Text>
+                        <TextInput
+                          value={cashFlowNote}
+                          onChangeText={setCashFlowNote}
+                          placeholder="Contoh: beli kebutuhan mendadak / diambil untuk operasional"
+                          placeholderTextColor="#6c7485"
+                          multiline
+                          numberOfLines={3}
+                          style={[styles.reportInput, styles.reportTextarea]}
+                        />
+                      </View>
+                    </View>
+
+                    <View style={styles.headerActions}>
+                      <Pressable
+                        style={[styles.refreshButton, isCashFlowSubmitting ? styles.draftActionDisabled : null]}
+                        disabled={isCashFlowSubmitting}
+                        onPress={handleSubmitCashFlow}
+                      >
+                        <Text style={styles.refreshButtonText}>{isCashFlowSubmitting ? 'Menyimpan...' : 'Simpan Kas Masuk / Keluar'}</Text>
+                      </Pressable>
+                      <Pressable
+                        style={[styles.printerSecondaryButton, isCashFlowRowsLoading ? styles.draftActionDisabled : null]}
+                        disabled={isCashFlowRowsLoading}
+                        onPress={() => loadCashFlowRows(closingReportDate)}
+                      >
+                        <Text style={styles.printerSecondaryButtonText}>{isCashFlowRowsLoading ? 'Memuat...' : 'Refresh Riwayat'}</Text>
+                      </Pressable>
+                    </View>
+
+                    {cashOutWarningText ? (
+                      <View style={styles.reportWarningBox}>
+                        <Text style={styles.reportWarningText}>{cashOutWarningText}</Text>
+                      </View>
+                    ) : null}
+
+                    <View style={styles.filterRow}>
+                      <Pressable
+                        style={[styles.filterButton, cashFlowHistoryFilter === 'all' ? styles.filterButtonActive : null]}
+                        onPress={() => setCashFlowHistoryFilter('all')}
+                      >
+                        <Text style={[styles.filterButtonText, cashFlowHistoryFilter === 'all' ? styles.filterButtonTextActive : null]}>
+                          Semua Riwayat
+                        </Text>
+                      </Pressable>
+                      <Pressable
+                        style={[styles.filterButton, cashFlowHistoryFilter === 'income' ? styles.filterButtonActive : null]}
+                        onPress={() => setCashFlowHistoryFilter('income')}
+                      >
+                        <Text style={[styles.filterButtonText, cashFlowHistoryFilter === 'income' ? styles.filterButtonTextActive : null]}>
+                          Riwayat Masuk
+                        </Text>
+                      </Pressable>
+                      <Pressable
+                        style={[styles.filterButton, cashFlowHistoryFilter === 'expense' ? styles.filterButtonActive : null]}
+                        onPress={() => setCashFlowHistoryFilter('expense')}
+                      >
+                        <Text style={[styles.filterButtonText, cashFlowHistoryFilter === 'expense' ? styles.filterButtonTextActive : null]}>
+                          Riwayat Keluar
+                        </Text>
+                      </Pressable>
+                    </View>
+
+                    <View style={styles.reportNestedList}>
+                      {filteredCashFlowRows.length > 0 ? filteredCashFlowRows.map((row, index) => (
+                        <View
+                          key={`cash-flow-row-${row?.id || row?.transaction_no || index}`}
+                          style={[
+                            styles.reportNestedItem,
+                            String(row?.transaction_type || '').toLowerCase() === 'income'
+                              ? styles.cashFlowIncomeItem
+                              : styles.cashFlowExpenseItem,
+                          ]}
+                        >
+                          <View style={styles.cashFlowRowHeader}>
+                            <Text
+                              style={[
+                                styles.reportNestedTitle,
+                                String(row?.transaction_type || '').toLowerCase() === 'income'
+                                  ? styles.cashFlowIncomeText
+                                  : styles.cashFlowExpenseText,
+                              ]}
+                            >
+                              {String(row?.transaction_type_label || row?.transaction_type || '-')} - {String(row?.category || '-')}
+                            </Text>
+                            <View style={styles.cashFlowRowBadges}>
+                              <View
+                                style={[
+                                  styles.cashFlowTypeBadge,
+                                  String(row?.transaction_type || '').toLowerCase() === 'income'
+                                    ? styles.cashFlowIncomeBadge
+                                    : styles.cashFlowExpenseBadge,
+                                ]}
+                              >
+                                <Text style={styles.cashFlowTypeBadgeText}>
+                                  {String(row?.transaction_type || '').toLowerCase() === 'income' ? 'Masuk' : 'Keluar'}
+                                </Text>
+                              </View>
+                              <View style={styles.cashFlowSourceBadge}>
+                                <Text style={styles.cashFlowSourceBadgeText}>
+                                  {row?.type?.id ? 'Backend' : 'Manual'}
+                                </Text>
+                              </View>
+                            </View>
+                          </View>
+                          <Text style={styles.reportNestedMeta}>
+                            {String(row?.occurred_at || '-')} | {formatRupiah(row?.amount || 0)} | {String(row?.transaction_no || '-')}
+                          </Text>
+                          {row?.note ? (
+                            <Text style={styles.reportNestedMeta}>{String(row.note)}</Text>
+                          ) : null}
+                        </View>
+                      )) : (
+                        <Text style={styles.debugText}>Belum ada riwayat kas sesuai filter di tanggal ini.</Text>
+                      )}
+                    </View>
+                  </View>
+
+                  <View style={styles.reportSectionCard}>
+                    <Text style={styles.debugTitle}>Form Closing Shift</Text>
+                    <Text style={styles.debugText}>Isi nominal kas fisik dan catatan serah terima supaya laporan ke finance lebih lengkap.</Text>
+                    <View style={styles.reportSummaryGrid}>
+                      <View style={styles.reportInputGroup}>
+                        <Text style={styles.reportInputLabel}>Saldo Awal Kas</Text>
+                        <TextInput
+                          value={closingOpeningCash}
+                          onChangeText={(value) => setClosingOpeningCash(sanitizeCurrencyInput(value))}
+                          keyboardType="numeric"
+                          placeholder="0"
+                          placeholderTextColor="#6c7485"
+                          style={styles.reportInput}
+                        />
+                      </View>
+                      <View style={styles.reportInputGroup}>
+                        <Text style={styles.reportInputLabel}>Uang Fisik Akhir</Text>
+                        <TextInput
+                          value={closingActualCash}
+                          onChangeText={(value) => setClosingActualCash(sanitizeCurrencyInput(value))}
+                          keyboardType="numeric"
+                          placeholder="0"
+                          placeholderTextColor="#6c7485"
+                          style={styles.reportInput}
+                        />
+                      </View>
+                      <View style={styles.reportInputGroup}>
+                        <Text style={styles.reportInputLabel}>Penerima Finance</Text>
+                        <TextInput
+                          value={closingFinanceRecipient}
+                          editable={false}
+                          placeholder={isFinanceRecipientsLoading ? 'Memuat admin keuangan...' : 'Pilih admin keuangan'}
+                          placeholderTextColor="#6c7485"
+                          style={styles.reportInput}
+                        />
+                        <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.financeRecipientPicker}>
+                          {(Array.isArray(financeRecipients) ? financeRecipients : []).map((row) => {
+                            const active = Number(row?.id || 0) === Number(closingFinanceRecipientId || 0);
+                            return (
+                              <Pressable
+                                key={`finance-${row?.id || row?.name || Math.random()}`}
+                                style={[styles.financeRecipientChip, active ? styles.financeRecipientChipActive : null]}
+                                onPress={() => {
+                                  setClosingFinanceRecipientId(Number(row?.id || 0) || null);
+                                  setClosingFinanceRecipient(String(row?.name || '').trim());
+                                }}
+                              >
+                                <Text style={[styles.financeRecipientChipText, active ? styles.financeRecipientChipTextActive : null]}>
+                                  {row?.name || '-'}
+                                </Text>
+                              </Pressable>
+                            );
+                          })}
+                        </ScrollView>
+                      </View>
+                      <View style={styles.reportInputGroup}>
+                        <Text style={styles.reportInputLabel}>Catatan Shift</Text>
+                        <TextInput
+                          value={closingShiftNote}
+                          onChangeText={setClosingShiftNote}
+                          placeholder="Catatan tambahan untuk finance"
+                          placeholderTextColor="#6c7485"
+                          multiline
+                          numberOfLines={3}
+                          style={[styles.reportInput, styles.reportTextarea]}
+                        />
+                      </View>
+                    </View>
+                    <View style={styles.reportSummaryGrid}>
+                      <View style={styles.reportSummaryCard}>
+                        <Text style={styles.reportSummaryLabel}>Saldo Kas Sistem</Text>
+                        <Text style={styles.reportSummaryValue}>{formatRupiah(closingExpectedCashValue)}</Text>
+                      </View>
+                      <View style={styles.reportSummaryCard}>
+                        <Text style={styles.reportSummaryLabel}>Selisih Kas Fisik</Text>
+                        <Text style={[
+                          styles.reportSummaryValue,
+                          closingCashDifferenceValue < 0 ? styles.reportNegativeValue : null,
+                          closingCashDifferenceValue > 0 ? styles.reportPositiveValue : null,
+                        ]}
+                        >
+                          {formatRupiah(closingCashDifferenceValue)}
+                        </Text>
+                      </View>
+                    </View>
+                    <View style={styles.reportInputGroup}>
+                      <Text style={styles.reportInputLabel}>Laporan Barang Reject / Rusak</Text>
+                      <TextInput
+                        value={damageProductSearch}
+                        onChangeText={setDamageProductSearch}
+                        placeholder="Cari produk rusak"
+                        placeholderTextColor="#6c7485"
+                        style={styles.reportInput}
+                      />
+                      <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.financeRecipientPicker}>
+                        {filteredDamageProductOptions.map((row) => {
+                          const active = Number(row?.id || 0) === Number(selectedDamageProductId || 0);
+                          return (
+                            <Pressable
+                              key={`damage-product-${row?.id || row?.name}`}
+                              style={[styles.financeRecipientChip, active ? styles.financeRecipientChipActive : null]}
+                              onPress={() => setSelectedDamageProductId(Number(row?.id || 0) || null)}
+                            >
+                              <Text style={[styles.financeRecipientChipText, active ? styles.financeRecipientChipTextActive : null]}>
+                                {row?.name || '-'}
+                              </Text>
+                            </Pressable>
+                          );
+                        })}
+                      </ScrollView>
+                      <View style={styles.reportSummaryGrid}>
+                        <View style={styles.reportInputGroup}>
+                          <Text style={styles.reportInputLabel}>Qty Rusak</Text>
+                          <TextInput
+                            value={damageQtyInput}
+                            onChangeText={setDamageQtyInput}
+                            keyboardType="numeric"
+                            placeholder="1"
+                            placeholderTextColor="#6c7485"
+                            style={styles.reportInput}
+                          />
+                        </View>
+                        <View style={styles.reportInputGroup}>
+                          <Text style={styles.reportInputLabel}>Catatan Barang</Text>
+                          <TextInput
+                            value={damageNoteInput}
+                            onChangeText={setDamageNoteInput}
+                            placeholder="Contoh: reject print, sobek, warna meleset"
+                            placeholderTextColor="#6c7485"
+                            style={styles.reportInput}
+                          />
+                        </View>
+                      </View>
+                      <View style={styles.headerActions}>
+                        <Pressable style={styles.refreshButton} onPress={handleAddDamageItem}>
+                          <Text style={styles.refreshButtonText}>Tambah Barang Rusak</Text>
+                        </Pressable>
+                      </View>
+                      <View style={styles.reportNestedList}>
+                        {closingDamageItems.length > 0 ? closingDamageItems.map((row, index) => (
+                          <View key={String(row?.id || `damage-row-${index}`)} style={styles.reportNestedItem}>
+                            <Text style={styles.reportNestedTitle}>
+                              {row?.productName || '-'} | Qty: {row?.qty || 0}
+                            </Text>
+                            <Text style={styles.reportNestedMeta}>
+                              Estimasi nilai: {formatRupiah(row?.estimatedTotalValue || 0)}
+                              {row?.auditStatus && row.auditStatus !== 'reported' ? ` | Audit: ${row.auditStatus}` : ''}
+                              {row?.responsibility ? ` | Beban: ${row.responsibility}` : ''}
+                            </Text>
+                            <Text style={styles.reportNestedMeta}>{row?.note || '-'}</Text>
+                            <Pressable
+                              style={styles.deleteDraftButton}
+                              onPress={() => setClosingDamageItems((prev) => prev.filter((item) => item.id !== row.id))}
+                            >
+                              <Text style={styles.deleteDraftButtonText}>Hapus</Text>
+                            </Pressable>
+                          </View>
+                        )) : (
+                          <Text style={styles.debugText}>Belum ada barang reject / rusak yang dilaporkan di closer ini.</Text>
+                        )}
+                      </View>
+                    </View>
+                    <View style={styles.filterRow}>
+                      <Pressable
+                        style={[styles.refreshButton, isClosingSubmitLoading ? styles.draftActionDisabled : null]}
+                        disabled={isClosingSubmitLoading}
+                        onPress={handleSubmitCloserOrder}
+                      >
+                        <Text style={styles.refreshButtonText}>
+                          {isClosingSubmitLoading ? 'Mengirim...' : 'Kirim ke Finance'}
+                        </Text>
+                      </Pressable>
+                      {closingRecord ? (
+                        <Text style={styles.debugText}>
+                          Status closer: {String(closingRecord?.status || 'submitted')}
+                          {' | '}Finance: {String(closingRecord?.finance_user?.name || closingFinanceRecipient || '-')}
+                          {closingRecord?.accounting_journal?.reference ? ` | Jurnal: ${closingRecord.accounting_journal.reference}` : ''}
+                        </Text>
+                      ) : null}
+                    </View>
+                  </View>
+
+                  <View style={styles.reportSummaryGrid}>
+                    <View style={[styles.reportSummaryCard, styles.reportSummaryCardInfo]}>
+                      <Text style={styles.reportSummaryLabel}>Omzet Hari Ini</Text>
+                      <Text style={styles.reportSummaryValue}>{formatRupiah(closingReport?.sales?.gross_total || 0)}</Text>
+                    </View>
+                    <View style={[styles.reportSummaryCard, styles.reportSummaryCardInfo]}>
+                      <Text style={styles.reportSummaryLabel}>Pembayaran Penjualan Hari Ini</Text>
+                      <Text style={styles.reportSummaryValue}>{formatRupiah(closingReport?.sales?.payment_received_total || 0)}</Text>
+                    </View>
+                    <View style={[styles.reportSummaryCard, styles.reportSummaryCardAccent]}>
+                      <Text style={styles.reportSummaryLabel}>Pelunasan Piutang Hari Ini</Text>
+                      <Text style={styles.reportSummaryValue}>{formatRupiah(closingReport?.receivable_collections?.total || 0)}</Text>
+                    </View>
+                    <View style={[styles.reportSummaryCard, styles.reportSummaryCardWarning]}>
+                      <Text style={styles.reportSummaryLabel}>Piutang / Outstanding</Text>
+                      <Text style={styles.reportSummaryValue}>{formatRupiah(closingReport?.sales?.outstanding_total || 0)}</Text>
+                    </View>
+                    <View style={[styles.reportSummaryCard, styles.reportSummaryCardCash]}>
+                      <Text style={styles.reportSummaryLabel}>Kas Masuk Bersih</Text>
+                      <Text style={styles.reportSummaryValue}>{formatRupiah(closingReport?.closing?.net_cash_movement || 0)}</Text>
+                    </View>
+                  </View>
+
+                  <View style={styles.reportSummaryGrid}>
+                    <View style={[styles.reportSummaryCard, styles.reportSummaryCardCash]}>
+                      <Text style={styles.reportSummaryLabel}>Cash Sales</Text>
+                      <Text style={styles.reportSummaryValue}>{formatRupiah(closingPaymentMethodSummary.cash)}</Text>
+                    </View>
+                    <View style={[styles.reportSummaryCard, styles.reportSummaryCardNonCash]}>
+                      <Text style={styles.reportSummaryLabel}>Transfer Sales</Text>
+                      <Text style={styles.reportSummaryValue}>{formatRupiah(closingPaymentMethodSummary.transfer)}</Text>
+                    </View>
+                    <View style={[styles.reportSummaryCard, styles.reportSummaryCardNonCash]}>
+                      <Text style={styles.reportSummaryLabel}>QRIS Sales</Text>
+                      <Text style={styles.reportSummaryValue}>{formatRupiah(closingPaymentMethodSummary.qris)}</Text>
+                    </View>
+                    <View style={[styles.reportSummaryCard, styles.reportSummaryCardNonCash]}>
+                      <Text style={styles.reportSummaryLabel}>Card Sales</Text>
+                      <Text style={styles.reportSummaryValue}>{formatRupiah(closingPaymentMethodSummary.card)}</Text>
+                    </View>
+                    {closingPaymentMethodSummary.other > 0 ? (
+                      <View style={[styles.reportSummaryCard, styles.reportSummaryCardWarning]}>
+                        <Text style={styles.reportSummaryLabel}>Metode Lain</Text>
+                        <Text style={styles.reportSummaryValue}>{formatRupiah(closingPaymentMethodSummary.other)}</Text>
+                      </View>
+                    ) : null}
+                  </View>
+
+                  <View style={styles.reportSummaryGrid}>
+                    <View style={[styles.reportSummaryCard, styles.reportSummaryCardCashStrong]}>
+                      <Text style={styles.reportSummaryLabel}>Tunai Harus Ada di Kasir</Text>
+                      <Text style={styles.reportSummaryValue}>{formatRupiah(closingCashInHandSummary.physicalCashExpected)}</Text>
+                    </View>
+                    <View style={[styles.reportSummaryCard, styles.reportSummaryCardNonCashStrong]}>
+                      <Text style={styles.reportSummaryLabel}>Non Tunai Masuk Rekening</Text>
+                      <Text style={styles.reportSummaryValue}>{formatRupiah(closingNonCashSummary.total)}</Text>
+                    </View>
+                  </View>
+
+                  <View style={styles.reportSectionCard}>
+                    <Text style={styles.debugTitle}>Breakdown Pembayaran Omzet Hari Ini</Text>
+                    {closingPaymentRows.length > 0 ? closingPaymentRows.map((row, index) => (
+                      <View key={`payment-${index}-${row?.method || 'other'}`} style={styles.reportLineRow}>
+                        <Text style={styles.reportLineLabel}>{humanizePaymentMethod(row?.method)} ({row?.total_tx || 0} tx)</Text>
+                        <Text style={styles.reportLineValue}>{formatRupiah(row?.total_amount || 0)}</Text>
+                      </View>
+                    )) : (
+                      <Text style={styles.debugText}>Belum ada pembayaran di tanggal ini.</Text>
+                    )}
+                  </View>
+
+                  <View style={[styles.reportSectionCard, styles.reportSectionCardCash]}>
+                    <Text style={styles.debugTitle}>Posisi Uang Kasir vs Rekening</Text>
+                    <Text style={styles.debugText}>
+                      Section ini membantu membedakan uang tunai fisik yang seharusnya ada di laci kasir dan uang non tunai yang dibayar ke rekening.
+                    </Text>
+                    <View style={styles.reportLineRow}>
+                      <Text style={styles.reportLineLabel}>Cash dari penjualan hari ini</Text>
+                      <Text style={[styles.reportLineValue, styles.reportCashValue]}>{formatRupiah(closingCashInHandSummary.cashSales)}</Text>
+                    </View>
+                    <View style={styles.reportLineRow}>
+                      <Text style={styles.reportLineLabel}>Cash dari pelunasan piutang</Text>
+                      <Text style={[styles.reportLineValue, styles.reportCashValue]}>{formatRupiah(closingCashInHandSummary.cashReceivable)}</Text>
+                    </View>
+                    <View style={styles.reportLineRow}>
+                      <Text style={styles.reportLineLabel}>Kas masuk lain</Text>
+                      <Text style={[styles.reportLineValue, styles.reportCashValue]}>{formatRupiah(closingCashInHandSummary.cashIncomeOther)}</Text>
+                    </View>
+                    <View style={styles.reportLineRow}>
+                      <Text style={styles.reportLineLabel}>Kas keluar</Text>
+                      <Text style={[styles.reportLineValue, styles.reportExpenseValue]}>{formatRupiah(closingCashInHandSummary.cashExpenseOther)}</Text>
+                    </View>
+                    <View style={[styles.reportLineRow, styles.reportLineRowEmphasis]}>
+                      <Text style={styles.reportLineLabel}>Tunai seharusnya di kasir</Text>
+                      <Text style={[styles.reportLineValue, styles.reportCashValueStrong]}>{formatRupiah(closingCashInHandSummary.physicalCashExpected)}</Text>
+                    </View>
+                    <View style={styles.reportLineRow}>
+                      <Text style={styles.reportLineLabel}>Non tunai penjualan</Text>
+                      <Text style={[styles.reportLineValue, styles.reportNonCashValue]}>{formatRupiah(closingNonCashSummary.nonCashSales)}</Text>
+                    </View>
+                    <View style={styles.reportLineRow}>
+                      <Text style={styles.reportLineLabel}>Non tunai pelunasan piutang</Text>
+                      <Text style={[styles.reportLineValue, styles.reportNonCashValue]}>{formatRupiah(closingNonCashSummary.nonCashReceivable)}</Text>
+                    </View>
+                    <View style={[styles.reportLineRow, styles.reportLineRowEmphasis]}>
+                      <Text style={styles.reportLineLabel}>Total non tunai ke rekening</Text>
+                      <Text style={[styles.reportLineValue, styles.reportNonCashValueStrong]}>{formatRupiah(closingNonCashSummary.total)}</Text>
+                    </View>
+                  </View>
+
+                  <View style={styles.reportSectionCard}>
+                    <Text style={styles.debugTitle}>Pelunasan Piutang</Text>
+                    <Text style={styles.debugText}>
+                      Uang masuk dari invoice lama yang dibayar hari ini. Nilai ini menambah arus kas, tetapi tidak menambah omzet hari ini.
+                    </Text>
+                    <View style={styles.reportLineRow}>
+                      <Text style={styles.reportLineLabel}>Total pelunasan piutang</Text>
+                      <Text style={styles.reportLineValue}>{formatRupiah(closingReport?.receivable_collections?.total || 0)}</Text>
+                    </View>
+                    <View style={styles.reportLineRow}>
+                      <Text style={styles.reportLineLabel}>Cash pelunasan piutang</Text>
+                      <Text style={styles.reportLineValue}>{formatRupiah(closingReport?.receivable_collections?.cash_total || 0)}</Text>
+                    </View>
+                    <View style={styles.reportLineRow}>
+                      <Text style={styles.reportLineLabel}>Non cash pelunasan piutang</Text>
+                      <Text style={styles.reportLineValue}>{formatRupiah(closingReport?.receivable_collections?.non_cash_total || 0)}</Text>
+                    </View>
+                    {closingReceivableBreakdownRows.length > 0 ? closingReceivableBreakdownRows.map((row, index) => (
+                      <View key={`receivable-breakdown-${index}-${row?.method || 'other'}`} style={styles.reportLineRow}>
+                        <Text style={styles.reportLineLabel}>{humanizePaymentMethod(row?.method)} ({row?.total_tx || 0} tx)</Text>
+                        <Text style={styles.reportLineValue}>{formatRupiah(row?.total_amount || 0)}</Text>
+                      </View>
+                    )) : null}
+                    {closingReceivableSettlementRows.length > 0 ? (
+                      <View style={styles.reportNestedList}>
+                        {closingReceivableSettlementRows.map((row, index) => (
+                          <View key={`receivable-settlement-${row?.id || row?.invoice_no || index}`} style={styles.reportNestedItem}>
+                            <Text style={styles.reportNestedTitle}>
+                              {String(row?.invoice_no || '-')} - {String(row?.customer_name || 'Pelanggan umum')}
+                            </Text>
+                            <Text style={styles.reportNestedMeta}>
+                              Invoice: {String(row?.invoice_date || '-')} | Bayar: {String(row?.paid_at || '-')} | {humanizePaymentMethod(row?.method)}
+                            </Text>
+                            <Text style={styles.reportNestedMeta}>{formatRupiah(row?.amount || 0)}</Text>
+                          </View>
+                        ))}
+                      </View>
+                    ) : (
+                      <Text style={styles.debugText}>Belum ada pelunasan piutang di tanggal ini.</Text>
+                    )}
+                  </View>
+
+                  <View style={styles.reportSectionCard}>
+                    <Text style={styles.debugTitle}>Status Penjualan & Piutang</Text>
+                    <View style={styles.reportLineRow}>
+                      <Text style={styles.reportLineLabel}>Jumlah invoice</Text>
+                      <Text style={styles.reportLineValue}>{closingReport?.sales?.invoice_count || 0}</Text>
+                    </View>
+                    <View style={styles.reportLineRow}>
+                      <Text style={styles.reportLineLabel}>Rata-rata transaksi</Text>
+                      <Text style={styles.reportLineValue}>{formatRupiah(closingReport?.sales?.average_ticket || 0)}</Text>
+                    </View>
+                    {closingStatusRows.map((row, index) => (
+                      <View key={`status-${index}-${row?.status || 'unknown'}`} style={styles.reportLineRow}>
+                        <Text style={styles.reportLineLabel}>Status {humanizeStatusLabel(row?.status || 'unknown')}</Text>
+                        <Text style={styles.reportLineValue}>{row?.total || 0}</Text>
+                      </View>
+                    ))}
+                  </View>
+
+                  <View style={styles.reportSectionCard}>
+                    <Text style={styles.debugTitle}>Kas Masuk / Keluar Tambahan</Text>
+                    <View style={styles.reportLineRow}>
+                      <Text style={styles.reportLineLabel}>Pemasukan lain</Text>
+                      <Text style={styles.reportLineValue}>{formatRupiah(closingReport?.external_cash?.income_total || 0)}</Text>
+                    </View>
+                    <View style={styles.reportLineRow}>
+                      <Text style={styles.reportLineLabel}>Pengeluaran</Text>
+                      <Text style={styles.reportLineValue}>{formatRupiah(closingReport?.external_cash?.expense_total || 0)}</Text>
+                    </View>
+                    <View style={styles.reportLineRow}>
+                      <Text style={styles.reportLineLabel}>Arus kas masuk bruto</Text>
+                      <Text style={styles.reportLineValue}>{formatRupiah(closingReport?.closing?.gross_inflow_total || 0)}</Text>
+                    </View>
+                    {closingExternalRows.length > 0 ? (
+                      <View style={styles.reportNestedList}>
+                        {closingExternalRows.map((row, index) => (
+                          <View key={`external-${row?.id || row?.transaction_no || index}`} style={styles.reportNestedItem}>
+                            <Text style={styles.reportNestedTitle}>
+                              {String(row?.transaction_type || '').toLowerCase() === 'expense' ? 'Pengeluaran' : 'Pemasukan'} {row?.category || '-'}
+                            </Text>
+                            <Text style={styles.reportNestedMeta}>
+                              {String(row?.occurred_at || '-')} | {formatRupiah(row?.amount || 0)}{row?.note ? ` | ${row.note}` : ''}
+                            </Text>
+                          </View>
+                        ))}
+                      </View>
+                    ) : (
+                      <Text style={styles.debugText}>Tidak ada catatan kas masuk/keluar tambahan.</Text>
+                    )}
+                  </View>
+
+                  <View style={styles.reportSectionCard}>
+                    <Text style={styles.debugTitle}>Barang Reject / Rusak</Text>
+                    <View style={styles.reportLineRow}>
+                      <Text style={styles.reportLineLabel}>Jumlah item dilaporkan</Text>
+                      <Text style={styles.reportLineValue}>{closingDamageSummary.itemCount}</Text>
+                    </View>
+                    <View style={styles.reportLineRow}>
+                      <Text style={styles.reportLineLabel}>Total qty rusak</Text>
+                      <Text style={styles.reportLineValue}>{closingDamageSummary.totalQty}</Text>
+                    </View>
+                    <View style={styles.reportLineRow}>
+                      <Text style={styles.reportLineLabel}>Estimasi nilai kerusakan</Text>
+                      <Text style={styles.reportLineValue}>{formatRupiah(closingDamageSummary.totalEstimatedValue)}</Text>
+                    </View>
+                    <View style={styles.reportLineRow}>
+                      <Text style={styles.reportLineLabel}>Item yang sudah diaudit finance</Text>
+                      <Text style={styles.reportLineValue}>{closingDamageSummary.auditedCount}</Text>
+                    </View>
+                    {closingDamageItems.length > 0 ? (
+                      <View style={styles.reportNestedList}>
+                        {closingDamageItems.map((row, index) => (
+                          <View key={`report-damage-${row?.id || index}`} style={styles.reportNestedItem}>
+                            <Text style={styles.reportNestedTitle}>
+                              {index + 1}. {row?.productName || '-'} | Qty: {row?.qty || 0}
+                            </Text>
+                            <Text style={styles.reportNestedMeta}>
+                              Estimasi nilai: {formatRupiah(row?.estimatedTotalValue || 0)}
+                              {row?.auditStatus ? ` | Audit: ${humanizeStatusLabel(row.auditStatus)}` : ''}
+                              {row?.responsibility ? ` | Beban: ${humanizeStatusLabel(row.responsibility)}` : ''}
+                            </Text>
+                            <Text style={styles.reportNestedMeta}>{row?.note || '-'}</Text>
+                          </View>
+                        ))}
+                      </View>
+                    ) : (
+                      <Text style={styles.debugText}>Tidak ada barang reject / rusak yang ikut pada laporan close order ini.</Text>
+                    )}
+                  </View>
+
+                  <View style={styles.reportSectionCard}>
+                    <Text style={styles.debugTitle}>Produk Terlaris Hari Ini</Text>
+                    {closingTopProducts.length > 0 ? closingTopProducts.map((row, index) => (
+                      <View key={`top-product-${row?.product_id || index}`} style={styles.reportLineRow}>
+                        <Text style={styles.reportLineLabel}>{index + 1}. {row?.product_name || '-'}</Text>
+                        <Text style={styles.reportLineValue}>{row?.total_qty || 0} pcs | {formatRupiah(row?.total_amount || 0)}</Text>
+                      </View>
+                    )) : (
+                      <Text style={styles.debugText}>Belum ada data produk terlaris.</Text>
+                    )}
+                  </View>
+
+                </>
+              ) : (
+                <Text style={styles.debugText}>Belum ada laporan yang ditampilkan. Pilih tanggal lalu tekan `Generate`.</Text>
+              )}
+            </View>
+          ) : activeMenu === 'settings' ? (
             <View style={styles.debugPanel}>
+              <Text style={styles.debugTitle}>Pengaturan Printer Kasir</Text>
+              <Text style={styles.debugText}>Atur printer tujuan dan ukuran kertas struk sesuai printer yang dipakai di kasir.</Text>
+              <View style={styles.printerStatusRow}>
+                <View
+                  style={[
+                    styles.printerStatusBadge,
+                    printerStatusTone === 'active' ? styles.printerStatusBadgeActive : styles.printerStatusBadgeFallback,
+                  ]}
+                >
+                  <Text style={styles.printerStatusBadgeText}>{printerStatusLabel}</Text>
+                </View>
+                <Text style={styles.printerStatusHint}>
+                  {hasSavedPrinterProfile ? 'Cetak transaksi akan mencoba printer ini lebih dulu.' : 'Belum ada printer khusus yang dipakai.'}
+                </Text>
+              </View>
+              <View style={styles.printerTargetCard}>
+                <Text style={styles.printerTargetLabel}>Target Cetak</Text>
+                <Text style={styles.printerTargetPrimary}>{printerTargetSummary.primary}</Text>
+                <Text style={styles.printerTargetSecondary}>{printerTargetSummary.secondary}</Text>
+              </View>
+              <View style={styles.printerTargetCard}>
+                <Text style={styles.printerTargetLabel}>Ukuran Kertas Aktif</Text>
+                <Text style={styles.printerTargetPrimary}>{printerPaperSummary}</Text>
+                <Text style={styles.printerTargetSecondary}>Pilih `58mm`, `80mm`, atau `custom` sesuai printer struk yang dipakai.</Text>
+              </View>
+              <Text style={styles.debugText}>{printerProfileSummary}</Text>
+              <View style={styles.printerToolsCard}>
+                <PrinterSettingsForm
+                  value={activePrinterProfile}
+                  onChange={handlePrinterProfileChange}
+                  onTestPrint={handleTestPrint}
+                />
+              </View>
+              <View style={styles.printerToolActions}>
+                <Pressable style={styles.printerSecondaryButton} onPress={handleRestoreRecommendedPrinterDefaults}>
+                  <Text style={styles.printerSecondaryButtonText}>Reset Form Browser</Text>
+                </Pressable>
+                <Pressable style={styles.printerDangerButton} onPress={confirmDisablePrinterProfile}>
+                  <Text style={styles.printerDangerButtonText}>
+                    {hasSavedPrinterProfile ? 'Nonaktifkan Printer Kasir' : 'Paksa Fallback Browser'}
+                  </Text>
+                </Pressable>
+              </View>
               {__DEV__ ? (
                 <>
                   <Text style={styles.debugTitle}>Debug Payload (DEV)</Text>
@@ -6089,8 +9027,12 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                   </Text>
                 </>
               ) : (
-                <Text style={styles.debugTitle}>Menu tools hanya tersedia pada mode development.</Text>
+                <Text style={styles.debugText}>Mode produksi hanya menampilkan pengaturan printer, tanpa panel debug developer.</Text>
               )}
+            </View>
+          ) : (
+            <View style={styles.debugPanel}>
+              <Text style={styles.debugTitle}>Menu belum tersedia.</Text>
             </View>
           )}
         </View>
@@ -6126,6 +9068,38 @@ const SalesScreen = ({ currentUser, onLogout }) => {
             <Text style={styles.popupMessage}>Invoice: Akan dibuat otomatis oleh backend setelah pesanan disimpan.</Text>
             <Text style={styles.popupMessage}>Pelanggan: {orderPreviewSnapshot.customerName}</Text>
             <Text style={styles.popupMessage}>Tanggal: {orderPreviewSnapshot.transactionDate}</Text>
+            <Text style={styles.popupMessage}>Metode Bayar: {orderPreviewSnapshot.paymentMethod}</Text>
+            <View style={styles.previewBadgeRow}>
+              <View
+                style={[
+                  styles.previewFlowBadge,
+                  mapPaymentMethodToBackend(orderPreviewSnapshot.paymentMethod) === 'cash'
+                    ? styles.previewFlowBadgeCash
+                    : styles.previewFlowBadgeNonCash,
+                ]}
+              >
+                <Text
+                  style={[
+                    styles.previewFlowBadgeText,
+                    mapPaymentMethodToBackend(orderPreviewSnapshot.paymentMethod) === 'cash'
+                      ? styles.previewFlowBadgeTextCash
+                      : styles.previewFlowBadgeTextNonCash,
+                  ]}
+                >
+                  {mapPaymentMethodToBackend(orderPreviewSnapshot.paymentMethod) === 'cash' ? 'Tunai Fisik' : 'Masuk Rekening'}
+                </Text>
+              </View>
+              <View style={styles.previewTargetBadge}>
+                <Text style={styles.previewTargetBadgeText}>
+                  {orderPreviewSnapshot.paymentTargetName || 'Tujuan dana sesuai mapping backend'}
+                </Text>
+              </View>
+            </View>
+            <Text style={styles.popupMessage}>
+              {mapPaymentMethodToBackend(orderPreviewSnapshot.paymentMethod) === 'cash'
+                ? `Akan masuk ke akun kas: ${orderPreviewSnapshot.paymentTargetName || 'Sesuai mapping backend'}`
+                : `Akan masuk ke akun pembayaran: ${orderPreviewSnapshot.paymentTargetName || 'Sesuai mapping backend'}`}
+            </Text>
 
             <ScrollView style={styles.previewList}>
               {orderPreviewSnapshot.items.map((item) => (
@@ -6152,6 +9126,22 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                 <Text style={[styles.popupButtonText, styles.popupButtonTextSecondary]}>Batal</Text>
               </Pressable>
               <Pressable
+                style={[styles.popupButton, styles.popupButtonSecondary, isOrderPreviewSubmitting ? styles.draftActionDisabled : null]}
+                disabled={isOrderPreviewSubmitting}
+                onPress={() => handleOpenBankPickerFromPreview('copy_order')}
+              >
+                <Text style={[styles.popupButtonText, styles.popupButtonTextSecondary]}>
+                  {isOrderPreviewSubmitting ? 'Memproses...' : 'Salin Pesanan'}
+                </Text>
+              </Pressable>
+              <Pressable
+                style={[styles.popupButton, isOrderPreviewSubmitting ? styles.draftActionDisabled : null]}
+                disabled={isOrderPreviewSubmitting}
+                onPress={() => handleOpenBankPickerFromPreview('copy_invoice')}
+              >
+                <Text style={styles.popupButtonText}>{isOrderPreviewSubmitting ? 'Memproses...' : 'Salin Invoice'}</Text>
+              </Pressable>
+              <Pressable
                 style={[styles.popupButton, isOrderPreviewSubmitting ? styles.draftActionDisabled : null]}
                 disabled={isOrderPreviewSubmitting}
                 onPress={() => handleOpenBankPickerFromPreview('print')}
@@ -6159,66 +9149,23 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                 <Text style={styles.popupButtonText}>{isOrderPreviewSubmitting ? 'Memproses...' : 'Cetak'}</Text>
               </Pressable>
               <Pressable
+                style={[styles.popupButton, styles.popupButtonSecondary, isOrderPreviewSubmitting ? styles.draftActionDisabled : null]}
+                disabled={isOrderPreviewSubmitting}
+                onPress={async () => {
+                  setIsOrderPreviewOpen(false);
+                  await handleSaveTransaction();
+                }}
+              >
+                <Text style={[styles.popupButtonText, styles.popupButtonTextSecondary]}>
+                  {isOrderPreviewSubmitting ? 'Memproses...' : 'Simpan Draft'}
+                </Text>
+              </Pressable>
+              <Pressable
                 style={[styles.popupButton, isOrderPreviewSubmitting ? styles.draftActionDisabled : null]}
                 disabled={isOrderPreviewSubmitting}
                 onPress={() => handleOpenBankPickerFromPreview('save')}
               >
-                <Text style={styles.popupButtonText}>{isOrderPreviewSubmitting ? 'Memproses...' : 'Simpan'}</Text>
-              </Pressable>
-            </View>
-          </View>
-        </View>
-      </Modal>
-
-      <Modal
-        visible={isBankPickerOpen}
-        transparent
-        animationType="fade"
-        onRequestClose={handleCloseBankPicker}
-      >
-        <View style={styles.popupBackdrop}>
-          <View style={[styles.popupCard, styles.bankPickerCard]}>
-            <Text style={styles.popupTitle}>Pilih Bank Penampung</Text>
-            <Text style={styles.popupMessage}>Pilih akun bank backend untuk menampung saldo penjualan ini.</Text>
-
-            {isBankAccountLoading ? (
-              <View style={styles.bankPickerLoadingWrap}>
-                <ActivityIndicator size="small" color="#2f64ef" />
-                <Text style={styles.loadingMessage}>Memuat akun bank dari backend...</Text>
-              </View>
-            ) : (
-              <ScrollView style={styles.bankPickerList}>
-                {bankAccounts.map((row, index) => {
-                  const rowId = Number(row?.id || 0);
-                  const active = rowId > 0 && rowId === Number(selectedBankAccountId || 0);
-                  return (
-                    <Pressable
-                      key={String(rowId || `bank-${index}`)}
-                      style={[styles.bankPickerItem, active ? styles.bankPickerItemActive : null]}
-                      onPress={() => setSelectedBankAccountId(rowId)}
-                    >
-                      <Text style={styles.bankPickerItemTitle}>{row?.displayName || `Bank #${rowId}`}</Text>
-                      <Text style={styles.bankPickerItemMeta}>No Rek: {row?.accountNumber || '-'}</Text>
-                    </Pressable>
-                  );
-                })}
-              </ScrollView>
-            )}
-
-            <View style={styles.popupActions}>
-              <Pressable
-                style={[styles.popupButton, styles.popupButtonSecondary]}
-                disabled={isSubmitting || isOrderPreviewSubmitting}
-                onPress={handleCloseBankPicker}
-              >
-                <Text style={[styles.popupButtonText, styles.popupButtonTextSecondary]}>Batal</Text>
-              </Pressable>
-              <Pressable
-                style={[styles.popupButton, (isBankAccountLoading || isSubmitting || isOrderPreviewSubmitting) ? styles.draftActionDisabled : null]}
-                disabled={isBankAccountLoading || isSubmitting || isOrderPreviewSubmitting}
-                onPress={handleConfirmSaveWithBankAccount}
-              >
-                <Text style={styles.popupButtonText}>{isSubmitting || isOrderPreviewSubmitting ? 'Memproses...' : 'Simpan Order'}</Text>
+                <Text style={styles.popupButtonText}>{isOrderPreviewSubmitting ? 'Memproses...' : 'Proses Order'}</Text>
               </Pressable>
             </View>
           </View>
@@ -6282,6 +9229,109 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                 onPress={handleSubmitPickup}
               >
                 <Text style={styles.popupButtonText}>{pickupModal.isSubmitting ? 'Memproses...' : 'Simpan Pengambilan'}</Text>
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      <Modal
+        visible={receivablePaymentModal.visible}
+        transparent
+        animationType="fade"
+        onRequestClose={handleCloseReceivablePaymentModal}
+      >
+        <View style={styles.popupBackdrop}>
+          <View style={[styles.popupCard, styles.bankPickerCard]}>
+            <Text style={styles.popupTitle}>Bayar Piutang Pelanggan</Text>
+            <Text style={styles.popupMessage}>
+              Customer: {receivablePaymentModal.customerName}
+              {receivablePaymentModal.customerPhone ? ` | ${receivablePaymentModal.customerPhone}` : ''}
+            </Text>
+            <Text style={styles.popupMessage}>Invoice: {receivablePaymentModal.invoiceNo || '-'}</Text>
+            <Text style={styles.popupMessage}>Sisa piutang: {formatRupiah(receivablePaymentModal.dueTotal || 0)}</Text>
+
+            <View style={styles.receivablePaymentForm}>
+              <Text style={styles.reportInputLabel}>Metode Bayar</Text>
+              <View style={styles.methodQuickRowWrap}>
+                {PAYMENT_METHOD_LABELS.map((option) => {
+                  const active = String(option) === String(receivablePaymentModal.method || '');
+                  return (
+                    <Pressable
+                      key={`receivable-method-${option}`}
+                      style={[styles.receivableMethodChip, active ? styles.receivableMethodChipActive : null]}
+                      onPress={() => handleChangeReceivablePaymentMethod(option)}
+                    >
+                      <Text style={[styles.receivableMethodChipText, active ? styles.receivableMethodChipTextActive : null]}>
+                        {option}
+                      </Text>
+                    </Pressable>
+                  );
+                })}
+              </View>
+              <Text style={styles.receivableHelperText}>{receivablePaymentHelperText}</Text>
+
+              <Text style={styles.reportInputLabel}>Nominal Bayar</Text>
+              <TextInput
+                value={receivablePaymentModal.amount}
+                onChangeText={(value) => setReceivablePaymentModal((prev) => ({ ...prev, amount: sanitizeCurrencyInput(value) }))}
+                keyboardType="numeric"
+                placeholder="0"
+                placeholderTextColor="#6c7485"
+                style={styles.reportInput}
+              />
+
+              <Text style={styles.reportInputLabel}>
+                {mapPaymentMethodToBackend(receivablePaymentModal.method) === 'cash' ? 'Akun Kas' : 'Akun / Rekening Tujuan'}
+              </Text>
+              {receivablePaymentModal.isLoadingAccounts ? (
+                <View style={styles.bankPickerLoadingWrap}>
+                  <ActivityIndicator size="small" color="#2f64ef" />
+                  <Text style={styles.loadingMessage}>Memuat akun pembayaran...</Text>
+                </View>
+              ) : (
+                <ScrollView style={styles.bankPickerList}>
+                  {(Array.isArray(receivablePaymentModal.accountOptions) ? receivablePaymentModal.accountOptions : []).map((row, index) => {
+                    const rowId = Number(row?.id || 0);
+                    const active = rowId > 0 && rowId === Number(receivablePaymentModal.selectedAccountId || 0);
+                    return (
+                      <Pressable
+                        key={`receivable-account-${rowId || index}`}
+                        style={[styles.bankPickerItem, active ? styles.bankPickerItemActive : null]}
+                        onPress={() => setReceivablePaymentModal((prev) => ({ ...prev, selectedAccountId: rowId }))}
+                      >
+                        <Text style={styles.bankPickerItemTitle}>
+                          {row?.displayTitle || row?.displayName || `Akun #${rowId}`}
+                        </Text>
+                        {row?.displaySubtitle ? (
+                          <Text style={styles.bankPickerItemMeta}>{row.displaySubtitle}</Text>
+                        ) : null}
+                        {row?.displayDetail ? (
+                          <Text style={styles.bankPickerItemDetail}>{row.displayDetail}</Text>
+                        ) : null}
+                      </Pressable>
+                    );
+                  })}
+                </ScrollView>
+              )}
+            </View>
+
+            <View style={styles.popupActions}>
+              <Pressable
+                style={[styles.popupButton, styles.popupButtonSecondary]}
+                disabled={receivablePaymentModal.isSubmitting}
+                onPress={handleCloseReceivablePaymentModal}
+              >
+                <Text style={[styles.popupButtonText, styles.popupButtonTextSecondary]}>Tutup</Text>
+              </Pressable>
+              <Pressable
+                style={styles.popupButton}
+                disabled={receivablePaymentModal.isSubmitting}
+                onPress={handleSubmitReceivablePayment}
+              >
+                <Text style={styles.popupButtonText}>
+                  {receivablePaymentModal.isSubmitting ? 'Memproses...' : 'Bayar'}
+                </Text>
               </Pressable>
             </View>
           </View>
@@ -6666,6 +9716,95 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(255,255,255,0.55)',
     padding: 8,
   },
+  printerToolsCard: {
+    marginBottom: 10,
+  },
+  printerStatusRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    alignItems: 'center',
+    gap: 8,
+    marginBottom: 6,
+  },
+  printerStatusBadge: {
+    borderWidth: 1,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+  },
+  printerStatusBadgeActive: {
+    borderColor: '#1f7a42',
+    backgroundColor: '#2f9e5a',
+  },
+  printerStatusBadgeFallback: {
+    borderColor: '#9a6a14',
+    backgroundColor: '#d49b2d',
+  },
+  printerStatusBadgeText: {
+    fontSize: 10,
+    fontWeight: '800',
+    color: '#ffffff',
+  },
+  printerStatusHint: {
+    flex: 1,
+    minWidth: 180,
+    fontSize: 10,
+    color: '#394252',
+  },
+  printerTargetCard: {
+    borderWidth: 1,
+    borderColor: '#c7d3ef',
+    backgroundColor: '#f6f8ff',
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    marginBottom: 8,
+  },
+  printerTargetLabel: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: '#4b6196',
+    textTransform: 'uppercase',
+  },
+  printerTargetPrimary: {
+    marginTop: 4,
+    fontSize: 12,
+    fontWeight: '800',
+    color: '#173c87',
+  },
+  printerTargetSecondary: {
+    marginTop: 2,
+    fontSize: 10,
+    color: '#44506a',
+  },
+  printerToolActions: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+    marginBottom: 10,
+  },
+  printerSecondaryButton: {
+    borderWidth: 1,
+    borderColor: '#9aa3b5',
+    backgroundColor: '#eef1f6',
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+  },
+  printerSecondaryButtonText: {
+    color: '#2f3f59',
+    fontWeight: '700',
+    fontSize: 11,
+  },
+  printerDangerButton: {
+    borderWidth: 1,
+    borderColor: '#b63a3a',
+    backgroundColor: '#d94a4a',
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+  },
+  printerDangerButtonText: {
+    color: '#ffffff',
+    fontWeight: '700',
+    fontSize: 11,
+  },
   draftPanel: {
     marginTop: 8,
     borderWidth: 1,
@@ -6734,6 +9873,409 @@ const styles = StyleSheet.create({
     paddingVertical: 7,
     marginBottom: 8,
   },
+  receivableSummaryCard: {
+    borderWidth: 1,
+    borderColor: '#c7d7ef',
+    backgroundColor: '#f7fbff',
+    padding: 10,
+    marginBottom: 10,
+  },
+  receivableSummaryTitle: {
+    fontSize: 11,
+    fontWeight: '800',
+    color: '#24426f',
+    textTransform: 'uppercase',
+  },
+  receivableSummaryName: {
+    marginTop: 6,
+    fontSize: 13,
+    fontWeight: '700',
+    color: '#1e2d45',
+  },
+  receivableSummaryMeta: {
+    marginTop: 3,
+    fontSize: 11,
+    color: '#5c6780',
+  },
+  receivableSummaryWarning: {
+    marginTop: 6,
+    fontSize: 10,
+    lineHeight: 15,
+    color: '#8a5d00',
+    fontWeight: '700',
+  },
+  receivableSummaryAmount: {
+    marginTop: 6,
+    fontSize: 18,
+    fontWeight: '800',
+    color: '#1d6a3c',
+  },
+  receivableDueText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#8a6b00',
+  },
+  receivablePayButton: {
+    borderWidth: 1,
+    borderColor: '#1d7a45',
+    backgroundColor: '#2d9d58',
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+  },
+  receivablePayButtonText: {
+    color: '#ffffff',
+    fontWeight: '800',
+    fontSize: 11,
+  },
+  receivablePaymentForm: {
+    gap: 8,
+    marginTop: 8,
+  },
+  methodQuickRowWrap: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 6,
+  },
+  receivableMethodChip: {
+    borderWidth: 1,
+    borderColor: '#b7c1d5',
+    backgroundColor: '#f4f6fb',
+    paddingHorizontal: 8,
+    paddingVertical: 5,
+  },
+  receivableMethodChipActive: {
+    borderColor: '#2f64ef',
+    backgroundColor: '#2f64ef',
+  },
+  receivableMethodChipText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#32425c',
+  },
+  receivableMethodChipTextActive: {
+    color: '#ffffff',
+  },
+  receivableHelperText: {
+    fontSize: 10,
+    lineHeight: 15,
+    color: '#4e5b75',
+  },
+  reportDateInput: {
+    minWidth: 160,
+    marginBottom: 0,
+    flexGrow: 0,
+  },
+  reportSummaryGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+    marginBottom: 10,
+  },
+  reportSummaryCard: {
+    flexGrow: 1,
+    minWidth: 180,
+    borderWidth: 1,
+    borderColor: '#c8d0e6',
+    backgroundColor: '#ffffff',
+    paddingHorizontal: 10,
+    paddingVertical: 9,
+  },
+  reportSummaryCardInfo: {
+    borderColor: '#c8d8f2',
+    backgroundColor: '#f6f9ff',
+  },
+  reportSummaryCardAccent: {
+    borderColor: '#d8d1ef',
+    backgroundColor: '#f7f5ff',
+  },
+  reportSummaryCardWarning: {
+    borderColor: '#e7d3a1',
+    backgroundColor: '#fff8e8',
+  },
+  reportSummaryCardCash: {
+    borderColor: '#b8dfc7',
+    backgroundColor: '#f3fbf6',
+  },
+  reportSummaryCardCashStrong: {
+    borderColor: '#78bf93',
+    backgroundColor: '#e5f7eb',
+  },
+  reportSummaryCardNonCash: {
+    borderColor: '#bfd5f5',
+    backgroundColor: '#f4f8ff',
+  },
+  reportSummaryCardNonCashStrong: {
+    borderColor: '#82aee8',
+    backgroundColor: '#e8f1ff',
+  },
+  reportSummaryLabel: {
+    fontSize: 10,
+    color: '#5d6780',
+    textTransform: 'uppercase',
+    fontWeight: '700',
+  },
+  reportSummaryValue: {
+    marginTop: 4,
+    fontSize: 15,
+    fontWeight: '800',
+    color: '#183c88',
+  },
+  reportPositiveValue: {
+    color: '#1f7a42',
+  },
+  reportNegativeValue: {
+    color: '#b63838',
+  },
+  reportInputGroup: {
+    flexGrow: 1,
+    minWidth: 220,
+    gap: 5,
+  },
+  reportInputLabel: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#31415f',
+  },
+  reportInput: {
+    borderWidth: 1,
+    borderColor: '#c1cadf',
+    backgroundColor: '#ffffff',
+    color: '#1d2433',
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    fontSize: 12,
+  },
+  reportInputReadonly: {
+    backgroundColor: '#f1f4f9',
+    color: '#58627a',
+  },
+  reportWarningBox: {
+    borderWidth: 1,
+    borderColor: '#e0b35d',
+    backgroundColor: '#fff7e7',
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    marginTop: 8,
+    marginBottom: 8,
+  },
+  reportWarningText: {
+    color: '#8a5a0a',
+    fontSize: 11,
+    fontWeight: '700',
+    lineHeight: 16,
+  },
+  reportTextarea: {
+    minHeight: 78,
+    textAlignVertical: 'top',
+  },
+  financeRecipientPicker: {
+    marginTop: 6,
+  },
+  financeRecipientChip: {
+    borderWidth: 1,
+    borderColor: '#b9c4de',
+    backgroundColor: '#f3f6fc',
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    marginRight: 8,
+  },
+  financeRecipientChipActive: {
+    borderColor: '#2250c9',
+    backgroundColor: '#2f64ef',
+  },
+  financeRecipientChipText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#31415f',
+  },
+  financeRecipientChipTextActive: {
+    color: '#ffffff',
+  },
+  reportChipWrap: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 6,
+  },
+  reportChip: {
+    borderWidth: 1,
+    borderColor: '#b9c4de',
+    backgroundColor: '#f3f6fc',
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+  },
+  reportChipContent: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  reportChipActive: {
+    borderColor: '#2250c9',
+    backgroundColor: '#2f64ef',
+  },
+  reportChipText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#334261',
+  },
+  reportChipTextActive: {
+    color: '#ffffff',
+  },
+  reportChipBadge: {
+    borderWidth: 1,
+    borderColor: '#c2cbde',
+    backgroundColor: '#ffffff',
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+  },
+  reportChipBadgeActive: {
+    borderColor: 'rgba(255,255,255,0.5)',
+    backgroundColor: 'rgba(255,255,255,0.14)',
+  },
+  reportChipBadgeText: {
+    fontSize: 9,
+    fontWeight: '700',
+    color: '#58657d',
+    textTransform: 'uppercase',
+  },
+  reportChipBadgeTextActive: {
+    color: '#ffffff',
+  },
+  reportSectionCard: {
+    borderWidth: 1,
+    borderColor: '#c8d0e6',
+    backgroundColor: '#ffffff',
+    padding: 10,
+    marginBottom: 10,
+  },
+  reportSectionCardCash: {
+    borderColor: '#b8dfc7',
+    backgroundColor: '#f7fcf8',
+  },
+  reportLineRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'flex-start',
+    gap: 10,
+    paddingVertical: 4,
+    borderBottomWidth: 1,
+    borderBottomColor: '#edf1f8',
+  },
+  reportLineRowEmphasis: {
+    marginTop: 2,
+    paddingTop: 7,
+    borderTopWidth: 1,
+    borderTopColor: '#d6dfef',
+  },
+  reportLineLabel: {
+    flex: 1,
+    fontSize: 11,
+    color: '#25324d',
+  },
+  reportLineValue: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#173c87',
+    textAlign: 'right',
+  },
+  reportCashValue: {
+    color: '#1d7a45',
+  },
+  reportCashValueStrong: {
+    color: '#116336',
+  },
+  reportNonCashValue: {
+    color: '#205aaf',
+  },
+  reportNonCashValueStrong: {
+    color: '#163f82',
+  },
+  reportExpenseValue: {
+    color: '#b63838',
+  },
+  reportNestedList: {
+    marginTop: 8,
+    gap: 6,
+  },
+  reportNestedItem: {
+    borderWidth: 1,
+    borderColor: '#e1e5ef',
+    backgroundColor: '#f8faff',
+    paddingHorizontal: 9,
+    paddingVertical: 7,
+  },
+  cashFlowIncomeItem: {
+    borderColor: '#b9dfc7',
+    backgroundColor: '#f3fcf5',
+  },
+  cashFlowExpenseItem: {
+    borderColor: '#ecc7c7',
+    backgroundColor: '#fff6f6',
+  },
+  cashFlowRowHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'flex-start',
+    gap: 8,
+  },
+  cashFlowRowBadges: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    justifyContent: 'flex-end',
+    gap: 6,
+  },
+  reportNestedTitle: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#20365f',
+  },
+  cashFlowIncomeText: {
+    color: '#1f7a42',
+  },
+  cashFlowExpenseText: {
+    color: '#b63838',
+  },
+  reportNestedMeta: {
+    marginTop: 2,
+    fontSize: 10,
+    color: '#5b6780',
+  },
+  cashFlowTypeBadge: {
+    borderWidth: 1,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+  },
+  cashFlowIncomeBadge: {
+    borderColor: '#1f7a42',
+    backgroundColor: '#2f9e5a',
+  },
+  cashFlowExpenseBadge: {
+    borderColor: '#b63838',
+    backgroundColor: '#d94a4a',
+  },
+  cashFlowTypeBadgeText: {
+    color: '#ffffff',
+    fontSize: 9,
+    fontWeight: '800',
+    textTransform: 'uppercase',
+  },
+  cashFlowSourceBadge: {
+    borderWidth: 1,
+    borderColor: '#bdc6d9',
+    backgroundColor: '#ffffff',
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+  },
+  cashFlowSourceBadgeText: {
+    color: '#56627c',
+    fontSize: 9,
+    fontWeight: '700',
+    textTransform: 'uppercase',
+  },
+  reportSummaryText: {
+    fontSize: 11,
+    lineHeight: 18,
+    color: '#1d2740',
+  },
   draftCard: {
     borderWidth: 1,
     borderColor: '#c2c2c2',
@@ -6756,6 +10298,15 @@ const styles = StyleSheet.create({
   draftMeta: {
     fontSize: 11,
     color: '#3a3a3a',
+  },
+  draftExpiryMeta: {
+    marginTop: 3,
+    fontSize: 10,
+    color: '#8a5a0a',
+    fontWeight: '700',
+  },
+  draftExpiryMetaExpired: {
+    color: '#b42318',
   },
   invoiceStatusRow: {
     flexDirection: 'row',
@@ -6940,9 +10491,40 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     gap: 8,
   },
+  bankPickerSelectedSummary: {
+    marginTop: 8,
+    marginBottom: 10,
+    borderWidth: 1,
+    borderColor: '#b8c7ef',
+    backgroundColor: '#eef3ff',
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+  },
+  bankPickerSelectedLabel: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: '#3157a8',
+    textTransform: 'uppercase',
+  },
+  bankPickerSelectedTitle: {
+    marginTop: 4,
+    fontSize: 12,
+    fontWeight: '800',
+    color: '#163a85',
+  },
+  bankPickerSelectedMeta: {
+    marginTop: 3,
+    fontSize: 11,
+    color: '#264577',
+  },
+  bankPickerSelectedDetail: {
+    marginTop: 3,
+    fontSize: 10,
+    color: '#3f4d67',
+    lineHeight: 15,
+  },
   bankPickerList: {
     maxHeight: 280,
-    marginTop: 8,
     marginBottom: 10,
     borderWidth: 1,
     borderColor: '#bcbcbc',
@@ -6966,6 +10548,12 @@ const styles = StyleSheet.create({
     marginTop: 2,
     fontSize: 11,
     color: '#3a3a3a',
+  },
+  bankPickerItemDetail: {
+    marginTop: 3,
+    fontSize: 10,
+    color: '#5a5a5a',
+    lineHeight: 15,
   },
   previewList: {
     maxHeight: 280,
@@ -7000,6 +10588,50 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     marginTop: 2,
   },
+  previewBadgeRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 6,
+    marginTop: 6,
+    marginBottom: 6,
+  },
+  previewFlowBadge: {
+    borderWidth: 1,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+  },
+  previewFlowBadgeCash: {
+    borderColor: '#9ed1b1',
+    backgroundColor: '#ebf8f0',
+  },
+  previewFlowBadgeNonCash: {
+    borderColor: '#a8c6f0',
+    backgroundColor: '#eef4ff',
+  },
+  previewFlowBadgeText: {
+    fontSize: 10,
+    fontWeight: '800',
+    textTransform: 'uppercase',
+  },
+  previewFlowBadgeTextCash: {
+    color: '#1d6a3c',
+  },
+  previewFlowBadgeTextNonCash: {
+    color: '#1e4f99',
+  },
+  previewTargetBadge: {
+    borderWidth: 1,
+    borderColor: '#d4d9e6',
+    backgroundColor: '#f7f9fc',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    maxWidth: '100%',
+  },
+  previewTargetBadgeText: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: '#33425f',
+  },
   popupTitle: {
     fontSize: 14,
     fontWeight: '800',
@@ -7017,8 +10649,10 @@ const styles = StyleSheet.create({
   },
   popupActions: {
     flexDirection: 'row',
+    flexWrap: 'wrap',
     justifyContent: 'flex-end',
     marginTop: 12,
+    gap: 8,
   },
   popupButton: {
     borderWidth: 1,
@@ -7057,6 +10691,7 @@ const styles = StyleSheet.create({
 });
 
 export default SalesScreen;
+
 
 
 
