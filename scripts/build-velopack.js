@@ -84,6 +84,19 @@ const resolveCommandPath = (command) => {
   return null;
 };
 
+const resolveLocalBin = (name) => {
+  const binDir = path.join(projectRoot, 'node_modules', '.bin');
+
+  for (const variant of getCommandVariants(name)) {
+    const candidate = path.join(binDir, variant);
+    if (fs.existsSync(candidate)) {
+      return candidate;
+    }
+  }
+
+  return null;
+};
+
 const trySpawn = (command, args = ['--version'], options = {}) => {
   const result = spawnSync(command, args, {
     cwd: projectRoot,
@@ -209,12 +222,12 @@ const main = () => {
   ensureConfig();
   ensureDnxInstalled();
 
-  const npxCommand = resolveCommand('npx', ['--version']);
-  if (!npxCommand) {
-    throw new Error('Perintah "npx" tidak ditemukan.');
+  const electronBuilderCommand = resolveLocalBin('electron-builder');
+  if (!electronBuilderCommand) {
+    throw new Error('Binary lokal "electron-builder" tidak ditemukan di node_modules/.bin.');
   }
 
-  run(npxCommand, ['electron-builder', '--win', 'dir']);
+  run(electronBuilderCommand, ['--win', 'dir']);
 
   if (!fs.existsSync(unpackedDir)) {
     throw new Error(`Folder hasil build Electron tidak ditemukan: ${unpackedDir}`);
