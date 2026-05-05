@@ -21,43 +21,67 @@ const velopackVersion = String(
   || ''
 ).trim().replace(/^[~^]/, '');
 
+const unique = (items) => [...new Set(items.filter(Boolean))];
+
 const getCommandVariants = (command) => {
   if (!isWindows) {
     return [command];
   }
 
+  const pathext = String(process.env.PATHEXT || '.EXE;.CMD;.BAT')
+    .split(';')
+    .map((ext) => ext.trim())
+    .filter(Boolean);
+
   const variants = [command];
-  for (const ext of ['.exe', '.cmd', '.bat']) {
-    if (!command.toLowerCase().endsWith(ext)) {
-      variants.push(`${command}${ext}`);
+  const lowerCommand = command.toLowerCase();
+
+  for (const ext of pathext) {
+    const lowerExt = ext.toLowerCase();
+    if (!lowerCommand.endsWith(lowerExt)) {
+      variants.push(`${command}${lowerExt}`);
     }
   }
 
-  return variants;
+  return unique(variants);
 };
 
-const getWindowsPathCandidates = (command) => {
-  if (!isWindows) {
-    return [];
-  }
+const getPathDirectories = () => {
+  const pathDirs = String(process.env.PATH || '')
+    .split(path.delimiter)
+    .map((dir) => dir.trim())
+    .filter(Boolean);
 
-  const candidates = [];
+  const extraDirs = [];
   const dotnetRoot = process.env.DOTNET_ROOT;
   const userProfile = process.env.USERPROFILE;
 
   if (dotnetRoot) {
+    extraDirs.push(dotnetRoot);
+  }
+
+  if (userProfile) {
+    extraDirs.push(path.join(userProfile, '.dotnet', 'tools'));
+  }
+
+  return unique([...extraDirs, ...pathDirs]);
+};
+
+const resolveCommandPath = (command) => {
+  if (!isWindows) {
+    return command;
+  }
+
+  for (const dir of getPathDirectories()) {
     for (const variant of getCommandVariants(command)) {
-      candidates.push(path.join(dotnetRoot, variant));
+      const candidate = path.join(dir, variant);
+      if (fs.existsSync(candidate)) {
+        return candidate;
+      }
     }
   }
 
-  if (userProfile && (command === 'vpk' || command === 'dotnet')) {
-    for (const variant of getCommandVariants(command)) {
-      candidates.push(path.join(userProfile, '.dotnet', 'tools', variant));
-    }
-  }
-
-  return candidates;
+  return null;
 };
 
 const trySpawn = (command, args = ['--version'], options = {}) => {
@@ -76,12 +100,18 @@ const trySpawn = (command, args = ['--version'], options = {}) => {
 };
 
 const resolveCommand = (command, args = ['--version'], options = {}) => {
-  for (const candidate of [
-    ...getCommandVariants(command),
-    ...getWindowsPathCandidates(command),
-  ]) {
+  const pathCandidate = resolveCommandPath(command);
+  const candidates = isWindows
+    ? unique([pathCandidate, ...getCommandVariants(command)])
+    : [command];
+
+  for (const candidate of candidates) {
+    if (!candidate) {
+      continue;
+    }
+
     const result = trySpawn(candidate, args, options);
-    if (result && result.status === 0) {
+    if (result && !result.error) {
       return candidate;
     }
   }
@@ -129,11 +159,11 @@ const ensureConfig = () => {
 };
 
 const ensureDnxInstalled = () => {
-  if (hasCommand('dnx')) {
+  if (resolveCommand('dnx')) {
     return;
   }
 
-  if (hasCommand('vpk')) {
+  if (resolveCommand('vpk', ['-h'])) {
     return;
   }
 
@@ -156,7 +186,7 @@ const getVelopackCommand = () => {
     };
   }
 
-  const vpkCommand = resolveCommand('vpk');
+  const vpkCommand = resolveCommand('vpk', ['-h']);
   if (vpkCommand) {
     return {
       command: vpkCommand,
