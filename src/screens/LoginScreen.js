@@ -1,22 +1,102 @@
-import { useMemo, useState } from 'react';
-import { ActivityIndicator, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
+import { useEffect, useMemo, useState } from 'react';
+import { ActivityIndicator, Image, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
+import Svg, { Path, Circle } from 'react-native-svg';
 import {
   fetchAuthMe,
-  getApiBaseUrl,
   getDefaultLoginEmail,
   hasDefaultLoginPassword,
   loginPosUser,
   useDefaultLoginCredentials,
 } from '../services/erpApi';
+import { appEnv } from '../config/appEnv';
+
+const LOGIN_REMEMBER_KEY = 'pos_login_remember_v1';
+
+const canUseStorage = () => typeof globalThis !== 'undefined' && typeof globalThis.localStorage !== 'undefined';
+
+const loadRememberedLogin = () => {
+  if (!canUseStorage()) {
+    return null;
+  }
+
+  try {
+    const raw = globalThis.localStorage.getItem(LOGIN_REMEMBER_KEY);
+    if (!raw) {
+      return null;
+    }
+
+    const parsed = JSON.parse(raw);
+    return {
+      email: String(parsed?.email || '').trim(),
+      password: String(parsed?.password || ''),
+      remember: Boolean(parsed?.remember),
+    };
+  } catch (_error) {
+    return null;
+  }
+};
+
+const saveRememberedLogin = ({ email, password, remember }) => {
+  if (!canUseStorage()) {
+    return;
+  }
+
+  try {
+    if (!remember) {
+      globalThis.localStorage.removeItem(LOGIN_REMEMBER_KEY);
+      return;
+    }
+
+    globalThis.localStorage.setItem(
+      LOGIN_REMEMBER_KEY,
+      JSON.stringify({
+        email: String(email || '').trim(),
+        password: String(password || ''),
+        remember: true,
+      }),
+    );
+  } catch (_error) {
+    // Ignore storage failures in desktop/web runtime.
+  }
+};
+
+const PasswordEyeIcon = ({ visible }) => (
+  <Svg width={18} height={18} viewBox="0 0 24 24" fill="none">
+    <Path
+      d="M2 12C4.7 7.7 8 5.5 12 5.5C16 5.5 19.3 7.7 22 12C19.3 16.3 16 18.5 12 18.5C8 18.5 4.7 16.3 2 12Z"
+      stroke="#4565a8"
+      strokeWidth={1.7}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    />
+    <Circle cx={12} cy={12} r={3.2} stroke="#4565a8" strokeWidth={1.7} />
+    {!visible ? (
+      <Path
+        d="M4 20L20 4"
+        stroke="#4565a8"
+        strokeWidth={1.7}
+        strokeLinecap="round"
+      />
+    ) : null}
+  </Svg>
+);
 
 const LoginScreen = ({ onLoginSuccess }) => {
-  const [email, setEmail] = useState(getDefaultLoginEmail());
+  const rememberedLogin = useMemo(() => loadRememberedLogin(), []);
+  const [email, setEmail] = useState(rememberedLogin?.email || getDefaultLoginEmail());
   const [password, setPassword] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [errorMessage, setErrorMessage] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
+  const [rememberPassword, setRememberPassword] = useState(Boolean(rememberedLogin?.remember));
 
-  const baseUrl = useMemo(() => getApiBaseUrl(), []);
   const canUseQuickLogin = useMemo(() => hasDefaultLoginPassword(), []);
+
+  useEffect(() => {
+    if (rememberedLogin?.password) {
+      setPassword(rememberedLogin.password);
+    }
+  }, [rememberedLogin]);
 
   const handleSubmit = async () => {
     if (isSubmitting) {
@@ -31,8 +111,14 @@ const LoginScreen = ({ onLoginSuccess }) => {
     try {
       setIsSubmitting(true);
       setErrorMessage('');
-      const loginResponse = await loginPosUser(email.trim(), password);
+      const trimmedEmail = email.trim();
+      const loginResponse = await loginPosUser(trimmedEmail, password);
       const me = await fetchAuthMe();
+      saveRememberedLogin({
+        email: trimmedEmail,
+        password,
+        remember: rememberPassword,
+      });
       onLoginSuccess?.(me || loginResponse?.user || null);
     } catch (error) {
       setErrorMessage(error?.message || 'Login gagal, periksa kredensial backend.');
@@ -51,6 +137,11 @@ const LoginScreen = ({ onLoginSuccess }) => {
       setErrorMessage('');
       const loginResponse = await useDefaultLoginCredentials();
       const me = await fetchAuthMe();
+      saveRememberedLogin({
+        email,
+        password,
+        remember: rememberPassword,
+      });
       onLoginSuccess?.(me || loginResponse?.user || null);
     } catch (error) {
       setErrorMessage(error?.message || 'Login cepat gagal, periksa konfigurasi .env backend.');
@@ -69,8 +160,9 @@ const LoginScreen = ({ onLoginSuccess }) => {
           </View>
 
           <View style={styles.card}>
-            <Text style={styles.title}>Masuk ke Kasir POS</Text>
-            <Text style={styles.subTitle}>Gunakan akun backend agar bisa mengakses halaman POS.</Text>
+            <View style={styles.brandWrap}>
+              <Image source={require('../../assets/logo-sidomulyo.png')} resizeMode="contain" style={styles.brandLogo} />
+            </View>
 
             <Text style={styles.label}>Email</Text>
             <TextInput
@@ -85,15 +177,34 @@ const LoginScreen = ({ onLoginSuccess }) => {
             />
 
             <Text style={styles.label}>Password</Text>
-            <TextInput
-              value={password}
-              onChangeText={setPassword}
-              secureTextEntry
-              autoCapitalize="none"
-              placeholder="Masukkan password"
-              placeholderTextColor="#7b7b7b"
-              style={styles.input}
-            />
+            <View style={styles.passwordRow}>
+              <TextInput
+                value={password}
+                onChangeText={setPassword}
+                secureTextEntry={!showPassword}
+                autoCapitalize="none"
+                placeholder="Masukkan password"
+                placeholderTextColor="#7b7b7b"
+                style={[styles.input, styles.passwordInput]}
+              />
+              <Pressable
+                style={styles.passwordToggle}
+                onPress={() => setShowPassword((prev) => !prev)}
+                hitSlop={8}
+              >
+                <PasswordEyeIcon visible={showPassword} />
+              </Pressable>
+            </View>
+
+            <Pressable
+              style={styles.rememberRow}
+              onPress={() => setRememberPassword((prev) => !prev)}
+            >
+              <View style={[styles.checkbox, rememberPassword ? styles.checkboxActive : null]}>
+                {rememberPassword ? <View style={styles.checkboxInner} /> : null}
+              </View>
+              <Text style={styles.rememberText}>Simpan sandi di aplikasi ini</Text>
+            </Pressable>
 
             {errorMessage ? <Text style={styles.errorText}>{errorMessage}</Text> : null}
 
@@ -119,7 +230,10 @@ const LoginScreen = ({ onLoginSuccess }) => {
               </Pressable>
             ) : null}
 
-            <Text style={styles.metaText}>Backend API: {baseUrl}</Text>
+            <View style={styles.metaWrap}>
+              <Text style={styles.metaText}>©sidomulyoproject</Text>
+              <Text style={styles.metaText}>Version {appEnv.appVersion || '-'}</Text>
+            </View>
           </View>
         </View>
       </View>
@@ -169,16 +283,15 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(255,255,255,0.65)',
     padding: 12,
   },
-  title: {
-    fontSize: 20,
-    fontWeight: '800',
-    color: '#103c8a',
+  brandWrap: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 14,
+    paddingVertical: 8,
   },
-  subTitle: {
-    marginTop: 4,
-    marginBottom: 12,
-    fontSize: 12,
-    color: '#363636',
+  brandLogo: {
+    width: 250,
+    height: 80,
   },
   label: {
     fontSize: 12,
@@ -196,6 +309,51 @@ const styles = StyleSheet.create({
     fontSize: 13,
     color: '#1f1f1f',
     marginBottom: 4,
+  },
+  passwordRow: {
+    position: 'relative',
+    justifyContent: 'center',
+  },
+  passwordInput: {
+    marginBottom: 0,
+    paddingRight: 42,
+  },
+  passwordToggle: {
+    position: 'absolute',
+    right: 10,
+    top: 0,
+    bottom: 4,
+    alignItems: 'center',
+    justifyContent: 'center',
+    width: 24,
+  },
+  rememberRow: {
+    marginTop: 10,
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  checkbox: {
+    width: 16,
+    height: 16,
+    borderWidth: 1,
+    borderColor: '#7f95c7',
+    backgroundColor: '#ffffff',
+    marginRight: 8,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  checkboxActive: {
+    borderColor: '#2f64ef',
+    backgroundColor: '#eef4ff',
+  },
+  checkboxInner: {
+    width: 8,
+    height: 8,
+    backgroundColor: '#2f64ef',
+  },
+  rememberText: {
+    color: '#3e4860',
+    fontSize: 12,
   },
   errorText: {
     marginTop: 6,
@@ -234,10 +392,14 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: '800',
   },
-  metaText: {
+  metaWrap: {
     marginTop: 10,
+    alignItems: 'center',
+  },
+  metaText: {
     color: '#4a4a4a',
     fontSize: 10,
+    textAlign: 'center',
   },
 });
 

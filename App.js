@@ -4,11 +4,14 @@ import { ActivityIndicator, SafeAreaView, StyleSheet, Text, TextInput, View } fr
 import { useFonts, Poppins_400Regular } from '@expo-google-fonts/poppins';
 import LoginScreen from './src/screens/LoginScreen';
 import SalesScreen from './src/screens/SalesScreen';
-import { fetchAuthMe, hasActiveSession, logoutPosUser } from './src/services/erpApi';
+import StartupSplashScreen from './src/components/StartupSplashScreen';
+import { appEnv } from './src/config/appEnv';
+import { logoutPosUser } from './src/services/erpApi';
 
 export default function App() {
-  const [authState, setAuthState] = useState('checking');
+  const [authState, setAuthState] = useState('unauthenticated');
   const [currentUser, setCurrentUser] = useState(null);
+  const [isStartupSplashVisible, setIsStartupSplashVisible] = useState(true);
   const [fontsLoaded] = useFonts({
     Poppins_400Regular,
   });
@@ -24,25 +27,6 @@ export default function App() {
     TextInput.defaultProps.style = [{ fontFamily: 'Poppins_400Regular' }, TextInput.defaultProps.style];
   }, [fontsLoaded]);
 
-  useEffect(() => {
-    const bootstrapAuth = async () => {
-      if (!hasActiveSession()) {
-        setAuthState('unauthenticated');
-        return;
-      }
-
-      try {
-        const me = await fetchAuthMe();
-        setCurrentUser(me || null);
-        setAuthState('authenticated');
-      } catch (error) {
-        setAuthState('unauthenticated');
-      }
-    };
-
-    bootstrapAuth();
-  }, []);
-
   const handleLoginSuccess = (user) => {
     setCurrentUser(user || null);
     setAuthState('authenticated');
@@ -57,7 +41,7 @@ export default function App() {
   return (
     <SafeAreaView style={styles.container}>
       <StatusBar style="light" />
-      {!fontsLoaded || authState === 'checking' ? (
+      {!fontsLoaded ? (
         <View style={styles.loadingWrap}>
           <ActivityIndicator size="large" color="#0f45af" />
         </View>
@@ -66,6 +50,15 @@ export default function App() {
       ) : (
         <LoginScreen onLoginSuccess={handleLoginSuccess} />
       )}
+
+      {isStartupSplashVisible ? (
+        <StartupSplashScreen
+          version={appEnv.appVersion}
+          onFinish={() => {
+            setIsStartupSplashVisible(false);
+          }}
+        />
+      ) : null}
     </SafeAreaView>
   );
 }

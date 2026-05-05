@@ -1,6 +1,6 @@
 {
   "name": "pos-kasir-expo",
-  "version": "1.5.15",
+  "version": "1.5.16",
   "description": "Aplikasi desktop POS Kasir untuk operasional penjualan dan closing harian.",
   "author": "Sidomulyo",
   "main": "index.js",
@@ -18,11 +18,14 @@
   "dependencies": {
     "@expo-google-fonts/poppins": "^0.4.1",
     "expo": "~54.0.33",
+    "expo-asset": "~12.0.13",
+    "expo-constants": "~18.0.13",
     "expo-font": "^55.0.6",
     "expo-status-bar": "~3.0.9",
     "react": "19.1.0",
     "react-dom": "19.1.0",
     "react-native": "0.81.5",
+    "react-native-svg": "^15.12.1",
     "react-native-web": "^0.21.0",
     "velopack": "^0.0.1589-ga2c5a97"
   },
@@ -50,7 +53,7 @@
       "node_modules/velopack/**/*",
       "node_modules/@neon-rs/load/**/*",
       "assets/icon.png",
-      "assets/Logo-SM.ico",
+      "assets/iconsm.ico",
       "package.json"
     ],
     "extraMetadata": {
@@ -61,7 +64,7 @@
       "target": [
         "dir"
       ],
-      "icon": "assets/Logo-SM.ico",
+      "icon": "assets/iconsm.ico",
       "signAndEditExecutable": false
     }
   },

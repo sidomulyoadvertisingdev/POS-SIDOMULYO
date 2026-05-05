@@ -18,7 +18,7 @@ VelopackApp.build()
   })
   .run();
 
-const iconPath = path.join(__dirname, '..', 'assets', 'icon.png');
+const iconPath = path.join(__dirname, '..', 'assets', 'iconsm.ico');
 const appRootPath = app.getAppPath();
 const distDirPath = path.join(appRootPath, 'dist-web');
 const distIndexPath = path.join(distDirPath, 'index.html');
