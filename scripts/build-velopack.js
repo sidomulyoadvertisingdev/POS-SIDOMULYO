@@ -86,8 +86,13 @@ const resolveCommandPath = (command) => {
 
 const resolveLocalBin = (name) => {
   const binDir = path.join(projectRoot, 'node_modules', '.bin');
+  const variants = isWindows
+    ? getCommandVariants(name).filter((variant) => path.extname(variant)).concat(
+      getCommandVariants(name).filter((variant) => !path.extname(variant))
+    )
+    : getCommandVariants(name);
 
-  for (const variant of getCommandVariants(name)) {
+  for (const variant of variants) {
     const candidate = path.join(binDir, variant);
     if (fs.existsSync(candidate)) {
       return candidate;
