@@ -6,6 +6,7 @@ node_modules/
 # Expo
 .expo/
 dist/
+dist-web/
 release/
 web-build/
 expo-env.d.ts
@@ -26,6 +27,7 @@ expo-env.d.ts
 npm-debug.*
 yarn-debug.*
 yarn-error.*
+package-lock.before-regenerate.json
 
 # macOS
 .DS_Store
