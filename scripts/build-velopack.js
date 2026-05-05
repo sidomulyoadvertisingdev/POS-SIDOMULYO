@@ -149,11 +149,12 @@ const hasCommand = (command, args = ['--version']) => {
 
 const run = (command, args, options = {}) => {
   console.log(`\n> ${command} ${args.join(' ')}`);
+  const isWindowsShellScript = isWindows && ['.cmd', '.bat'].includes(path.extname(command).toLowerCase());
 
   const result = spawnSync(command, args, {
     cwd: projectRoot,
     stdio: 'inherit',
-    shell: false,
+    shell: isWindowsShellScript,
     ...options,
   });
 
