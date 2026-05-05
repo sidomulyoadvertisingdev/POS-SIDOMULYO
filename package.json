@@ -31,6 +31,7 @@
     "velopack": "^0.0.1589-ga2c5a97"
   },
   "devDependencies": {
+    "@electron/windows-sign": "^1.2.2",
     "@types/react": "~19.1.10",
     "electron": "^37.2.0",
     "electron-builder": "^26.0.12",
