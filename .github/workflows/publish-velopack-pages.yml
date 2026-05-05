@@ -45,14 +45,14 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Build Velopack release
-        run: npm run build:win
+      - name: Build GitHub Pages site
+        run: npm run build:pages
 
-      - name: Upload raw Velopack output
+      - name: Upload GitHub Pages site
         uses: actions/upload-artifact@v4
         with:
           name: velopack-pages-site
-          path: release/velopack
+          path: release/pages-site
           if-no-files-found: error
 
   deploy:

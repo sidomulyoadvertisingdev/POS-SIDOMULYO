@@ -12,6 +12,7 @@
     "build:web": "set NODE_OPTIONS=--max-old-space-size=4096 && npx expo export --platform web --output-dir dist-web --max-workers 1",
     "desktop": "npm run build:web && electron electron/main.js",
     "build:win": "npm run build:web && node scripts/build-velopack.js",
+    "build:pages": "npm run build:win && node scripts/prepare-pages-site.js",
     "build:win:dir": "npm run build:web && electron-builder --win dir",
     "build:win:legacy": "npm run build:web && electron-builder --win nsis"
   },
