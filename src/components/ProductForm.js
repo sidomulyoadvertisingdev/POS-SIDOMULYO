@@ -16,6 +16,7 @@ const ProductForm = ({
   onChangeSizeWidthMeter,
   sizeLengthMeter,
   onChangeSizeLengthMeter,
+  isQtyOnlyProduct,
   isFixedSizeProduct,
   fixedSizeLabel,
   fixedSizeHint,
@@ -365,11 +366,13 @@ const ProductForm = ({
       <View style={styles.labelsRow}>
         <Text style={[styles.label, styles.codeCol, styles.leftLabel]}>Produk</Text>
         <Text style={[styles.label, styles.stockCol]}>Qty</Text>
-        <Text style={[styles.label, styles.sizeCol]}>{isFixedSizeProduct ? 'Mode' : 'L Mater (m)'}</Text>
-        <Text style={[styles.label, styles.sizeCol]}>{isFixedSizeProduct ? 'Ukuran' : 'P Mater (m)'}</Text>
+        <Text style={[styles.label, styles.sizeCol]}>{isFixedSizeProduct ? 'Mode' : (isQtyOnlyProduct ? 'Input' : 'L Mater (m)')}</Text>
+        <Text style={[styles.label, styles.sizeCol]}>{isFixedSizeProduct ? 'Ukuran' : (isQtyOnlyProduct ? 'Status' : 'P Mater (m)')}</Text>
         {!hideFinishingField ? <Text style={[styles.label, styles.priceCol]}>Finishing</Text> : null}
         {showPagesInput ? <Text style={[styles.label, styles.qtyCol]}>Halaman</Text> : null}
-        <Text style={[styles.label, styles.totalCol, hideFinishingField ? styles.totalColWide : null]}>Bahan / Material</Text>
+        <Text style={[styles.label, styles.totalCol, hideFinishingField ? styles.totalColWide : null]}>
+          {isQtyOnlyProduct ? 'Ringkasan' : 'Bahan / Material'}
+        </Text>
       </View>
 
       <View style={styles.inputsRow}>
@@ -396,6 +399,10 @@ const ProductForm = ({
             <View style={[styles.readOnlyBox, styles.fixedSizeBox]}>
               <Text style={[styles.readOnlyText, styles.fixedSizeValueText]}>{fixedSizeLabel || 'A3+'}</Text>
             </View>
+          ) : isQtyOnlyProduct ? (
+            <View style={[styles.readOnlyBox, styles.fixedSizeBox]}>
+              <Text style={[styles.readOnlyText, styles.fixedSizeValueText]}>Qty Only</Text>
+            </View>
           ) : (
             <TextInput
               value={sizeWidthMeter}
@@ -411,6 +418,10 @@ const ProductForm = ({
           {isFixedSizeProduct ? (
             <View style={[styles.readOnlyBox, styles.fixedSizeBox]}>
               <Text style={[styles.readOnlyText, styles.fixedSizeMetaText]}>Ukuran Tetap</Text>
+            </View>
+          ) : isQtyOnlyProduct ? (
+            <View style={[styles.readOnlyBox, styles.fixedSizeBox]}>
+              <Text style={[styles.readOnlyText, styles.fixedSizeMetaText]}>Tanpa Ukuran</Text>
             </View>
           ) : (
             <TextInput
@@ -503,7 +514,7 @@ const ProductForm = ({
 
         <View style={[styles.totalCol, hideFinishingField ? styles.totalColWide : null]}>
           <View style={styles.readOnlyBox}>
-            <Text style={styles.readOnlyText}>{materialDisplay || '-'}</Text>
+            <Text style={styles.readOnlyText}>{isQtyOnlyProduct ? 'Tanpa Material' : (materialDisplay || '-')}</Text>
           </View>
           {materialError ? (
             <View style={styles.materialErrorBadge}>
@@ -521,6 +532,10 @@ const ProductForm = ({
       {isFixedSizeProduct && fixedSizeHint ? (
         <View style={styles.fixedSizeHintCard}>
           <Text style={styles.fixedSizeHintText}>{String(fixedSizeHint)}</Text>
+        </View>
+      ) : isQtyOnlyProduct ? (
+        <View style={styles.fixedSizeHintCard}>
+          <Text style={styles.fixedSizeHintText}>Produk jasa ini memakai qty saja. Total dihitung dari harga backend x qty.</Text>
         </View>
       ) : null}
 

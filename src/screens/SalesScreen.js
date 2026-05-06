@@ -799,93 +799,107 @@ const restoreDraftItemDisplay = (backendItem, materialMapById, finishingNameMapB
   };
 };
 const buildCartItemFromDraftSource = (sourceItem, itemKey, materialMapById, finishingNameMapById, productNameMapById) => {
-  const breakdown = Array.isArray(sourceItem?.finishing_breakdown) ? sourceItem.finishing_breakdown : [];
-  const restored = restoreDraftItemDisplay(sourceItem, materialMapById, finishingNameMapById);
   const snapshot = parseJsonObject(sourceItem?.spec_snapshot) || {};
+  const cartRestore = parseJsonObject(snapshot?.cart_restore) || {};
+  const mergedSource = {
+    ...sourceItem,
+    ...cartRestore,
+    spec_snapshot: sourceItem?.spec_snapshot || cartRestore?.spec_snapshot || null,
+  };
+  const breakdown = Array.isArray(mergedSource?.finishing_breakdown) ? mergedSource.finishing_breakdown : [];
+  const restored = restoreDraftItemDisplay(mergedSource, materialMapById, finishingNameMapById);
   const draftForm = parseJsonObject(snapshot?.draft_form) || parseJsonObject(sourceItem?.draft_form) || {};
   const specs = parseJsonObject(snapshot?.specs) || parseJsonObject(sourceItem?.specs) || {};
   const originalFlow = parseJsonObject(snapshot?.original_flow) || {};
   const productId = Number(
-    sourceItem?.product_id
-    || sourceItem?.pos_product_id
-    || sourceItem?.product?.id
-    || sourceItem?.pos_product?.id
+    mergedSource?.product_id
+    || mergedSource?.pos_product_id
+    || mergedSource?.product?.id
+    || mergedSource?.pos_product?.id
     || 0
   );
-  const materialId = Number(sourceItem?.material_product_id || sourceItem?.material_id || 0);
-  const materialCandidates = Array.isArray(sourceItem?.material_candidate_ids)
-    ? sourceItem.material_candidate_ids.map((id) => Number(id)).filter((id) => id > 0)
-    : Array.isArray(sourceItem?.material_product_ids)
-      ? sourceItem.material_product_ids.map((id) => Number(id)).filter((id) => id > 0)
+  const materialId = Number(mergedSource?.material_product_id || mergedSource?.material_id || 0);
+  const materialCandidates = Array.isArray(mergedSource?.material_candidate_ids)
+    ? mergedSource.material_candidate_ids.map((id) => Number(id)).filter((id) => id > 0)
+    : Array.isArray(mergedSource?.material_product_ids)
+      ? mergedSource.material_product_ids.map((id) => Number(id)).filter((id) => id > 0)
       : [];
-  const subtotal = Number(sourceItem?.subtotal || sourceItem?.line_total || sourceItem?.total || 0);
-  const finishingTotal = Number(sourceItem?.finishing_total || 0);
-  const expressFee = Number(sourceItem?.express_fee || 0);
+  const subtotal = Number(mergedSource?.subtotal || mergedSource?.line_total || mergedSource?.total || 0);
+  const finishingTotal = Number(mergedSource?.finishing_total || 0);
+  const expressFee = Number(mergedSource?.express_fee || 0);
   const lineTotal = roundMoney(subtotal + finishingTotal + expressFee);
   const materialText = restored.materialText || '-';
 
   return {
     id: itemKey,
     product: toLabel(
-      sourceItem?.product_name,
+      mergedSource?.product_name,
       draftForm?.product_name,
-      sourceItem?.product?.name,
+      mergedSource?.product?.name,
       productNameMapById.get(productId),
-      sourceItem?.name,
+      mergedSource?.name,
       '-',
     ),
-    qty: Math.max(Number(sourceItem?.qty || sourceItem?.quantity || draftForm?.qty || 1) || 1, 1),
+    qty: Math.max(Number(mergedSource?.qty || mergedSource?.quantity || draftForm?.qty || 1) || 1, 1),
     size: restored.sizeText || '-',
     finishing: restored.finishingText || '-',
     lbMax: restored.lbMaxText || '-',
-    pages: Math.max(Number(restored.pages || sourceItem?.pages || draftForm?.pages || 1) || 1, 1),
+    pages: Math.max(Number(restored.pages || mergedSource?.pages || draftForm?.pages || 1) || 1, 1),
     material: materialText,
     note: toLabel(
-      sourceItem?.notes,
-      sourceItem?.note,
+      mergedSource?.notes,
+      mergedSource?.note,
       draftForm?.note,
       specs?.note,
       '-',
     ),
     lineTotal,
     total: lineTotal,
-    pricingSummary: buildPricingSummaryFromBackendItem(sourceItem, materialText),
+    pricingSummary: buildPricingSummaryFromBackendItem(mergedSource, materialText),
     backendItem: {
       product_id: productId,
-      qty: Math.max(Number(sourceItem?.qty || sourceItem?.quantity || draftForm?.qty || 1) || 1, 1),
-      input_width_mm: Number(sourceItem?.input_width_mm || 0) || null,
-      input_height_mm: Number(sourceItem?.input_height_mm || 0) || null,
-      internal_width_mm: Number(sourceItem?.internal_width_mm || 0) || null,
-      internal_height_mm: Number(sourceItem?.internal_height_mm || 0) || null,
-      input_area_m2: Number(sourceItem?.input_area_m2 || 0) || null,
-      internal_area_m2: Number(sourceItem?.internal_area_m2 || 0) || null,
-      extra_margin_cm: Number(sourceItem?.extra_margin_cm || 0) || 0,
-      calc_unit: String(sourceItem?.calc_unit || 'unit'),
+      qty: Math.max(Number(mergedSource?.qty || mergedSource?.quantity || draftForm?.qty || 1) || 1, 1),
+      input_width_mm: Number(mergedSource?.input_width_mm || 0) || null,
+      input_height_mm: Number(mergedSource?.input_height_mm || 0) || null,
+      internal_width_mm: Number(mergedSource?.internal_width_mm || 0) || null,
+      internal_height_mm: Number(mergedSource?.internal_height_mm || 0) || null,
+      input_area_m2: Number(mergedSource?.input_area_m2 || 0) || null,
+      internal_area_m2: Number(mergedSource?.internal_area_m2 || 0) || null,
+      extra_area_m2: Number(mergedSource?.extra_area_m2 || 0) || null,
+      extra_material_total: Number(mergedSource?.extra_material_total || 0) || null,
+      extra_margin_cm: Number(mergedSource?.extra_margin_cm || 0) || 0,
+      calc_unit: String(mergedSource?.calc_unit || 'unit'),
       subtotal: roundMoney(subtotal),
       finishing_total: roundMoney(finishingTotal),
       express_fee: roundMoney(expressFee),
-      negotiated_price: Number(sourceItem?.negotiated_price || 0) > 0 ? roundMoney(sourceItem.negotiated_price) : null,
-      bottom_price_enabled: Boolean(sourceItem?.bottom_price_enabled),
-      bottom_price: roundMoney(Number(sourceItem?.bottom_price || 0)),
-      bottom_price_min_qty: Math.max(0, Number(sourceItem?.bottom_price_min_qty || 0) || 0),
+      negotiated_price: Number(mergedSource?.negotiated_price || 0) > 0 ? roundMoney(mergedSource.negotiated_price) : null,
+      bottom_price_enabled: Boolean(mergedSource?.bottom_price_enabled),
+      bottom_price: roundMoney(Number(mergedSource?.bottom_price || 0)),
+      bottom_price_min_qty: Math.max(0, Number(mergedSource?.bottom_price_min_qty || 0) || 0),
       requires_production: Boolean(
         originalFlow?.requires_production
         ?? draftForm?.requires_production
-        ?? sourceItem?.requires_production
+        ?? mergedSource?.requires_production
         ?? true,
       ),
       requires_design: Boolean(
         originalFlow?.requires_design
         ?? draftForm?.requires_design
-        ?? sourceItem?.requires_design
+        ?? mergedSource?.requires_design
         ?? true,
       ),
       material_product_id: materialId > 0 ? materialId : null,
       material_product_ids: materialCandidates,
-      finishings: Array.isArray(sourceItem?.finishings) ? sourceItem.finishings : [],
+      finishings: Array.isArray(mergedSource?.finishings) ? mergedSource.finishings : [],
       finishing_breakdown: breakdown,
-      lb_max: Array.isArray(sourceItem?.lb_max) ? sourceItem.lb_max : [],
-      spec_snapshot: sourceItem?.spec_snapshot || null,
+      lb_max: Array.isArray(mergedSource?.lb_max) ? mergedSource.lb_max : [],
+      size_text: toLabel(mergedSource?.size_text, restored.sizeText, '-'),
+      material_text: toLabel(mergedSource?.material_text, materialText, '-'),
+      finishing_text: toLabel(mergedSource?.finishing_text, restored.finishingText, '-'),
+      lb_max_text: toLabel(mergedSource?.lb_max_text, restored.lbMaxText, '-'),
+      pages: Math.max(Number(mergedSource?.pages || restored.pages || 1) || 1, 1),
+      note: toLabel(mergedSource?.note, mergedSource?.notes, draftForm?.note, '-'),
+      spec_snapshot: mergedSource?.spec_snapshot || null,
     },
   };
 };
@@ -1443,10 +1457,16 @@ const CUSTOMER_TYPE_PRIORITY = {
   reseller: 2,
   corporate: 3,
 };
+const isTruthyCustomerFlag = (value) => {
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'number') return value === 1;
+  const text = normalizeText(value);
+  return ['1', 'true', 'yes', 'y', 'aktif', 'active'].includes(text);
+};
 const toCustomerTypeCode = (value) => {
   const text = normalizeText(value);
   if (['pelanggan umum', 'umum', 'regular', 'general', 'retail'].includes(text)) return 'umum';
-  if (['reseller', 'agen', 'distributor'].includes(text)) return 'reseller';
+  if (['reseller', 'agen', 'distributor', 'member', 'wholesale', 'grosir'].includes(text)) return 'reseller';
   if (['corporate', 'company', 'perusahaan', 'instansi'].includes(text)) return 'corporate';
   return text || 'other';
 };
@@ -1458,16 +1478,30 @@ const toCustomerTypeLabel = (value) => {
   return String(value || '').trim() || 'Tipe Lain';
 };
 const resolveCustomerCategoryCode = (customer, customerTypes = []) => {
-  const directLabel = toCustomerTypeCode(
-    customer?.label
-    || customer?.customer_label
-    || customer?.customer_type
-    || customer?.customer_type_name
-    || customer?.type_name
-    || '',
-  );
-  if (['umum', 'reseller', 'corporate'].includes(directLabel)) {
-    return directLabel;
+  const directCandidates = [
+    customer?.label,
+    customer?.customer_label,
+    customer?.customer_type,
+    customer?.customer_type_name,
+    customer?.customer_type_code,
+    customer?.type_name,
+    customer?.member_type,
+    customer?.price_type,
+    customer?.price_level,
+    customer?.level,
+  ];
+  for (const candidate of directCandidates) {
+    const resolved = toCustomerTypeCode(candidate);
+    if (['umum', 'reseller', 'corporate'].includes(resolved)) {
+      return resolved;
+    }
+  }
+  if (
+    isTruthyCustomerFlag(customer?.is_reseller)
+    || isTruthyCustomerFlag(customer?.reseller)
+    || isTruthyCustomerFlag(customer?.is_member_reseller)
+  ) {
+    return 'reseller';
   }
   const selectedTypeId = Number(customer?.customer_type_id || customer?.type_id || 0);
   if (selectedTypeId > 0) {
@@ -1526,6 +1560,7 @@ const normalizeCustomerRow = (row) => ({
   ).trim(),
   address: String(row?.address || row?.alamat || '').trim(),
   customer_type_id: Number(row?.customer_type_id || row?.type_id || 0) || null,
+  customer_type_code: resolveCustomerCategoryCode(row, DEFAULT_CUSTOMER_TYPES),
 });
 const normalizeCustomerTypeRow = (row) => ({
   ...row,
@@ -1572,6 +1607,38 @@ const normalizeFinishingRow = (row) => ({
 });
 const isPrintingProductType = (value) => ['advertising', 'printing'].includes(String(value || '').toLowerCase());
 const isFinishingCatalogType = (value) => String(value || '').toLowerCase() === 'finishing';
+const resolveProductCalcType = (product, productDetail = null) => {
+  const rows = [
+    product,
+    productDetail,
+    toSourceProduct(product),
+    toSourceProduct(productDetail),
+    toSourceMeta(product),
+    toSourceMeta(productDetail),
+  ].filter(Boolean);
+
+  for (const row of rows) {
+    const value = String(row?.calc_type || row?.calculation_type || '').trim().toLowerCase();
+    if (value) {
+      return value;
+    }
+  }
+
+  return '';
+};
+const isQtyOnlyServiceProduct = (product, productDetail = null) => {
+  const productType = String(
+    toSourceProduct(productDetail)?.product_type
+    || toSourceProduct(product)?.product_type
+    || productDetail?.product_type
+    || product?.product_type
+    || toSourceMeta(productDetail)?.product_type
+    || toSourceMeta(product)?.product_type
+    || '',
+  ).trim().toLowerCase();
+  const calcType = resolveProductCalcType(product, productDetail);
+  return productType === 'service' && calcType === 'unit';
+};
 const formatFinishingOptionLabel = (row) => {
   const name = String(row?.name || '').trim();
   const unitHint = String(row?.unit_hint || '').trim().toUpperCase();
@@ -2625,6 +2692,61 @@ const isDraftCandidate = (row) => {
     return false;
   }
   return !notes.includes('mode: proses orderan');
+};
+const resolveDraftSnapshotState = (row) => {
+  if (String(row?.__source || '').toLowerCase() === 'queue') {
+    return {
+      key: 'queue',
+      label: 'Antrian Offline',
+      color: '#475467',
+      backgroundColor: '#f2f4f7',
+    };
+  }
+
+  const items = Array.isArray(row?.items) ? row.items : [];
+  if (items.length === 0) {
+    return {
+      key: 'unknown',
+      label: 'Snapshot Belum Dicek',
+      color: '#b54708',
+      backgroundColor: '#fff7ed',
+    };
+  }
+
+  const allLocked = items.every((item) => {
+    const snapshot = parseJsonObject(item?.spec_snapshot) || {};
+    const cartRestore = parseJsonObject(snapshot?.cart_restore) || snapshot?.cart_restore || {};
+    const draftRestore = parseJsonObject(snapshot?.draft_restore) || snapshot?.draft_restore || {};
+    return Boolean(cartRestore?.pricing_locked || draftRestore?.pricing_locked);
+  });
+  if (allLocked) {
+    return {
+      key: 'locked',
+      label: 'Snapshot Terkunci',
+      color: '#067647',
+      backgroundColor: '#ecfdf3',
+    };
+  }
+
+  const hasDraftForm = items.some((item) => {
+    const snapshot = parseJsonObject(item?.spec_snapshot) || {};
+    return Boolean(parseJsonObject(snapshot?.draft_form) || snapshot?.draft_form);
+  });
+  if (hasDraftForm) {
+    return {
+      key: 'legacy',
+      label: 'Draft Lama',
+      color: '#b54708',
+      backgroundColor: '#fff7ed',
+    };
+  }
+
+  return {
+    key: 'minimal',
+    label: 'Perlu Cek Ulang',
+    color: '#b42318',
+    backgroundColor: '#fef3f2',
+  };
 };
 const resolveAppVersionLabel = () => {
   const raw = appEnv.appVersion;
@@ -4160,6 +4282,10 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     () => resolveFixedSizeA3Mode(selectedProductRow, selectedProductDetail),
     [selectedProductRow, selectedProductDetail],
   );
+  const selectedProductQtyOnlyMode = useMemo(
+    () => isQtyOnlyServiceProduct(selectedProductRow, selectedProductDetail),
+    [selectedProductRow, selectedProductDetail],
+  );
   const selectedA3NegotiationConfig = useMemo(
     () => resolveA3NegotiationConfig(selectedProductRow, selectedProductDetail),
     [selectedProductRow, selectedProductDetail],
@@ -4762,16 +4888,22 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     const selectedTypeId = Number(selectedType?.id || 0);
     const selectedTypeName = String(selectedType?.name || '').trim();
     const selectedTypeCode = toCustomerTypeCode(selectedType?.code || selectedTypeName);
+    const isResellerType = selectedTypeCode === 'reseller';
 
     const payload = {
       name: String(form?.name || '').trim(),
       phone: String(form?.phone || '').trim(),
       phone_number: String(form?.phone || '').trim(),
       mobile_phone: String(form?.phone || '').trim(),
+      label: selectedTypeCode || null,
       customer_type_id: selectedTypeId > 0 ? selectedTypeId : null,
       type_id: selectedTypeId > 0 ? selectedTypeId : null,
       customer_type: selectedTypeCode || selectedTypeName || null,
+      customer_type_code: selectedTypeCode || null,
       customer_type_name: selectedTypeName || null,
+      member_type: selectedTypeCode || null,
+      price_type: isResellerType ? 'reseller' : selectedTypeCode === 'umum' ? 'retail' : selectedTypeCode || null,
+      is_reseller: isResellerType ? 1 : 0,
       address: String(form?.address || '').trim(),
       alamat: String(form?.address || '').trim(),
     };
@@ -5149,6 +5281,27 @@ const SalesScreen = ({ currentUser, onLogout }) => {
           finishingNameMapById,
           productNameMapById,
         ))
+        .map((cartItem) => {
+          const currentSnapshot = parseJsonObject(cartItem?.backendItem?.spec_snapshot) || {};
+          return {
+            ...cartItem,
+            backendItem: {
+              ...cartItem.backendItem,
+              spec_snapshot: {
+                ...currentSnapshot,
+                draft_restore: {
+                  ...(parseJsonObject(currentSnapshot?.draft_restore) || {}),
+                  source_order_id: selectedId,
+                  pricing_locked: true,
+                },
+                cart_restore: {
+                  ...(parseJsonObject(currentSnapshot?.cart_restore) || {}),
+                  pricing_locked: true,
+                },
+              },
+            },
+          };
+        })
         .filter((row) => Number(row?.backendItem?.product_id || 0) > 0);
 
       if (cartFromDraft.length === 0) {
@@ -5438,6 +5591,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     const qtyNumber = Math.max(Number(qty) || 0, 1);
     const productDetail = await resolveProductDetail(Number(product.id));
     const fixedSizeMode = resolveFixedSizeA3Mode(product, productDetail);
+    const qtyOnlyMode = isQtyOnlyServiceProduct(product, productDetail);
     const size = fixedSizeMode.enabled
       ? {
         widthMeter: 0,
@@ -5447,6 +5601,15 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         areaM2: 0,
         displayText: `${fixedSizeMode.label || 'A3+'} (Ukuran Tetap)`,
       }
+      : qtyOnlyMode
+        ? {
+          widthMeter: 0,
+          lengthMeter: 0,
+          widthMm: null,
+          heightMm: null,
+          areaM2: 0,
+          displayText: 'Qty Only',
+        }
       : buildSizeFromMeters(sizeWidthMeter, sizeLengthMeter);
     const materialInfo = resolveMaterialInfo(product, productDetail);
     const sourceMeta = toSourceMeta(productDetail || product);
@@ -5519,8 +5682,8 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     const qtyNumber = Number(qty);
     const widthMeter = parseMeterValue(sizeWidthMeter);
     const lengthMeter = parseMeterValue(sizeLengthMeter);
-    const isFixedSizeProduct = selectedProductFixedSizeMode.enabled;
-    if (qtyNumber < 1 || (!isFixedSizeProduct && (widthMeter <= 0 || lengthMeter <= 0))) {
+    const skipsDimensionInput = selectedProductFixedSizeMode.enabled || selectedProductQtyOnlyMode;
+    if (qtyNumber < 1 || (!skipsDimensionInput && (widthMeter <= 0 || lengthMeter <= 0))) {
       setItemFinalPrice(0);
       setPreviewFallbackBottomPrice(0);
       setPreviewMaterialDisplay('');
@@ -5601,6 +5764,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     lbMaxFinishingOptions,
     productDetails,
     selectedProductFixedSizeMode.enabled,
+    selectedProductQtyOnlyMode,
   ]);
 
   const resetTransaction = () => {
@@ -5702,7 +5866,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
 
     const widthMeter = parseMeterValue(sizeWidthMeter);
     const lengthMeter = parseMeterValue(sizeLengthMeter);
-    if (!selectedProductFixedSizeMode.enabled && (widthMeter <= 0 || lengthMeter <= 0)) {
+    if (!selectedProductFixedSizeMode.enabled && !selectedProductQtyOnlyMode && (widthMeter <= 0 || lengthMeter <= 0)) {
       openNotice('Validasi', 'L Mater dan P Mater wajib diisi dan lebih dari 0.');
       return;
     }
@@ -5826,6 +5990,42 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         backendItem.bottom_price_enabled = true;
         backendItem.bottom_price_min_qty = negotiationState.minimumQty;
       }
+      backendItem.spec_snapshot.cart_restore = {
+        pricing_locked: false,
+        product_id: backendItem.product_id,
+        product_name: backendItem.product_name,
+        qty: backendItem.qty,
+        input_width_mm: backendItem.input_width_mm,
+        input_height_mm: backendItem.input_height_mm,
+        internal_width_mm: backendItem.internal_width_mm,
+        internal_height_mm: backendItem.internal_height_mm,
+        input_area_m2: backendItem.input_area_m2,
+        internal_area_m2: backendItem.internal_area_m2,
+        extra_area_m2: backendItem.extra_area_m2 || null,
+        extra_material_total: backendItem.extra_material_total || null,
+        extra_margin_cm: backendItem.extra_margin_cm,
+        calc_unit: backendItem.calc_unit,
+        subtotal: backendItem.subtotal,
+        finishing_total: backendItem.finishing_total,
+        express_fee: backendItem.express_fee,
+        negotiated_price: backendItem.negotiated_price || null,
+        bottom_price_enabled: Boolean(backendItem.bottom_price_enabled),
+        bottom_price: backendItem.bottom_price || null,
+        bottom_price_min_qty: backendItem.bottom_price_min_qty || 0,
+        material_product_id: backendItem.material_product_id,
+        material_product_ids: backendItem.material_product_ids,
+        finishings: Array.isArray(pricingPayload?.finishings) ? pricingPayload.finishings : [],
+        lb_max: Array.isArray(pricingPayload?.lb_max) ? pricingPayload.lb_max : [],
+        finishing_breakdown: backendItem.finishing_breakdown,
+        size_text: backendItem.size_text,
+        material_text: backendItem.material_text,
+        finishing_text: backendItem.finishing_text,
+        lb_max_text: backendItem.lb_max_text,
+        pages: backendItem.pages,
+        note: backendItem.note,
+        requires_production: backendItem.requires_production,
+        requires_design: backendItem.requires_design,
+      };
       const normalizedBackendItem = enforceDesignFirstFlow(backendItem);
 
       const lineTotal = negotiationState.isApplied
@@ -6053,6 +6253,14 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         const mergedSnapshot = {
           ...currentSpec,
           type: currentSpec?.type || 'custom_order',
+          draft_restore: {
+            source_order_id: Number(currentDraftSourceId || 0) || null,
+            pricing_locked: Boolean(
+              parseJsonObject(currentSpec?.draft_restore)?.pricing_locked
+              ?? parseJsonObject(currentSpec?.cart_restore)?.pricing_locked
+              ?? false,
+            ),
+          },
           original_flow: {
             requires_production: Boolean(
               currentSpec?.original_flow?.requires_production
@@ -6103,6 +6311,58 @@ const SalesScreen = ({ currentUser, onLogout }) => {
             ),
           },
         };
+        const mergedCartRestore = {
+          ...(parseJsonObject(currentSpec?.cart_restore) || {}),
+          pricing_locked: Boolean(
+            parseJsonObject(currentSpec?.cart_restore)?.pricing_locked
+            ?? parseJsonObject(currentSpec?.draft_restore)?.pricing_locked
+            ?? false,
+          ),
+          product_id: Number(item?.backendItem?.product_id || 0) || null,
+          product_name: toLabel(item?.backendItem?.product_name, item?.product, ''),
+          qty: itemQty,
+          input_width_mm: item?.backendItem?.input_width_mm ?? null,
+          input_height_mm: item?.backendItem?.input_height_mm ?? null,
+          internal_width_mm: item?.backendItem?.internal_width_mm ?? null,
+          internal_height_mm: item?.backendItem?.internal_height_mm ?? null,
+          input_area_m2: item?.backendItem?.input_area_m2 ?? null,
+          internal_area_m2: item?.backendItem?.internal_area_m2 ?? null,
+          extra_area_m2: item?.backendItem?.extra_area_m2 ?? null,
+          extra_material_total: item?.backendItem?.extra_material_total ?? null,
+          extra_margin_cm: item?.backendItem?.extra_margin_cm ?? 0,
+          calc_unit: item?.backendItem?.calc_unit || 'unit',
+          subtotal: adjustedSubtotal,
+          finishing_total: originalFinishing,
+          express_fee: originalExpress,
+          negotiated_price: hasNegotiatedPrice ? roundMoney(adjustedSubtotal / itemQty) : null,
+          bottom_price_enabled: Boolean(item?.backendItem?.bottom_price_enabled),
+          bottom_price: item?.backendItem?.bottom_price ?? null,
+          bottom_price_min_qty: item?.backendItem?.bottom_price_min_qty ?? 0,
+          material_product_id: item?.backendItem?.material_product_id ?? null,
+          material_product_ids: Array.isArray(item?.backendItem?.material_product_ids) ? item.backendItem.material_product_ids : [],
+          finishings: Array.isArray(item?.backendItem?.finishings) ? item.backendItem.finishings : [],
+          lb_max: Array.isArray(item?.backendItem?.lb_max) ? item.backendItem.lb_max : [],
+          finishing_breakdown: Array.isArray(item?.backendItem?.finishing_breakdown) ? item.backendItem.finishing_breakdown : [],
+          size_text: toLabel(item?.backendItem?.size_text, item?.size, '-'),
+          material_text: toLabel(item?.backendItem?.material_text, item?.material, '-'),
+          finishing_text: toLabel(item?.backendItem?.finishing_text, item?.finishing, '-'),
+          lb_max_text: toLabel(item?.backendItem?.lb_max_text, item?.lbMax, '-'),
+          pages: Math.max(Number(item?.backendItem?.pages || item?.pages || 1) || 1, 1),
+          note: toLabel(item?.backendItem?.note, item?.note, item?.notes, '-'),
+          requires_production: Boolean(
+            currentSpec?.original_flow?.requires_production
+            ?? currentDraftForm?.requires_production
+            ?? item?.backendItem?.requires_production
+            ?? true,
+          ),
+          requires_design: Boolean(
+            currentSpec?.original_flow?.requires_design
+            ?? currentDraftForm?.requires_design
+            ?? item?.backendItem?.requires_design
+            ?? true,
+          ),
+        };
+        mergedSnapshot.cart_restore = mergedCartRestore;
 
         const originalRequiresProduction = Boolean(
           mergedSnapshot?.original_flow?.requires_production
@@ -7834,10 +8094,11 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                 onChangeSizeWidthMeter={(value) => setSizeWidthMeter(sanitizeDecimalInput(value))}
                 sizeLengthMeter={sizeLengthMeter}
                 onChangeSizeLengthMeter={(value) => setSizeLengthMeter(sanitizeDecimalInput(value))}
+                isQtyOnlyProduct={selectedProductQtyOnlyMode}
                 isFixedSizeProduct={selectedProductFixedSizeMode.enabled}
                 fixedSizeLabel={selectedProductFixedSizeMode.label}
                 fixedSizeHint={selectedProductFixedSizeMode.helperText}
-                hideFinishingField={selectedProductFixedSizeMode.enabled}
+                hideFinishingField={selectedProductFixedSizeMode.enabled || selectedProductQtyOnlyMode}
                 selectedFinishingIds={selectedFinishingIds}
                 selectedFinishingMataAyamQtyById={selectedFinishingMataAyamQtyById}
                 finishingSummary={selectedFinishingDisplay}
@@ -8056,11 +8317,24 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                     const productionStage = getCurrentProductionStageForInvoice(row);
                     const productionLabel = isDraftRow ? 'Belum Masuk Produksi' : productionStage.label;
                     const productionColor = isDraftRow ? '#6b7280' : getProductionStatusTextColor(productionStage.key);
+                    const snapshotState = isDraftRow ? resolveDraftSnapshotState(row) : null;
                     return (
                       <View key={String(row?.id || `row-${index}`)} style={styles.draftCard}>
                         <View style={styles.draftInfo}>
                           <Text style={styles.draftTitle}>#{displayId} | {invoiceNo}</Text>
                           <Text style={styles.draftMeta}>{customerName}</Text>
+                          {snapshotState ? (
+                            <View
+                              style={[
+                                styles.draftSnapshotBadge,
+                                { backgroundColor: snapshotState.backgroundColor, borderColor: snapshotState.color },
+                              ]}
+                            >
+                              <Text style={[styles.draftSnapshotBadgeText, { color: snapshotState.color }]}>
+                                {snapshotState.label}
+                              </Text>
+                            </View>
+                          ) : null}
                           <View style={styles.invoiceStatusRow}>
                             <Text style={styles.draftMeta}>Status: </Text>
                             <Text style={[styles.draftMeta, styles.invoiceStatusText, { color: getInvoiceStatusTextColor(invoiceStatus) }]}>
@@ -10194,6 +10468,19 @@ const styles = StyleSheet.create({
   draftMeta: {
     fontSize: 11,
     color: '#3a3a3a',
+  },
+  draftSnapshotBadge: {
+    alignSelf: 'flex-start',
+    borderWidth: 1,
+    borderRadius: 999,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    marginTop: 5,
+    marginBottom: 2,
+  },
+  draftSnapshotBadgeText: {
+    fontSize: 10,
+    fontWeight: '800',
   },
   draftExpiryMeta: {
     marginTop: 3,

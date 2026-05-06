@@ -300,9 +300,11 @@ export const fetchPosSettings = async () => {
 
 export const fetchPosCustomerTypes = async () => {
   await ensureAuthenticated();
-  // Backend ERPSIDOMULYO saat ini tidak expose endpoint customer type pada API POS.
-  // Frontend sudah punya fallback DEFAULT_CUSTOMER_TYPES di SalesScreen.
-  return [];
+  const payload = await requestWithEndpointCandidates([
+    '/pos/customer-types',
+    '/pos/customer_types',
+  ]);
+  return toDataList(payload);
 };
 
 export const fetchPosBankAccounts = async () => {

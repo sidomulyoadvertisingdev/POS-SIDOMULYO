@@ -11,10 +11,16 @@ import {
 } from 'react-native';
 
 const normalizeText = (value) => String(value || '').trim().toLowerCase();
+const isTruthyCustomerFlag = (value) => {
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'number') return value === 1;
+  const text = normalizeText(value);
+  return ['1', 'true', 'yes', 'y', 'aktif', 'active'].includes(text);
+};
 const toCustomerTypeCode = (value) => {
   const text = normalizeText(value);
   if (['umum', 'retail', 'eceran'].includes(text)) return 'umum';
-  if (['reseller', 'agen'].includes(text)) return 'reseller';
+  if (['reseller', 'agen', 'member', 'wholesale', 'grosir'].includes(text)) return 'reseller';
   if (['corporate', 'perusahaan', 'company'].includes(text)) return 'corporate';
   return text;
 };
@@ -72,16 +78,30 @@ const TransactionHeader = ({
     [customerTypes],
   );
   const resolveCustomerTypeLabel = (customer) => {
-    const direct = toCustomerTypeLabel(
-      customer?.label
-      || customer?.customer_label
-      || customer?.customer_type
-      || customer?.customer_type_name
-      || customer?.type_name
-      || '',
-    );
-    if (direct !== 'Tanpa Tipe') {
-      return direct;
+    const directCandidates = [
+      customer?.label,
+      customer?.customer_label,
+      customer?.customer_type,
+      customer?.customer_type_name,
+      customer?.customer_type_code,
+      customer?.type_name,
+      customer?.member_type,
+      customer?.price_type,
+      customer?.price_level,
+      customer?.level,
+    ];
+    for (const candidate of directCandidates) {
+      const direct = toCustomerTypeLabel(candidate);
+      if (direct !== 'Tanpa Tipe') {
+        return direct;
+      }
+    }
+    if (
+      isTruthyCustomerFlag(customer?.is_reseller)
+      || isTruthyCustomerFlag(customer?.reseller)
+      || isTruthyCustomerFlag(customer?.is_member_reseller)
+    ) {
+      return 'Reseller';
     }
     const selectedTypeId = Number(customer?.customer_type_id || customer?.type_id || 0);
     if (selectedTypeId > 0) {
