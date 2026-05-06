@@ -103,6 +103,14 @@ export const formatCurrency = (value: number): string => {
   return `${sign}Rp${grouped}`;
 };
 
+export const formatReceiptAmount = (value: number): string => {
+  const amount = Number(value || 0);
+  const sign = amount < 0 ? '-' : '';
+  const whole = Math.abs(Math.round(amount)).toString();
+  const grouped = whole.replace(/\B(?=(\d{3})+(?!\d))/g, '.');
+  return `${sign}${grouped}`;
+};
+
 export const formatQty = (value: number): string => {
   const amount = Number(value || 0);
   return Number.isInteger(amount) ? String(amount) : amount.toFixed(2);

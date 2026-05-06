@@ -52,6 +52,7 @@ import {
   createPrinterProfile,
   createBrowserPrintOptions,
   DEFAULT_PRINTER_PROFILES,
+  downloadReceiptPdf,
   generateTestReceipt,
   isBrowserPrintProfile,
   normalizePrinterProfile,
@@ -62,6 +63,7 @@ import {
   writeHtmlToPrintWindow,
 } from '../printing';
 const { buildProductPickerTree, hasA3Token } = require('../utils/productPickerTree');
+const { extractOrderDiscountAmount } = require('../utils/receiptSummary');
 
 const formatDate = (date) => {
   return date.toLocaleDateString('id-ID', {
@@ -2693,6 +2695,12 @@ const isDraftCandidate = (row) => {
   }
   return !notes.includes('mode: proses orderan');
 };
+const hasSnapshotObjectShape = (value) => Boolean(
+  value
+  && typeof value === 'object'
+  && !Array.isArray(value)
+  && Object.keys(value).length > 0
+);
 const resolveDraftSnapshotState = (row) => {
   if (String(row?.__source || '').toLowerCase() === 'queue') {
     return {
@@ -2713,12 +2721,22 @@ const resolveDraftSnapshotState = (row) => {
     };
   }
 
-  const allLocked = items.every((item) => {
+  const snapshotFlags = items.map((item) => {
     const snapshot = parseJsonObject(item?.spec_snapshot) || {};
     const cartRestore = parseJsonObject(snapshot?.cart_restore) || snapshot?.cart_restore || {};
     const draftRestore = parseJsonObject(snapshot?.draft_restore) || snapshot?.draft_restore || {};
-    return Boolean(cartRestore?.pricing_locked || draftRestore?.pricing_locked);
+    const originalFlow = parseJsonObject(snapshot?.original_flow) || snapshot?.original_flow || {};
+    const draftForm = parseJsonObject(snapshot?.draft_form) || snapshot?.draft_form || {};
+    return {
+      pricingLocked: Boolean(cartRestore?.pricing_locked || draftRestore?.pricing_locked),
+      hasCartRestore: hasSnapshotObjectShape(cartRestore),
+      hasDraftRestore: hasSnapshotObjectShape(draftRestore),
+      hasOriginalFlow: hasSnapshotObjectShape(originalFlow),
+      hasDraftForm: hasSnapshotObjectShape(draftForm),
+    };
   });
+
+  const allLocked = snapshotFlags.every((item) => item.pricingLocked);
   if (allLocked) {
     return {
       key: 'locked',
@@ -2728,17 +2746,26 @@ const resolveDraftSnapshotState = (row) => {
     };
   }
 
-  const hasDraftForm = items.some((item) => {
-    const snapshot = parseJsonObject(item?.spec_snapshot) || {};
-    return Boolean(parseJsonObject(snapshot?.draft_form) || snapshot?.draft_form);
-  });
-  if (hasDraftForm) {
+  const hasLegacyDraftForm = snapshotFlags.some((item) => (
+    item.hasDraftForm
+    && !item.hasCartRestore
+    && !item.hasDraftRestore
+    && !item.hasOriginalFlow
+  ));
+  if (hasLegacyDraftForm) {
     return {
       key: 'legacy',
       label: 'Draft Lama',
       color: '#b54708',
       backgroundColor: '#fff7ed',
     };
+  }
+
+  const hasModernSnapshot = snapshotFlags.some((item) => (
+    item.hasCartRestore || item.hasDraftRestore || item.hasOriginalFlow
+  ));
+  if (hasModernSnapshot) {
+    return null;
   }
 
   return {
@@ -2946,6 +2973,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
   });
   const [isOrderPreviewOpen, setIsOrderPreviewOpen] = useState(false);
   const [isOrderPreviewSubmitting, setIsOrderPreviewSubmitting] = useState(false);
+  const [isProcessOrderDetailOpen, setIsProcessOrderDetailOpen] = useState(false);
   const [posSettings, setPosSettings] = useState(DEFAULT_RECEIPT_SETTINGS);
   const [printerProfile, setPrinterProfile] = useState(() => loadStoredPrinterProfile() || getDefaultPrinterProfile());
   const [hasSavedPrinterProfile, setHasSavedPrinterProfile] = useState(() => Boolean(loadStoredPrinterProfile()));
@@ -3605,6 +3633,18 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     };
   };
 
+  const buildReceiptDetailSection = ({ deadline = '', orderDetails = [] } = {}) => {
+    const detailLines = Array.isArray(orderDetails)
+      ? orderDetails.map((item) => String(item || '').trim()).filter(Boolean)
+      : [];
+    return {
+      deadline: String(deadline || '').trim(),
+      orderDetails: detailLines,
+      footerNotes: [],
+      thankYouText: 'TERIMA KASIH',
+    };
+  };
+
   const formatClipboardMoney = (value) => formatRupiah(Number(value || 0) || 0);
 
   const appendClipboardSection = (lines, title, values = []) => {
@@ -3727,10 +3767,23 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     }
   };
 
-  const buildReceiptDataFromPreview = (snapshot, submitResult, receiptSettingsInput = null) => {
+  const buildReceiptDataFromSnapshot = (snapshot, options = {}) => {
+    const receiptSettingsInput = options?.receiptSettingsInput || null;
     const receiptSettings = normalizeReceiptSettings(receiptSettingsInput || posSettings);
-    const invoiceNo = String(submitResult?.invoiceNo || '-');
-    const orderId = String(submitResult?.backendOrderId || '').trim();
+    const invoiceNo = String(options?.invoiceNo || snapshot?.draftNo || 'PREVIEW').trim() || 'PREVIEW';
+    const orderId = String(options?.orderId || '').trim();
+    const printedAt = String(options?.printedAt || '').trim() || new Date().toLocaleString('id-ID', {
+      day: '2-digit',
+      month: 'long',
+      year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+    });
+    const detailLines = Array.isArray(snapshot?.items)
+      ? snapshot.items
+        .map((item) => String(item?.note || item?.notes || '').trim())
+        .filter((value) => value && value !== '-')
+      : [];
     return {
       store: {
         title: receiptSettings.receipt_title,
@@ -3748,8 +3801,10 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         date: String(snapshot?.transactionDate || ''),
         cashier: String(snapshot?.cashierName || ''),
         customer: String(snapshot?.customerName || ''),
+        customerPhone: String(snapshot?.customerPhone || '').trim(),
         paymentStatus: String(snapshot?.paymentStatus || ''),
         notes: String(snapshot?.notes || '').trim(),
+        printedAt,
       },
       items: Array.isArray(snapshot?.items)
         ? snapshot.items.map((item) => ({
@@ -3784,7 +3839,93 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         showCustomer: Boolean(receiptSettings.receipt_show_customer),
         showPaymentDetail: Boolean(receiptSettings.receipt_show_payment_detail),
       },
+      detail: buildReceiptDetailSection({
+        orderDetails: detailLines,
+      }),
     };
+  };
+
+  const buildReceiptDataFromPreview = (snapshot, submitResult, receiptSettingsInput = null) => {
+    return buildReceiptDataFromSnapshot(snapshot, {
+      invoiceNo: String(submitResult?.invoiceNo || '-'),
+      orderId: String(submitResult?.backendOrderId || '').trim(),
+      receiptSettingsInput,
+    });
+  };
+
+  const resolveEffectivePaidAmountFromSnapshot = (snapshot) => {
+    const grandTotalValue = roundMoney(Number(snapshot?.grandTotal || 0) || 0);
+    const tenderedAmount = roundMoney(Number(snapshot?.paymentAmount || 0) || 0);
+    return roundMoney(Math.min(tenderedAmount, grandTotalValue));
+  };
+
+  const verifySubmittedOrderAgainstPreview = async (snapshot, submitResult) => {
+    const backendOrderId = Number(submitResult?.backendOrderId || 0) || 0;
+    if (!(backendOrderId > 0)) {
+      return { checked: false, mismatchMessages: [] };
+    }
+
+    try {
+      const detailPayload = await fetchPosOrderDetail(backendOrderId);
+      const sourceRow = normalizeOrderDetailRow(detailPayload, null);
+      if (!sourceRow) {
+        return { checked: false, mismatchMessages: [] };
+      }
+
+      const backendItems = Array.isArray(sourceRow?.items) ? sourceRow.items : [];
+      const backendGrandTotal = roundMoney(Number(
+        sourceRow?.invoice?.total
+        || sourceRow?.total
+        || sourceRow?.grand_total
+        || calculateDraftItemsTotal(backendItems)
+        || 0
+      ));
+      const backendPaidTotal = roundMoney(Number(
+        sourceRow?.invoice?.paid_total
+        || sourceRow?.paid_total
+        || 0
+      ));
+      const backendDueTotal = roundMoney(Number(
+        sourceRow?.invoice?.due_total
+        || sourceRow?.due_total
+        || 0
+      ));
+
+      const previewGrandTotal = roundMoney(Number(snapshot?.grandTotal || 0) || 0);
+      const previewEffectivePaid = resolveEffectivePaidAmountFromSnapshot(snapshot);
+      const previewDueTotal = roundMoney(Math.max(0, previewGrandTotal - previewEffectivePaid));
+      const previewItemCount = Array.isArray(snapshot?.items) ? snapshot.items.length : 0;
+      const backendItemCount = backendItems.length;
+
+      const mismatchMessages = [];
+      if (backendGrandTotal !== previewGrandTotal) {
+        mismatchMessages.push(
+          `Total preview ${formatRupiah(previewGrandTotal)} berbeda dengan total final ${formatRupiah(backendGrandTotal)}.`,
+        );
+      }
+      if (backendPaidTotal !== previewEffectivePaid) {
+        mismatchMessages.push(
+          `Pembayaran final ${formatRupiah(backendPaidTotal)} berbeda dengan pembayaran efektif preview ${formatRupiah(previewEffectivePaid)}.`,
+        );
+      }
+      if (backendDueTotal !== previewDueTotal) {
+        mismatchMessages.push(
+          `Sisa bayar preview ${formatRupiah(previewDueTotal)} berbeda dengan sisa bayar final ${formatRupiah(backendDueTotal)}.`,
+        );
+      }
+      if (backendItemCount !== previewItemCount) {
+        mismatchMessages.push(
+          `Jumlah item preview (${previewItemCount}) berbeda dengan order final (${backendItemCount}).`,
+        );
+      }
+
+      return {
+        checked: true,
+        mismatchMessages,
+      };
+    } catch (_error) {
+      return { checked: false, mismatchMessages: [] };
+    }
   };
 
   const mapReceiptItemFromSource = (item, index = 0) => {
@@ -3837,6 +3978,17 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       || calculateDraftItemsTotal(items)
       || 0
     );
+    const discountTotal = extractOrderDiscountAmount(sourceRow);
+    const explicitSubtotal = Number(
+      sourceRow?.invoice?.subtotal
+      || sourceRow?.invoice?.sub_total
+      || sourceRow?.subtotal
+      || sourceRow?.sub_total
+      || 0
+    ) || 0;
+    const subtotalBeforeDiscount = explicitSubtotal > 0
+      ? roundMoney(explicitSubtotal)
+      : roundMoney(total + discountTotal);
     const paidTotal = Number(sourceRow?.invoice?.paid_total || sourceRow?.paid_total || 0) || 0;
     const dueTotal = Number(sourceRow?.invoice?.due_total || sourceRow?.due_total || 0) || 0;
     const resolvedBankAccountId = Number(
@@ -3861,6 +4013,13 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     const paymentStatusLabel = dueTotal > 0
       ? (paidTotal > 0 ? 'DP / Piutang' : 'Piutang')
       : (paidTotal > 0 ? 'Lunas' : '');
+    const printedAt = new Date().toLocaleString('id-ID', {
+      day: '2-digit',
+      month: 'long',
+      year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+    });
     return {
       store: {
         title: receiptSettings.receipt_title,
@@ -3878,15 +4037,18 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         date: String(sourceRow?.created_at || ''),
         cashier: String(sourceRow?.cashier?.name || currentUser?.name || 'Kasir'),
         customer: String(sourceRow?.customer?.name || 'Pelanggan umum'),
+        customerPhone: String(sourceRow?.customer?.phone || '').trim(),
         paymentStatus: paymentStatusLabel,
         notes: stripWorkflowSystemNotes(sourceRow?.payment?.note || sourceRow?.note || sourceRow?.notes || ''),
+        printedAt,
       },
       items: Array.isArray(items)
         ? items.map((item, index) => mapReceiptItemFromSource(item, index))
         : [],
       summary: {
-        subtotal: total,
-        grandTotal: total,
+        subtotal: subtotalBeforeDiscount,
+        discount: discountTotal > 0 ? discountTotal : 0,
+        grandTotal: roundMoney(total),
         paid: paidTotal > 0 ? paidTotal : undefined,
         remainingDue: dueTotal > 0 ? dueTotal : 0,
       },
@@ -3901,6 +4063,14 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         showCustomer: Boolean(receiptSettings.receipt_show_customer),
         showPaymentDetail: Boolean(receiptSettings.receipt_show_payment_detail),
       },
+      detail: buildReceiptDetailSection({
+        deadline: String(sourceRow?.deadline || sourceRow?.due_at || sourceRow?.invoice?.due_at || '').trim(),
+        orderDetails: Array.isArray(items)
+          ? items
+            .map((item) => String(item?.note || item?.notes || '').trim())
+            .filter((value) => value && value !== '-')
+          : [],
+      }),
     };
   };
 
@@ -3912,6 +4082,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       logoUrl: receiptData?.store?.logoUrl,
       hideTitleText: Boolean(receiptData?.store?.logoUrl),
       titleText: receiptTitle,
+      receiptData,
     });
   };
 
@@ -3923,6 +4094,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       logoUrl,
       hideTitleText: Boolean(logoUrl),
       titleText: receiptTitle,
+      receiptData,
     };
   };
 
@@ -6151,7 +6323,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     ]);
   };
 
-  const submitTransaction = async (mode = 'draft', options = {}) => {
+  const validateTransactionBeforeSubmit = async (mode = 'draft') => {
     if (isSubmitting) {
       openNotice('Informasi', 'Transaksi sedang diproses, mohon tunggu.');
       return null;
@@ -6168,7 +6340,12 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     }
 
     if (!selectedCustomerId) {
-      openNotice('Validasi', 'Pilih pelanggan terlebih dahulu sebelum menyimpan pesanan.');
+      openNotice(
+        'Validasi',
+        mode === 'draft'
+          ? 'Pilih pelanggan terlebih dahulu sebelum menyimpan pesanan.'
+          : 'Pilih pelanggan terlebih dahulu sebelum memproses pesanan.',
+      );
       return null;
     }
 
@@ -6206,7 +6383,18 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       openNotice('Validasi', `Metode Bayar wajib salah satu: ${PAYMENT_METHOD_LABELS.join(', ')}.`);
       return null;
     }
+
+    return { canonicalMethodLabel };
+  };
+
+  const submitTransaction = async (mode = 'draft', options = {}) => {
+    const validation = await validateTransactionBeforeSubmit(mode);
+    if (!validation) {
+      return null;
+    }
+
     const isDraftMode = mode === 'draft';
+    const { canonicalMethodLabel } = validation;
     const method = mapPaymentMethodToBackend(canonicalMethodLabel);
     const selectedBankId = Number(options?.bankAccountId || 0);
     const fallbackBankId = mapPaymentMethodToBankAccountId(canonicalMethodLabel);
@@ -6827,28 +7015,109 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     }
   };
 
+  const validateAndOpenOrderPreview = async () => {
+    if (isOrderPreviewSubmitting) {
+      openNotice('Informasi', 'Transaksi sedang diproses, mohon tunggu.');
+      return false;
+    }
+
+    const validation = await validateTransactionBeforeSubmit('process');
+    if (!validation) {
+      return false;
+    }
+
+    const bankId = await resolveAutoPaymentAccountId(validation.canonicalMethodLabel);
+    if (!(bankId > 0)) {
+      return false;
+    }
+    setIsOrderPreviewOpen(true);
+    return true;
+  };
+
+  const handlePreviewReceipt = async () => {
+    await validateAndOpenOrderPreview();
+  };
+
+  const validateAndOpenProcessOrderDetail = async () => {
+    if (isSubmitting) {
+      openNotice('Informasi', 'Transaksi sedang diproses, mohon tunggu.');
+      return false;
+    }
+
+    const validation = await validateTransactionBeforeSubmit('process');
+    if (!validation) {
+      return false;
+    }
+
+    const bankId = await resolveAutoPaymentAccountId(validation.canonicalMethodLabel);
+    if (!(bankId > 0)) {
+      return false;
+    }
+
+    setIsProcessOrderDetailOpen(true);
+    return true;
+  };
+
   const handleProcessOrder = async () => {
+    await validateAndOpenProcessOrderDetail();
+  };
+
+  const handleConfirmProcessOrder = async () => {
     if (isSubmitting || isOrderPreviewSubmitting) {
       openNotice('Informasi', 'Transaksi sedang diproses, mohon tunggu.');
       return;
     }
-    if (!backendReady) {
-      openNotice('Backend Belum Siap', 'Koneksi backend belum siap.');
-      return;
-    }
-    if (cartItems.length === 0) {
-      openNotice('Validasi', 'Keranjang masih kosong.');
-      return;
-    }
-    if (!selectedCustomerId) {
-      openNotice('Validasi', 'Pilih pelanggan terlebih dahulu sebelum memproses pesanan.');
-      return;
-    }
+
     const bankId = await resolveAutoPaymentAccountId(paymentMethod);
     if (!(bankId > 0)) {
       return;
     }
-    setIsOrderPreviewOpen(true);
+
+    const result = await submitTransaction('process', { bankAccountId: bankId });
+    if (result?.ok) {
+      setIsProcessOrderDetailOpen(false);
+    }
+  };
+
+  const handleDownloadPreviewReceiptPdf = async () => {
+    const filenameBase = String(
+      orderPreviewReceiptData?.transaction?.invoiceNo
+      || orderPreviewSnapshot?.draftNo
+      || 'nota-preview'
+    ).trim() || 'nota-preview';
+    const downloaded = downloadReceiptPdf(orderPreviewReceiptData, activePrinterProfile, {
+      filename: `${filenameBase}.pdf`,
+    });
+    if (!downloaded) {
+      openNotice('Unduh Nota PDF', 'Unduh PDF hanya tersedia pada mode browser/web.');
+      return;
+    }
+    openNotice('Unduh Nota PDF', 'File nota PDF sedang diunduh.', null, {
+      autoCloseMs: 1800,
+    });
+  };
+
+  const handleCopyPreviewInvoice = async () => {
+    try {
+      await copyTextToClipboard(buildInvoiceClipboardText(orderPreviewReceiptData, {
+        customerPhone: orderPreviewSnapshot?.customerPhone,
+      }));
+      openNotice('Salin Invoice', 'Invoice preview berhasil disalin.', null, {
+        autoCloseMs: 2000,
+      });
+    } catch (error) {
+      openNotice('Salin Invoice', `Gagal menyalin invoice: ${error.message}`);
+    }
+  };
+
+  const handlePrintPreviewReceipt = () => {
+    const html = buildBrowserReceiptPreviewHtml(orderPreviewReceiptData, activePrinterProfile);
+    printHtmlDocument(html, 'Cetak Nota');
+  };
+
+  const handleSaveTransactionFromProcessModal = async () => {
+    setIsProcessOrderDetailOpen(false);
+    await handleSaveTransaction();
   };
 
   const handleOpenBankPickerFromPreview = async (action = 'save') => {
@@ -6872,7 +7141,19 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       setIsOrderPreviewSubmitting(true);
       const result = await submitTransaction('process', { bankAccountId: bankId });
       if (result?.ok) {
+        const verification = snapshot
+          ? await verifySubmittedOrderAgainstPreview(snapshot, result)
+          : { checked: false, mismatchMessages: [] };
         setIsOrderPreviewOpen(false);
+        if (verification.checked && verification.mismatchMessages.length > 0) {
+          openNotice(
+            'Peringatan Nota Final',
+            [
+              'Order berhasil dibuat, tetapi ada perbedaan antara preview dan data final backend.',
+              ...verification.mismatchMessages,
+            ].join('\n'),
+          );
+        }
         if (shouldPrint && snapshot) {
           await printOrderPreview(snapshot, result);
         }
@@ -7972,6 +8253,21 @@ const SalesScreen = ({ currentUser, onLogout }) => {
   };
 
   const orderPreviewSnapshot = buildOrderPreviewSnapshot();
+  const orderPreviewReceiptData = buildReceiptDataFromSnapshot(orderPreviewSnapshot, {
+    invoiceNo: orderPreviewSnapshot.draftNo && orderPreviewSnapshot.draftNo !== '-'
+      ? orderPreviewSnapshot.draftNo
+      : 'PREVIEW',
+    orderId: currentDraftSourceId ? String(currentDraftSourceId) : '',
+    printedAt: new Date().toLocaleString('id-ID', {
+      day: '2-digit',
+      month: 'long',
+      year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+    }),
+  });
+  const orderPreviewReceiptText = renderReceiptText(orderPreviewReceiptData, activePrinterProfile);
+  const thermalPreviewWidth = activePrinterProfile?.paperWidth === '58mm' ? 280 : 360;
 
   return (
     <View style={styles.screen}>
@@ -8155,6 +8451,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                 paymentNotes={paymentNotes}
                 onChangePaymentNotes={setPaymentNotes}
                 onSaveTransaction={handleSaveTransaction}
+                onPreviewReceipt={handlePreviewReceipt}
                 onProcessOrder={handleProcessOrder}
                 onCancelTransaction={handleCancelTransaction}
                 isSubmitting={isSubmitting}
@@ -9217,25 +9514,23 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       </Modal>
 
       <Modal
-        visible={isOrderPreviewOpen}
+        visible={isProcessOrderDetailOpen}
         transparent
         animationType="fade"
         onRequestClose={() => {
-          if (!isOrderPreviewSubmitting) {
-            setIsOrderPreviewOpen(false);
+          if (!isSubmitting) {
+            setIsProcessOrderDetailOpen(false);
           }
         }}
       >
         <View style={styles.popupBackdrop}>
-          <View style={[styles.popupCard, styles.orderPreviewCard]}>
+          <View style={[styles.popupCard, styles.processOrderCard]}>
             <Text style={styles.popupTitle}>Preview Nota Penjualan</Text>
             <Text style={styles.popupMessage}>Invoice: Akan dibuat otomatis oleh backend setelah pesanan disimpan.</Text>
             <Text style={styles.popupMessage}>Pelanggan: {orderPreviewSnapshot.customerName}</Text>
             <Text style={styles.popupMessage}>Tanggal: {orderPreviewSnapshot.transactionDate}</Text>
             <Text style={styles.popupMessage}>Metode Bayar: {orderPreviewSnapshot.paymentMethod}</Text>
-            {String(orderPreviewSnapshot.notes || '').trim() ? (
-              <Text style={styles.popupMessage}>Catatan: {orderPreviewSnapshot.notes}</Text>
-            ) : null}
+            <Text style={styles.popupMessage}>Catatan: {orderPreviewSnapshot.notes || '-'}</Text>
             <View style={styles.previewBadgeRow}>
               <View
                 style={[
@@ -9253,86 +9548,159 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                       : styles.previewFlowBadgeTextNonCash,
                   ]}
                 >
-                  {mapPaymentMethodToBackend(orderPreviewSnapshot.paymentMethod) === 'cash' ? 'Tunai Fisik' : 'Masuk Rekening'}
+                  {mapPaymentMethodToBackend(orderPreviewSnapshot.paymentMethod) === 'cash' ? 'TUNAI FISIK' : 'MASUK REKENING'}
                 </Text>
               </View>
-              <View style={styles.previewTargetBadge}>
-                <Text style={styles.previewTargetBadgeText}>
-                  {orderPreviewSnapshot.paymentTargetName || 'Tujuan dana sesuai mapping backend'}
-                </Text>
-              </View>
+              {String(orderPreviewSnapshot.paymentTargetName || '').trim() ? (
+                <View style={styles.previewTargetBadge}>
+                  <Text style={styles.previewTargetBadgeText}>{orderPreviewSnapshot.paymentTargetName}</Text>
+                </View>
+              ) : null}
             </View>
             <Text style={styles.popupMessage}>
-              {mapPaymentMethodToBackend(orderPreviewSnapshot.paymentMethod) === 'cash'
-                ? `Akan masuk ke akun kas: ${orderPreviewSnapshot.paymentTargetName || 'Sesuai mapping backend'}`
-                : `Akan masuk ke akun pembayaran: ${orderPreviewSnapshot.paymentTargetName || 'Sesuai mapping backend'}`}
+              Akan masuk ke akun {mapPaymentMethodToBackend(orderPreviewSnapshot.paymentMethod) === 'cash' ? 'kas' : 'pembayaran'}: {orderPreviewSnapshot.paymentTargetName || '-'}
             </Text>
 
-            <ScrollView style={styles.previewList}>
-              {orderPreviewSnapshot.items.map((item) => (
-                <View key={`preview-${item.no}-${item.product}`} style={styles.previewItemCard}>
-                  <Text style={styles.previewItemTitle}>{item.no}. {item.product}</Text>
-                  <Text style={styles.previewItemMeta}>Qty: {item.qty} | Ukuran: {item.size}</Text>
-                  <Text style={styles.previewItemMeta}>Finishing: {item.finishing}</Text>
-                  <Text style={styles.previewItemMeta}>Bahan: {item.material}</Text>
-                  <Text style={styles.previewItemTotal}>Total: {formatRupiah(item.total)}</Text>
-                </View>
-              ))}
+            <ScrollView style={styles.processOrderItemList} contentContainerStyle={styles.processOrderItemListContent}>
+              {Array.isArray(orderPreviewSnapshot.items) && orderPreviewSnapshot.items.length > 0 ? (
+                orderPreviewSnapshot.items.map((item, index) => (
+                  <View key={`process-detail-${item.no}-${index}`} style={[styles.previewItemCard, styles.processOrderItemCard]}>
+                    <Text style={styles.previewItemTitle}>{index + 1}. {item.product}</Text>
+                    <Text style={styles.previewItemMeta}>Qty: {item.qty} | Ukuran: {item.size}</Text>
+                    <Text style={styles.previewItemMeta}>Finishing: {item.finishing}</Text>
+                    <Text style={styles.previewItemMeta}>Bahan: {item.material}</Text>
+                    {Number(item.pages || 1) > 1 ? (
+                      <Text style={styles.previewItemMeta}>Halaman: {item.pages}</Text>
+                    ) : null}
+                    {String(item.note || '').trim() && String(item.note || '').trim() !== '-' ? (
+                      <Text style={styles.previewItemMeta}>Catatan: {item.note}</Text>
+                    ) : null}
+                    <Text style={styles.previewItemTotal}>Total: {formatRupiah(item.total)}</Text>
+                  </View>
+                ))
+              ) : (
+                <Text style={styles.invoiceDetailEmpty}>Keranjang belum memiliki item.</Text>
+              )}
             </ScrollView>
-
             <Text style={styles.popupMessage}>Subtotal: {formatRupiah(orderPreviewSnapshot.subtotal)}</Text>
             <Text style={styles.popupMessage}>Diskon: {formatRupiah(orderPreviewSnapshot.discountAmount)}</Text>
             <Text style={styles.popupMessage}>Grand Total: {formatRupiah(orderPreviewSnapshot.grandTotal)}</Text>
-
-            <View style={styles.popupActions}>
+            <View style={[styles.popupActions, styles.processOrderActions]}>
               <Pressable
-                style={[styles.popupButton, styles.popupButtonSecondary]}
-                disabled={isOrderPreviewSubmitting}
-                onPress={() => setIsOrderPreviewOpen(false)}
+                style={[styles.popupButton, styles.popupButtonSecondary, styles.processOrderActionButton]}
+                disabled={isSubmitting}
+                onPress={() => setIsProcessOrderDetailOpen(false)}
               >
                 <Text style={[styles.popupButtonText, styles.popupButtonTextSecondary]}>Batal</Text>
               </Pressable>
               <Pressable
-                style={[styles.popupButton, styles.popupButtonSecondary, isOrderPreviewSubmitting ? styles.draftActionDisabled : null]}
-                disabled={isOrderPreviewSubmitting}
-                onPress={() => handleOpenBankPickerFromPreview('copy_order')}
+                style={[styles.popupButton, styles.popupButtonSecondary, styles.processOrderActionButton]}
+                disabled={isSubmitting}
+                onPress={() => handleCopyOrderSnapshot(orderPreviewSnapshot, 'Salin Pesanan')}
+              >
+                <Text style={[styles.popupButtonText, styles.popupButtonTextSecondary]}>Salin Pesanan</Text>
+              </Pressable>
+              <Pressable
+                style={[styles.popupButton, styles.processOrderActionButton]}
+                disabled={isSubmitting}
+                onPress={handleCopyPreviewInvoice}
+              >
+                <Text style={styles.popupButtonText}>Salin Invoice</Text>
+              </Pressable>
+              <Pressable
+                style={[styles.popupButton, styles.processOrderActionButton]}
+                disabled={isSubmitting}
+                onPress={handlePrintPreviewReceipt}
+              >
+                <Text style={styles.popupButtonText}>Cetak</Text>
+              </Pressable>
+              <Pressable
+                style={[styles.popupButton, styles.popupButtonSecondary, styles.processOrderActionButton, isSubmitting ? styles.draftActionDisabled : null]}
+                disabled={isSubmitting}
+                onPress={handleSaveTransactionFromProcessModal}
               >
                 <Text style={[styles.popupButtonText, styles.popupButtonTextSecondary]}>
-                  {isOrderPreviewSubmitting ? 'Memproses...' : 'Salin Pesanan'}
+                  {isSubmitting ? 'Memproses...' : 'Simpan Draft'}
                 </Text>
               </Pressable>
               <Pressable
-                style={[styles.popupButton, isOrderPreviewSubmitting ? styles.draftActionDisabled : null]}
-                disabled={isOrderPreviewSubmitting}
-                onPress={() => handleOpenBankPickerFromPreview('copy_invoice')}
+                style={[styles.popupButton, styles.processOrderActionButton, isSubmitting ? styles.draftActionDisabled : null]}
+                disabled={isSubmitting}
+                onPress={handleConfirmProcessOrder}
               >
-                <Text style={styles.popupButtonText}>{isOrderPreviewSubmitting ? 'Memproses...' : 'Salin Invoice'}</Text>
+                <Text style={styles.popupButtonText}>{isSubmitting ? 'Memproses...' : 'Proses Order'}</Text>
               </Pressable>
-              <Pressable
-                style={[styles.popupButton, isOrderPreviewSubmitting ? styles.draftActionDisabled : null]}
-                disabled={isOrderPreviewSubmitting}
-                onPress={() => handleOpenBankPickerFromPreview('print')}
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      <Modal
+        visible={isOrderPreviewOpen}
+        transparent
+        animationType="fade"
+        onRequestClose={() => {
+          if (!isOrderPreviewSubmitting) {
+            setIsOrderPreviewOpen(false);
+          }
+        }}
+      >
+        <View style={styles.popupBackdrop}>
+          <View
+            style={[
+              styles.popupCard,
+              styles.orderPreviewCard,
+              {
+                width: thermalPreviewWidth + 28,
+                maxWidth: thermalPreviewWidth + 28,
+              },
+            ]}
+          >
+            <View style={styles.orderPreviewContent}>
+              <View
+                style={[
+                  styles.previewViewport,
+                  {
+                    width: thermalPreviewWidth,
+                    maxWidth: thermalPreviewWidth,
+                  },
+                ]}
               >
-                <Text style={styles.popupButtonText}>{isOrderPreviewSubmitting ? 'Memproses...' : 'Cetak'}</Text>
-              </Pressable>
+                <ScrollView
+                  style={styles.previewList}
+                  contentContainerStyle={styles.previewListContent}
+                  showsVerticalScrollIndicator={false}
+                  centerContent
+                >
+                  <View
+                    style={[
+                      styles.receiptPreviewCard,
+                      {
+                        width: thermalPreviewWidth,
+                        maxWidth: thermalPreviewWidth,
+                      },
+                    ]}
+                  >
+                    {String(orderPreviewReceiptData?.store?.logoUrl || '').trim() ? (
+                      <Image
+                        source={{ uri: orderPreviewReceiptData.store.logoUrl }}
+                        style={styles.receiptPreviewLogo}
+                        resizeMode="contain"
+                      />
+                    ) : null}
+                    <Text selectable style={styles.receiptPreviewText}>{orderPreviewReceiptText}</Text>
+                  </View>
+                </ScrollView>
+              </View>
+            </View>
+
+            <View style={[styles.popupActions, styles.orderPreviewActions]}>
               <Pressable
-                style={[styles.popupButton, styles.popupButtonSecondary, isOrderPreviewSubmitting ? styles.draftActionDisabled : null]}
+                style={[styles.popupButton, styles.popupButtonSecondary, styles.orderPreviewActionButton]}
                 disabled={isOrderPreviewSubmitting}
-                onPress={async () => {
-                  setIsOrderPreviewOpen(false);
-                  await handleSaveTransaction();
-                }}
+                onPress={() => setIsOrderPreviewOpen(false)}
               >
-                <Text style={[styles.popupButtonText, styles.popupButtonTextSecondary]}>
-                  {isOrderPreviewSubmitting ? 'Memproses...' : 'Simpan Draft'}
-                </Text>
-              </Pressable>
-              <Pressable
-                style={[styles.popupButton, isOrderPreviewSubmitting ? styles.draftActionDisabled : null]}
-                disabled={isOrderPreviewSubmitting}
-                onPress={() => handleOpenBankPickerFromPreview('save')}
-              >
-                <Text style={styles.popupButtonText}>{isOrderPreviewSubmitting ? 'Memproses...' : 'Proses Order'}</Text>
+                <Text style={[styles.popupButtonText, styles.popupButtonTextSecondary]}>Tutup</Text>
               </Pressable>
             </View>
           </View>
@@ -10576,9 +10944,22 @@ const styles = StyleSheet.create({
     borderColor: '#a9a9a9',
     backgroundColor: '#e3e3e3',
     padding: 12,
+    alignItems: 'center',
   },
   orderPreviewCard: {
+    maxWidth: 416,
+    alignSelf: 'center',
+    maxHeight: '92%',
+  },
+  processOrderCard: {
     maxWidth: 760,
+    maxHeight: '86%',
+    alignItems: 'stretch',
+  },
+  orderPreviewContent: {
+    width: '100%',
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   bankPickerCard: {
     maxWidth: 560,
@@ -10738,7 +11119,21 @@ const styles = StyleSheet.create({
     color: '#5a5a5a',
     lineHeight: 15,
   },
+  previewViewport: {
+    marginTop: 8,
+    marginBottom: 10,
+    alignSelf: 'center',
+    alignItems: 'center',
+    justifyContent: 'center',
+    overflow: 'hidden',
+  },
   previewList: {
+    width: '100%',
+    maxHeight: 460,
+    backgroundColor: 'transparent',
+  },
+  processOrderItemList: {
+    width: '100%',
     maxHeight: 280,
     marginTop: 8,
     marginBottom: 10,
@@ -10746,6 +11141,43 @@ const styles = StyleSheet.create({
     borderColor: '#bcbcbc',
     backgroundColor: '#ffffff',
     padding: 8,
+  },
+  processOrderItemListContent: {
+    width: '100%',
+    paddingBottom: 2,
+  },
+  processOrderItemCard: {
+    width: '100%',
+    alignSelf: 'stretch',
+  },
+  previewListContent: {
+    flexGrow: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 0,
+    paddingVertical: 0,
+  },
+  receiptPreviewCard: {
+    maxWidth: 360,
+    borderWidth: 1,
+    borderColor: '#d5d5d5',
+    backgroundColor: '#ffffff',
+    paddingHorizontal: 10,
+    paddingVertical: 12,
+    alignItems: 'center',
+    alignSelf: 'center',
+  },
+  receiptPreviewLogo: {
+    width: 160,
+    height: 52,
+    marginBottom: 8,
+  },
+  receiptPreviewText: {
+    width: '100%',
+    color: '#111111',
+    fontSize: 11,
+    lineHeight: 16,
+    fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
   },
   previewItemCard: {
     borderWidth: 1,
@@ -10836,6 +11268,33 @@ const styles = StyleSheet.create({
     justifyContent: 'flex-end',
     marginTop: 12,
     gap: 8,
+  },
+  processOrderActions: {
+    width: '100%',
+    flexWrap: 'nowrap',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    gap: 8,
+  },
+  processOrderActionButton: {
+    minWidth: 0,
+    flexBasis: 0,
+    flexGrow: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 8,
+  },
+  orderPreviewActions: {
+    width: '100%',
+    maxWidth: 280,
+    justifyContent: 'center',
+    alignSelf: 'center',
+  },
+  orderPreviewActionButton: {
+    width: '48%',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 8,
   },
   popupButton: {
     borderWidth: 1,

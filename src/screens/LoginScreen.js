@@ -4,9 +4,7 @@ import Svg, { Path, Circle } from 'react-native-svg';
 import {
   fetchAuthMe,
   getDefaultLoginEmail,
-  hasDefaultLoginPassword,
   loginPosUser,
-  useDefaultLoginCredentials,
 } from '../services/erpApi';
 import { appEnv } from '../config/appEnv';
 
@@ -90,8 +88,6 @@ const LoginScreen = ({ onLoginSuccess }) => {
   const [showPassword, setShowPassword] = useState(false);
   const [rememberPassword, setRememberPassword] = useState(Boolean(rememberedLogin?.remember));
 
-  const canUseQuickLogin = useMemo(() => hasDefaultLoginPassword(), []);
-
   useEffect(() => {
     if (rememberedLogin?.password) {
       setPassword(rememberedLogin.password);
@@ -122,29 +118,6 @@ const LoginScreen = ({ onLoginSuccess }) => {
       onLoginSuccess?.(me || loginResponse?.user || null);
     } catch (error) {
       setErrorMessage(error?.message || 'Login gagal, periksa kredensial backend.');
-    } finally {
-      setIsSubmitting(false);
-    }
-  };
-
-  const handleQuickLogin = async () => {
-    if (isSubmitting) {
-      return;
-    }
-
-    try {
-      setIsSubmitting(true);
-      setErrorMessage('');
-      const loginResponse = await useDefaultLoginCredentials();
-      const me = await fetchAuthMe();
-      saveRememberedLogin({
-        email,
-        password,
-        remember: rememberPassword,
-      });
-      onLoginSuccess?.(me || loginResponse?.user || null);
-    } catch (error) {
-      setErrorMessage(error?.message || 'Login cepat gagal, periksa konfigurasi .env backend.');
     } finally {
       setIsSubmitting(false);
     }
@@ -219,16 +192,6 @@ const LoginScreen = ({ onLoginSuccess }) => {
                 <Text style={styles.buttonText}>Masuk</Text>
               )}
             </Pressable>
-
-            {canUseQuickLogin ? (
-              <Pressable
-                style={[styles.secondaryButton, isSubmitting ? styles.buttonDisabled : null]}
-                onPress={handleQuickLogin}
-                disabled={isSubmitting}
-              >
-                <Text style={styles.secondaryButtonText}>Masuk Cepat dari .env</Text>
-              </Pressable>
-            ) : null}
 
             <View style={styles.metaWrap}>
               <Text style={styles.metaText}>©sidomulyoproject</Text>
@@ -375,20 +338,6 @@ const styles = StyleSheet.create({
   },
   buttonText: {
     color: '#ffffff',
-    fontSize: 13,
-    fontWeight: '800',
-  },
-  secondaryButton: {
-    marginTop: 8,
-    backgroundColor: '#ffffff',
-    borderWidth: 1,
-    borderColor: '#2f64ef',
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingVertical: 10,
-  },
-  secondaryButtonText: {
-    color: '#2f64ef',
     fontSize: 13,
     fontWeight: '800',
   },

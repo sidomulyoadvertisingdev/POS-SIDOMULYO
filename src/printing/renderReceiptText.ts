@@ -1,106 +1,77 @@
 import type { PrinterProfile, ReceiptData, ReceiptItem } from './types';
 import {
   centerText,
-  formatCurrency,
   formatQty,
+  formatReceiptAmount,
   leftRight,
-  padLeft,
-  padRight,
   separator,
   wrapText,
 } from './receiptHelpers';
-
-const pushWrappedCentered = (lines: string[], value: string | undefined, width: number): void => {
-  if (!value) {
-    return;
-  }
-  wrapText(value, width).forEach((line) => {
-    lines.push(centerText(line, width));
-  });
-};
 
 const hasValue = (value: string | undefined): boolean => {
   const text = String(value || '').trim();
   return Boolean(text) && text !== '-';
 };
 
-const pushWrappedPrefixed = (lines: string[], label: string, value: string | undefined, width: number): void => {
+const pushCenteredWrapped = (lines: string[], value: string | undefined, width: number): void => {
   if (!hasValue(value)) {
     return;
   }
-  wrapText(`${label}: ${String(value || '').trim()}`, width).forEach((line) => {
+  wrapText(String(value || '').trim(), width).forEach((line) => {
+    lines.push(centerText(line, width));
+  });
+};
+
+const pushWrapped = (lines: string[], value: string | undefined, width: number, prefix = ''): void => {
+  if (!hasValue(value)) {
+    return;
+  }
+  wrapText(`${prefix}${String(value || '').trim()}`, width).forEach((line) => {
     lines.push(line);
   });
 };
 
-const buildItemMetaLines = (item: ReceiptItem, width: number): string[] => {
-  const lines: string[] = [];
-  pushWrappedPrefixed(lines, 'Uk', item.size, width);
-  pushWrappedPrefixed(lines, 'Bahan', item.material, width);
-  pushWrappedPrefixed(lines, 'Finishing', item.finishing, width);
-  pushWrappedPrefixed(lines, 'LB Max', item.lbMax, width);
-  if (typeof item.pages === 'number' && Number.isFinite(item.pages) && item.pages > 1) {
-    lines.push(`Halaman: ${item.pages}`);
-  }
-  pushWrappedPrefixed(lines, 'Catatan', item.notes, width);
-  return lines;
-};
-
-const renderCompactItem = (item: ReceiptItem, width: number): string[] => {
-  const nameLines = wrapText(item.name, width);
-  const metaLeft = `${formatQty(item.qty)} x ${formatCurrency(item.price)}`;
-  const amountRight = formatCurrency(item.total);
-  const lines = [...nameLines];
-  buildItemMetaLines(item, width).forEach((line) => {
-    lines.push(line);
-  });
-  lines.push(leftRight(metaLeft, amountRight, width));
-  if (item.discount) {
-    lines.push(leftRight('Disc', `-${formatCurrency(item.discount)}`, width));
-  }
-  return lines;
-};
-
-const renderWideItem = (item: ReceiptItem, width: number): string[] => {
-  const qtyWidth = 5;
-  const priceWidth = 12;
-  const totalWidth = 12;
-  const gapCount = 3;
-  const nameWidth = width - qtyWidth - priceWidth - totalWidth - gapCount;
-  const safeNameWidth = Math.max(10, nameWidth);
+const renderItemLines = (item: ReceiptItem, width: number): string[] => {
+  const totalText = formatReceiptAmount(item.total);
+  const qtyPriceText = `${formatQty(item.qty)} x ${formatReceiptAmount(item.price)}`;
+  const safeNameWidth = Math.max(10, width - totalText.length - 1);
   const nameLines = wrapText(item.name, safeNameWidth);
-  const metaLines = buildItemMetaLines(item, safeNameWidth);
-  const rows: string[] = [];
+  const lines: string[] = [];
 
-  [...nameLines, ...metaLines].forEach((line, index) => {
-    if (index === 0) {
-      rows.push(
-        [
-          padRight(line, safeNameWidth),
-          padLeft(formatQty(item.qty), qtyWidth),
-          padLeft(formatCurrency(item.price), priceWidth),
-          padLeft(formatCurrency(item.total), totalWidth),
-        ].join(' '),
-      );
-      return;
-    }
-
-    rows.push(
-      [
-        padRight(line, safeNameWidth),
-        padLeft('', qtyWidth),
-        padLeft('', priceWidth),
-        padLeft('', totalWidth),
-      ].join(' '),
-    );
-  });
-
-  if (item.discount) {
-    rows.push(leftRight('Discount Item', `-${formatCurrency(item.discount)}`, width));
+  if (nameLines.length > 0) {
+    lines.push(leftRight(nameLines[0], totalText, width));
+    nameLines.slice(1).forEach((line) => lines.push(line));
+  } else {
+    lines.push(leftRight('-', totalText, width));
   }
 
-  return rows;
+  lines.push(qtyPriceText);
+
+  if (hasValue(item.size)) {
+    lines.push(`Ukuran   : ${String(item.size || '').trim()}`);
+  }
+  if (hasValue(item.material)) {
+    lines.push(`Bahan    : ${String(item.material || '').trim()}`);
+  }
+  if (hasValue(item.finishing)) {
+    lines.push(`Finishing: ${String(item.finishing || '').trim()}`);
+  }
+  if (hasValue(item.lbMax)) {
+    lines.push(`LB Max   : ${String(item.lbMax || '').trim()}`);
+  }
+  if (typeof item.pages === 'number' && Number.isFinite(item.pages) && item.pages > 1) {
+    lines.push(`Halaman  : ${item.pages}`);
+  }
+  if (hasValue(item.notes)) {
+    wrapText(`Catatan  : ${String(item.notes || '').trim()}`, width).forEach((line) => {
+      lines.push(line);
+    });
+  }
+
+  return lines;
 };
+
+const DEFAULT_FOOTER_NOTES: string[] = [];
 
 export const renderReceiptText = (receipt: ReceiptData, printerProfile: PrinterProfile): string => {
   const width = Number(printerProfile.charsPerLine || 0);
@@ -109,105 +80,112 @@ export const renderReceiptText = (receipt: ReceiptData, printerProfile: PrinterP
   }
 
   const lines: string[] = [];
-  const isCompact = width <= 32;
   const layout = receipt.layout || {};
+  const detail = receipt.detail || {};
   const showOrderId = layout.showOrderId !== false;
   const showCashier = layout.showCashier !== false;
   const showCustomer = layout.showCustomer !== false;
   const showPaymentDetail = layout.showPaymentDetail !== false;
 
-  pushWrappedCentered(lines, receipt.store.title, width);
-  pushWrappedCentered(lines, receipt.store.name, width);
-  pushWrappedCentered(lines, receipt.store.tagline, width);
-  pushWrappedCentered(lines, receipt.store.address, width);
-  pushWrappedCentered(lines, receipt.store.phone, width);
-  pushWrappedCentered(lines, receipt.store.headerText, width);
-  lines.push(separator(width));
-  lines.push(leftRight('Invoice', receipt.transaction.invoiceNo, width));
-  if (showOrderId && receipt.transaction.orderId) {
-    lines.push(leftRight('Order ID', receipt.transaction.orderId, width));
+  pushCenteredWrapped(lines, receipt.store.name, width);
+  pushCenteredWrapped(lines, receipt.store.tagline, width);
+  pushCenteredWrapped(lines, receipt.store.address, width);
+  pushCenteredWrapped(lines, receipt.store.phone, width);
+  if (hasValue(receipt.store.title)) {
+    lines.push(centerText(String(receipt.store.title || '').trim(), width));
   }
-  lines.push(leftRight('Tanggal', receipt.transaction.date, width));
-  if (receipt.transaction.paymentStatus) {
-    lines.push(leftRight('Status', receipt.transaction.paymentStatus, width));
+  if (hasValue(receipt.store.headerText)) {
+    pushCenteredWrapped(lines, receipt.store.headerText, width);
   }
-  if (showCashier && receipt.transaction.cashier) {
-    lines.push(leftRight('Kasir', receipt.transaction.cashier, width));
-  }
-  if (showCustomer && receipt.transaction.customer) {
-    lines.push(leftRight('Customer', receipt.transaction.customer, width));
-  }
-  if (receipt.transaction.notes) {
-    wrapText(`Catatan: ${receipt.transaction.notes}`, width).forEach((line) => {
-      lines.push(line);
-    });
-  }
-  lines.push(separator(width));
 
-  if (!isCompact) {
-    const qtyWidth = 5;
-    const priceWidth = 12;
-    const totalWidth = 12;
-    const nameWidth = Math.max(10, width - qtyWidth - priceWidth - totalWidth - 3);
-    lines.push(
-      [
-        padRight('Nama Item', nameWidth),
-        padLeft('Qty', qtyWidth),
-        padLeft('Harga', priceWidth),
-        padLeft('Total', totalWidth),
-      ].join(' '),
-    );
-    lines.push(separator(width));
+  lines.push(separator(width, '-'));
+
+  lines.push(leftRight('No. Nota', receipt.transaction.invoiceNo, width));
+  lines.push(leftRight('Tanggal', receipt.transaction.date, width));
+  if (showOrderId && hasValue(receipt.transaction.orderId)) {
+    lines.push(leftRight('Order ID', String(receipt.transaction.orderId || '').trim(), width));
   }
+  if (showCustomer && hasValue(receipt.transaction.customer)) {
+    lines.push(leftRight('Pelanggan', String(receipt.transaction.customer || '').trim(), width));
+  }
+  if (showCustomer && hasValue(receipt.transaction.customerPhone)) {
+    lines.push(leftRight('No Telp', String(receipt.transaction.customerPhone || '').trim(), width));
+  }
+  if (showCashier && hasValue(receipt.transaction.cashier)) {
+    lines.push(leftRight('Kasir', String(receipt.transaction.cashier || '').trim(), width));
+  }
+  if (hasValue(receipt.transaction.printedAt)) {
+    lines.push(leftRight('Dicetak', String(receipt.transaction.printedAt || '').trim(), width));
+  }
+
+  lines.push(separator(width, '-'));
+  lines.push(leftRight('Nama Barang', 'Total Harga', width));
+  lines.push(separator(width, '-'));
 
   receipt.items.forEach((item) => {
-    const itemLines = isCompact ? renderCompactItem(item, width) : renderWideItem(item, width);
-    itemLines.forEach((line) => {
-      lines.push(line);
-    });
+    renderItemLines(item, width).forEach((line) => lines.push(line));
+    lines.push(separator(width, '-'));
   });
 
-  lines.push(separator(width));
-  lines.push(leftRight('Subtotal', formatCurrency(receipt.summary.subtotal), width));
-  if (receipt.summary.discount) {
-    lines.push(leftRight('Diskon', `-${formatCurrency(receipt.summary.discount)}`, width));
+  lines.push(leftRight('Sub Total', formatReceiptAmount(receipt.summary.subtotal), width));
+  lines.push(leftRight('Diskon', formatReceiptAmount(receipt.summary.discount || 0), width));
+  if (typeof receipt.summary.tax === 'number' && receipt.summary.tax > 0) {
+    lines.push(leftRight('Pajak', formatReceiptAmount(receipt.summary.tax), width));
   }
-  if (receipt.summary.tax) {
-    lines.push(leftRight('Pajak', formatCurrency(receipt.summary.tax), width));
+  if (typeof receipt.summary.serviceCharge === 'number' && receipt.summary.serviceCharge > 0) {
+    lines.push(leftRight('Biaya Layanan', formatReceiptAmount(receipt.summary.serviceCharge), width));
   }
-  if (receipt.summary.serviceCharge) {
-    lines.push(leftRight('Service', formatCurrency(receipt.summary.serviceCharge), width));
+  if (showPaymentDetail && hasValue(receipt.payment?.method)) {
+    lines.push(leftRight(`Pembayaran ${String(receipt.payment?.method || '').trim()}`, formatReceiptAmount(receipt.payment?.amount || receipt.summary.grandTotal), width));
   }
-  lines.push(leftRight('Grand Total', formatCurrency(receipt.summary.grandTotal), width));
-  if (showPaymentDetail && receipt.payment?.method) {
-    lines.push(leftRight('Bayar', receipt.payment.method, width));
-  }
-  if (showPaymentDetail && receipt.payment?.targetAccount) {
-    wrapText(`Akun: ${receipt.payment.targetAccount}`, width).forEach((line) => {
-      lines.push(line);
-    });
-  }
-  if (showPaymentDetail && typeof receipt.summary.paid === 'number') {
-    lines.push(leftRight('Tunai', formatCurrency(receipt.summary.paid), width));
-  }
-  if (showPaymentDetail && typeof receipt.summary.change === 'number') {
-    lines.push(leftRight('Kembali', formatCurrency(receipt.summary.change), width));
+  lines.push(leftRight('Total', formatReceiptAmount(receipt.summary.grandTotal), width));
+  if (typeof receipt.summary.change === 'number' && receipt.summary.change > 0) {
+    lines.push(leftRight('Kembalian', formatReceiptAmount(receipt.summary.change), width));
   }
   if (typeof receipt.summary.remainingDue === 'number' && receipt.summary.remainingDue > 0) {
-    lines.push(leftRight('Sisa Piutang', formatCurrency(receipt.summary.remainingDue), width));
+    lines.push(leftRight('Sisa', formatReceiptAmount(receipt.summary.remainingDue), width));
   }
-  lines.push(separator(width));
 
-  if (receipt.store.footer) {
-    wrapText(receipt.store.footer, width).forEach((line) => {
-      lines.push(centerText(line, width));
+  lines.push('');
+
+  if (hasValue(detail.deadline)) {
+    lines.push('Deadline :');
+    pushWrapped(lines, detail.deadline, width);
+    lines.push('');
+  }
+
+  const orderDetails = Array.isArray(detail.orderDetails)
+    ? detail.orderDetails.filter((item) => hasValue(item))
+    : [];
+  if (orderDetails.length > 0) {
+    lines.push('Rincian :');
+    orderDetails.forEach((item) => {
+      wrapText(String(item || '').trim(), width).forEach((line) => lines.push(line));
     });
+    lines.push('');
   }
-  if (receipt.qrCode) {
-    lines.push(centerText('[QR CODE]', width));
+
+  if (hasValue(receipt.transaction.notes)) {
+    lines.push('Catatan :');
+    wrapText(String(receipt.transaction.notes || '').trim(), width).forEach((line) => lines.push(line));
+    lines.push('');
   }
-  if (receipt.barcode) {
-    lines.push(centerText('[BARCODE]', width));
+
+  const footerNotes = Array.isArray(detail.footerNotes) && detail.footerNotes.length > 0
+    ? detail.footerNotes.filter((item) => hasValue(item))
+    : DEFAULT_FOOTER_NOTES;
+
+  if (footerNotes.length > 0) {
+    lines.push('NB :');
+    footerNotes.forEach((item) => {
+      wrapText(`- ${String(item || '').trim()}`, width).forEach((line) => lines.push(line));
+    });
+    lines.push('');
+  }
+
+  pushCenteredWrapped(lines, detail.thankYouText || 'TERIMA KASIH', width);
+  if (hasValue(receipt.store.footer)) {
+    pushCenteredWrapped(lines, receipt.store.footer, width);
   }
 
   return `${lines.join('\n')}\n`;

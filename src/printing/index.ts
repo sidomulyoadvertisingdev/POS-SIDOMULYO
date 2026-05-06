@@ -7,6 +7,7 @@ export * from './generateTestReceipt';
 export * from './printReceipt';
 export * from './dummyData';
 export * from './browserPrintSession';
+export * from './downloadReceiptPdf';
 export { default as PrinterSettingsForm } from './PrinterSettingsForm';
 export * from './adapters/BrowserPrintAdapter';
 export * from './adapters/QzTrayPrintAdapter';

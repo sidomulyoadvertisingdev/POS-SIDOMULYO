@@ -19,6 +19,7 @@ const PaymentSummary = ({
   paymentNotes,
   onChangePaymentNotes,
   onSaveTransaction,
+  onPreviewReceipt,
   onProcessOrder,
   onCancelTransaction,
   isSubmitting,
@@ -156,6 +157,9 @@ const PaymentSummary = ({
       <View style={styles.bottomActions}>
         <Pressable onPress={onSaveTransaction} style={[styles.button, isSubmitting ? styles.buttonDisabled : null]} disabled={isSubmitting}>
           <Text style={styles.buttonText}>{isSubmitting ? 'Memproses...' : 'Simpan Draft'}</Text>
+        </Pressable>
+        <Pressable onPress={onPreviewReceipt} style={[styles.button, styles.secondaryActionButton, isSubmitting ? styles.buttonDisabled : null]} disabled={isSubmitting}>
+          <Text style={[styles.buttonText, styles.secondaryActionButtonText]}>Preview Nota</Text>
         </Pressable>
         <Pressable onPress={onProcessOrder} style={[styles.button, isSubmitting ? styles.buttonDisabled : null]} disabled={isSubmitting}>
           <Text style={styles.buttonText}>Proses Orderan</Text>
@@ -371,6 +375,13 @@ const styles = StyleSheet.create({
   cancelButton: {
     borderColor: '#982222',
     backgroundColor: '#c53333',
+  },
+  secondaryActionButton: {
+    borderColor: '#8eaee8',
+    backgroundColor: '#eef3ff',
+  },
+  secondaryActionButtonText: {
+    color: '#1f4e9b',
   },
   buttonDisabled: {
     opacity: 0.65,

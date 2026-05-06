@@ -45,8 +45,10 @@ export interface ReceiptTransaction {
   orderId?: string;
   cashier?: string;
   customer?: string;
+  customerPhone?: string;
   paymentStatus?: string;
   notes?: string;
+  printedAt?: string;
 }
 
 export interface ReceiptItem {
@@ -87,6 +89,13 @@ export interface ReceiptLayout {
   showPaymentDetail?: boolean;
 }
 
+export interface ReceiptDetailSection {
+  deadline?: string;
+  orderDetails?: string[];
+  footerNotes?: string[];
+  thankYouText?: string;
+}
+
 export interface ReceiptData {
   store: ReceiptStore;
   transaction: ReceiptTransaction;
@@ -94,6 +103,7 @@ export interface ReceiptData {
   summary: ReceiptSummary;
   payment?: ReceiptPayment;
   layout?: ReceiptLayout;
+  detail?: ReceiptDetailSection;
   qrCode?: string;
   barcode?: string;
 }
@@ -109,6 +119,7 @@ export interface BrowserPrintOptions {
   logoUrl?: string;
   hideTitleText?: boolean;
   titleText?: string;
+  receiptData?: ReceiptData;
 }
 
 export interface LocalServiceOptions {
