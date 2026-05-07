@@ -211,6 +211,22 @@ const requestWithEndpointCandidates = async (paths, options = {}) => {
   throw new Error(`Endpoint tidak ditemukan untuk request: ${endpoints}${details ? ` | ${details}` : ''}`);
 };
 
+const requestOptionalEndpointCandidates = async (paths, options = {}) => {
+  for (const path of paths) {
+    try {
+      return await request(path, options);
+    } catch (error) {
+      const status = Number(error?.status || 0);
+      if ([404, 405].includes(status)) {
+        continue;
+      }
+      throw error;
+    }
+  }
+
+  return null;
+};
+
 export const ensureAuthenticated = async () => {
   if (authToken) {
     return authToken;
@@ -296,6 +312,28 @@ export const fetchPosCustomers = async (search = '') => {
 export const fetchPosSettings = async () => {
   await ensureAuthenticated();
   return request('/pos/settings');
+};
+
+export const fetchPosSyncStatus = async () => {
+  await ensureAuthenticated();
+  return requestOptionalEndpointCandidates([
+    '/sync/status',
+    '/pos/sync/status',
+  ]);
+};
+
+export const fetchPosSyncChanges = async (since = '') => {
+  await ensureAuthenticated();
+  const query = new URLSearchParams();
+  if (since) {
+    query.set('since', String(since));
+  }
+  const suffix = query.toString() ? `?${query.toString()}` : '';
+
+  return requestOptionalEndpointCandidates([
+    `/sync/changes${suffix}`,
+    `/pos/sync/changes${suffix}`,
+  ]);
 };
 
 export const fetchPosCustomerTypes = async () => {

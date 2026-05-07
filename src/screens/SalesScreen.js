@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { ActivityIndicator, Alert, Image, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, Vibration, View, useWindowDimensions } from 'react-native';
+import { ActivityIndicator, Alert, AppState, Image, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, Vibration, View, useWindowDimensions } from 'react-native';
 import { Asset } from 'expo-asset';
 import CartList from '../components/CartList';
 import PaymentSummary from '../components/PaymentSummary';
@@ -37,6 +37,8 @@ import {
   fetchPosProductDetail,
   fetchPosProducts,
   fetchPosSettings,
+  fetchPosSyncChanges,
+  fetchPosSyncStatus,
   pickupPosOrder,
   fetchAuthMe,
   getApiBaseUrl,
@@ -956,10 +958,170 @@ const PREPARE_LOADING_TEXT = 'tunggu dulu ya kaka BosLeonardo lagi kirim data';
 const REPRINT_SPEC_CACHE_KEY = 'pos_reprint_spec_cache_v1';
 const REPRINT_SPEC_CACHE_MAX = 120;
 const PRINTER_PROFILE_STORAGE_KEY = 'pos_printer_profile_v1';
+const MASTER_SYNC_META_STORAGE_KEY = 'pos_master_sync_meta_v1';
+const MASTER_SYNC_POLL_INTERVAL_MS = 30000;
+const MASTER_SYNC_FULL_REFRESH_INTERVAL_MS = 5 * 60 * 1000;
+const MASTER_SYNC_FALLBACK_INTERVAL_MS = 45000;
 let memoryReprintSpecCache = [];
 let memoryPrinterProfile = null;
+let memoryMasterSyncMeta = {};
 const canUseLocalStorage = () => {
   return typeof globalThis !== 'undefined' && typeof globalThis.localStorage !== 'undefined';
+};
+const loadMasterSyncMeta = () => {
+  if (canUseLocalStorage()) {
+    try {
+      const raw = globalThis.localStorage.getItem(MASTER_SYNC_META_STORAGE_KEY);
+      if (!raw) return {};
+      const parsed = JSON.parse(raw);
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+    } catch (_error) {
+      return {};
+    }
+  }
+  return memoryMasterSyncMeta;
+};
+const persistMasterSyncMeta = (value) => {
+  const next = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+  if (canUseLocalStorage()) {
+    try {
+      globalThis.localStorage.setItem(MASTER_SYNC_META_STORAGE_KEY, JSON.stringify(next));
+    } catch (_error) {
+      // ignore storage errors
+    }
+  } else {
+    memoryMasterSyncMeta = next;
+  }
+};
+const toSyncVersionValue = (value) => {
+  if (value === undefined || value === null || value === '') {
+    return null;
+  }
+  return String(value).trim();
+};
+const normalizeSyncStatusPayload = (payload) => {
+  const source = payload?.data && typeof payload.data === 'object' && !Array.isArray(payload.data)
+    ? payload.data
+    : payload;
+  if (!source || typeof source !== 'object' || Array.isArray(source)) {
+    return null;
+  }
+
+  return {
+    productsVersion: toSyncVersionValue(source?.productsVersion ?? source?.products_version),
+    customersVersion: toSyncVersionValue(source?.customersVersion ?? source?.customers_version),
+    pricesVersion: toSyncVersionValue(source?.pricesVersion ?? source?.prices_version),
+    stocksVersion: toSyncVersionValue(source?.stocksVersion ?? source?.stocks_version),
+    serverTime: String(source?.serverTime ?? source?.server_time ?? '').trim(),
+  };
+};
+const toNumericIdList = (value) => {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value
+    .map((item) => Number(item || 0))
+    .filter((item) => Number.isFinite(item) && item > 0);
+};
+const normalizeSyncChangesPayload = (payload) => {
+  const source = payload?.data && typeof payload.data === 'object' && !Array.isArray(payload.data)
+    ? payload.data
+    : payload;
+  if (!source || typeof source !== 'object' || Array.isArray(source)) {
+    return null;
+  }
+
+  return {
+    products: toDataRows(source?.products),
+    customers: toDataRows(source?.customers),
+    deletedProductIds: toNumericIdList(source?.deletedProductIds ?? source?.deleted_product_ids),
+    deletedCustomerIds: toNumericIdList(source?.deletedCustomerIds ?? source?.deleted_customer_ids),
+    serverTime: String(source?.serverTime ?? source?.server_time ?? '').trim(),
+  };
+};
+const hasSyncStatusChanged = (previousMeta = {}, nextStatus = null) => {
+  if (!nextStatus) {
+    return false;
+  }
+  return (
+    toSyncVersionValue(previousMeta?.productsVersion) !== toSyncVersionValue(nextStatus?.productsVersion)
+    || toSyncVersionValue(previousMeta?.customersVersion) !== toSyncVersionValue(nextStatus?.customersVersion)
+    || toSyncVersionValue(previousMeta?.pricesVersion) !== toSyncVersionValue(nextStatus?.pricesVersion)
+    || toSyncVersionValue(previousMeta?.stocksVersion) !== toSyncVersionValue(nextStatus?.stocksVersion)
+  );
+};
+const buildCatalogMaterialNameMap = (rows) => {
+  const materialNameMap = {};
+  (Array.isArray(rows) ? rows : []).forEach((row) => {
+    const id = Number(row?.id || 0);
+    const name = String(row?.name || '').trim();
+    if (id > 0 && name) {
+      materialNameMap[id] = name;
+    }
+  });
+  return materialNameMap;
+};
+const mergeCustomerTypesWithFallback = (rows) => {
+  const normalizedTypes = (Array.isArray(rows) ? rows : [])
+    .map(normalizeCustomerTypeRow)
+    .filter((row) => row.name);
+  const mergedTypes = [...normalizedTypes];
+
+  DEFAULT_CUSTOMER_TYPES.forEach((fallback) => {
+    if (!mergedTypes.some((row) => row.code === fallback.code || normalizeText(row.name) === normalizeText(fallback.name))) {
+      mergedTypes.push(fallback);
+    }
+  });
+
+  mergedTypes.sort((a, b) => {
+    const pa = CUSTOMER_TYPE_PRIORITY[a.code] || 99;
+    const pb = CUSTOMER_TYPE_PRIORITY[b.code] || 99;
+    if (pa !== pb) return pa - pb;
+    return String(a.name || '').localeCompare(String(b.name || ''), 'id');
+  });
+
+  return mergedTypes;
+};
+const mergeRowsById = (currentRows, incomingRows, deletedIds = [], options = {}) => {
+  const rows = Array.isArray(currentRows) ? currentRows : [];
+  const nextRows = Array.isArray(incomingRows) ? incomingRows : [];
+  const preserveIds = new Set(
+    (Array.isArray(options?.preserveIds) ? options.preserveIds : [])
+      .map((id) => Number(id || 0))
+      .filter((id) => id > 0),
+  );
+  const map = new Map();
+
+  rows.forEach((row) => {
+    const id = Number(row?.id || 0);
+    if (id > 0) {
+      map.set(id, row);
+    }
+  });
+  nextRows.forEach((row) => {
+    const id = Number(row?.id || 0);
+    if (id > 0) {
+      map.set(id, row);
+    }
+  });
+  deletedIds.forEach((idValue) => {
+    const id = Number(idValue || 0);
+    if (id > 0 && !preserveIds.has(id)) {
+      map.delete(id);
+    }
+  });
+
+  return Array.from(map.values());
+};
+const formatSyncClock = (value) => {
+  const parsed = new Date(value || '');
+  if (Number.isNaN(parsed.getTime())) {
+    return '';
+  }
+  return parsed.toLocaleTimeString('id-ID', {
+    hour: '2-digit',
+    minute: '2-digit',
+  });
 };
 const loadReprintSpecCache = () => {
   if (canUseLocalStorage()) {
@@ -2939,6 +3101,11 @@ const SalesScreen = ({ currentUser, onLogout }) => {
   const [catalogMaterialNameMap, setCatalogMaterialNameMap] = useState({});
   const [customers, setCustomers] = useState([]);
   const [customerTypes, setCustomerTypes] = useState([]);
+  const [masterSyncStatus, setMasterSyncStatus] = useState({
+    state: 'idle',
+    label: 'Menunggu sinkronisasi data master',
+    lastSuccessfulAt: null,
+  });
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [lastSyncInfo, setLastSyncInfo] = useState('');
   const [queueCount, setQueueCount] = useState(0);
@@ -3092,6 +3259,11 @@ const SalesScreen = ({ currentUser, onLogout }) => {
   const productionSnapshotRef = useRef(new Map());
   const productionSnapshotReadyRef = useRef(false);
   const productionPollingRef = useRef(false);
+  const masterSyncInFlightRef = useRef(false);
+  const masterSyncMetaRef = useRef(loadMasterSyncMeta());
+  const appStateRef = useRef(AppState.currentState || 'active');
+  const masterSyncRunnerRef = useRef(null);
+  const sessionExpiredAlertRef = useRef(false);
   const audioContextRef = useRef(null);
   const audioElementRef = useRef(null);
   const toneTimeoutsRef = useRef([]);
@@ -3384,6 +3556,249 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       autoCloseMs: Number(options?.autoCloseMs || 0),
     });
   };
+
+  const handleSessionExpired = () => {
+    if (sessionExpiredAlertRef.current) {
+      return;
+    }
+    sessionExpiredAlertRef.current = true;
+    Alert.alert('Sesi Login Berakhir', 'Silakan login kembali untuk mengakses POS.', [
+      {
+        text: 'OK',
+        onPress: () => {
+          sessionExpiredAlertRef.current = false;
+          onLogout?.();
+        },
+      },
+    ]);
+  };
+
+  const fetchMasterDataSnapshot = async () => {
+    const [
+      productsRows,
+      finishingRows,
+      materialsRows,
+      productionMaterialsRows,
+      customerRows,
+      customerTypeRows,
+      posSettingsPayload,
+    ] = await Promise.all([
+      fetchPosProducts(),
+      fetchPosFinishings().catch(() => []),
+      fetchPosMaterials(),
+      fetchPosProductionMaterials().catch(() => []),
+      fetchPosCustomers(),
+      fetchPosCustomerTypes().catch(() => []),
+      fetchPosSettings().catch(() => null),
+    ]);
+
+    return {
+      products: toDataRows(productsRows),
+      finishingCatalog: Array.isArray(finishingRows) ? finishingRows : [],
+      materials: (Array.isArray(materialsRows) ? materialsRows : []).map(normalizeMaterialRow),
+      catalogMaterialNameMap: buildCatalogMaterialNameMap(productionMaterialsRows),
+      customers: (Array.isArray(customerRows) ? customerRows : []).map(normalizeCustomerRow),
+      customerTypes: mergeCustomerTypesWithFallback(customerTypeRows),
+      posSettings: posSettingsPayload && typeof posSettingsPayload === 'object' && !Array.isArray(posSettingsPayload)
+        ? normalizeReceiptSettings(posSettingsPayload)
+        : null,
+    };
+  };
+
+  const applyMasterDataSnapshot = (snapshot, options = {}) => {
+    const nextSnapshot = snapshot && typeof snapshot === 'object' ? snapshot : {};
+    setProducts(Array.isArray(nextSnapshot.products) ? nextSnapshot.products : []);
+    setFinishingCatalog(Array.isArray(nextSnapshot.finishingCatalog) ? nextSnapshot.finishingCatalog : []);
+    setMaterials(Array.isArray(nextSnapshot.materials) ? nextSnapshot.materials : []);
+    setCatalogMaterialNameMap(nextSnapshot.catalogMaterialNameMap && typeof nextSnapshot.catalogMaterialNameMap === 'object'
+      ? nextSnapshot.catalogMaterialNameMap
+      : {});
+    setCustomers(Array.isArray(nextSnapshot.customers) ? nextSnapshot.customers : []);
+    setCustomerTypes(Array.isArray(nextSnapshot.customerTypes) ? nextSnapshot.customerTypes : []);
+    if (nextSnapshot.posSettings) {
+      setPosSettings((prev) => ({
+        ...prev,
+        ...nextSnapshot.posSettings,
+      }));
+    }
+    if (options?.resetProductDetails !== false) {
+      setProductDetails({});
+    }
+  };
+
+  const updateMasterSyncMeta = (updates = {}) => {
+    const nextMeta = {
+      ...masterSyncMetaRef.current,
+      ...(updates && typeof updates === 'object' ? updates : {}),
+    };
+    masterSyncMetaRef.current = nextMeta;
+    persistMasterSyncMeta(nextMeta);
+    return nextMeta;
+  };
+
+  const markMasterSyncSuccess = (label, metaUpdates = {}) => {
+    const completedAt = new Date().toISOString();
+    updateMasterSyncMeta({
+      ...metaUpdates,
+      lastSuccessfulSyncAt: completedAt,
+    });
+    setMasterSyncStatus({
+      state: 'success',
+      label: String(label || 'Data terbaru'),
+      lastSuccessfulAt: completedAt,
+    });
+  };
+
+  const runMasterDataSync = async (options = {}) => {
+    if (masterSyncInFlightRef.current) {
+      return { skipped: true, reason: 'busy' };
+    }
+    if (!backendReady && options?.skipBackendGuard !== true) {
+      return { skipped: true, reason: 'backend_not_ready' };
+    }
+
+    const forceFull = options?.forceFull === true;
+    const silent = options?.silent === true;
+    const nowTs = Date.now();
+    const previousMeta = masterSyncMetaRef.current || {};
+    const lastFullSyncAtTs = new Date(previousMeta?.lastFullSyncAt || 0).getTime();
+    const fullRefreshOverdue = !Number.isFinite(lastFullSyncAtTs)
+      || lastFullSyncAtTs <= 0
+      || (nowTs - lastFullSyncAtTs) >= MASTER_SYNC_FULL_REFRESH_INTERVAL_MS;
+
+    masterSyncInFlightRef.current = true;
+    if (!silent) {
+      setMasterSyncStatus((prev) => ({
+        ...prev,
+        state: 'syncing',
+        label: 'Menyinkronkan data...',
+      }));
+    }
+
+    try {
+      const rawStatus = await fetchPosSyncStatus();
+      const syncStatus = normalizeSyncStatusPayload(rawStatus);
+
+      if (!syncStatus) {
+        const lastFullFallbackTs = new Date(previousMeta?.lastFullSyncAt || 0).getTime();
+        const fallbackDue = forceFull
+          || !Number.isFinite(lastFullFallbackTs)
+          || lastFullFallbackTs <= 0
+          || (nowTs - lastFullFallbackTs) >= MASTER_SYNC_FALLBACK_INTERVAL_MS;
+
+        if (!fallbackDue) {
+          const lastLabel = formatSyncClock(previousMeta?.lastSuccessfulSyncAt);
+          setMasterSyncStatus((prev) => ({
+            ...prev,
+            state: 'success',
+            label: lastLabel ? `Data terbaru, cek terakhir ${lastLabel}` : 'Data terbaru',
+            lastSuccessfulAt: previousMeta?.lastSuccessfulSyncAt || prev.lastSuccessfulAt,
+          }));
+          return { skipped: true, reason: 'fallback_recent' };
+        }
+
+        const snapshot = await fetchMasterDataSnapshot();
+        applyMasterDataSnapshot(snapshot, { resetProductDetails: true });
+        markMasterSyncSuccess('Data master diperbarui', {
+          lastFullSyncAt: new Date().toISOString(),
+        });
+        return { mode: 'full', statusEndpointAvailable: false };
+      }
+
+      const statusChanged = hasSyncStatusChanged(previousMeta, syncStatus);
+      const shouldRefreshFullSnapshot = forceFull || fullRefreshOverdue;
+
+      if (!statusChanged && !shouldRefreshFullSnapshot) {
+        const labelTime = formatSyncClock(syncStatus.serverTime || previousMeta?.lastSuccessfulSyncAt);
+        markMasterSyncSuccess(labelTime ? `Data terbaru, cek ${labelTime}` : 'Data terbaru', {
+          ...syncStatus,
+          lastCheckedAt: new Date().toISOString(),
+        });
+        return { mode: 'status_only', statusEndpointAvailable: true };
+      }
+
+      if (shouldRefreshFullSnapshot) {
+        const snapshot = await fetchMasterDataSnapshot();
+        applyMasterDataSnapshot(snapshot, { resetProductDetails: true });
+        markMasterSyncSuccess('Data master diperbarui', {
+          ...syncStatus,
+          lastCheckedAt: new Date().toISOString(),
+          lastFullSyncAt: new Date().toISOString(),
+          serverTime: syncStatus.serverTime || previousMeta?.serverTime || '',
+        });
+        return { mode: 'full', statusEndpointAvailable: true };
+      }
+
+      const deltaSince = previousMeta?.serverTime || previousMeta?.lastSuccessfulSyncAt || '';
+      const rawChanges = await fetchPosSyncChanges(deltaSince);
+      const syncChanges = normalizeSyncChangesPayload(rawChanges);
+
+      if (!syncChanges) {
+        const snapshot = await fetchMasterDataSnapshot();
+        applyMasterDataSnapshot(snapshot, { resetProductDetails: true });
+        markMasterSyncSuccess('Data master diperbarui', {
+          ...syncStatus,
+          lastCheckedAt: new Date().toISOString(),
+          lastFullSyncAt: new Date().toISOString(),
+          serverTime: syncStatus.serverTime || previousMeta?.serverTime || '',
+        });
+        return { mode: 'full_fallback', statusEndpointAvailable: true };
+      }
+
+      const incomingProducts = Array.isArray(syncChanges.products) ? syncChanges.products : [];
+      const incomingCustomers = (Array.isArray(syncChanges.customers) ? syncChanges.customers : []).map(normalizeCustomerRow);
+      const deletedProductIds = Array.isArray(syncChanges.deletedProductIds) ? syncChanges.deletedProductIds : [];
+      const deletedCustomerIds = Array.isArray(syncChanges.deletedCustomerIds) ? syncChanges.deletedCustomerIds : [];
+
+      setProducts((prev) => mergeRowsById(prev, incomingProducts, deletedProductIds, {
+        preserveIds: [selectedProductId],
+      }));
+      setCustomers((prev) => mergeRowsById(prev, incomingCustomers, deletedCustomerIds, {
+        preserveIds: [selectedCustomerId],
+      }));
+      setProductDetails((prev) => {
+        const next = { ...(prev || {}) };
+        incomingProducts.forEach((row) => {
+          const id = Number(row?.id || 0);
+          if (id > 0) {
+            delete next[id];
+          }
+        });
+        deletedProductIds.forEach((rowId) => {
+          const id = Number(rowId || 0);
+          if (id > 0 && id !== Number(selectedProductId || 0)) {
+            delete next[id];
+          }
+        });
+        return next;
+      });
+
+      const changeCount = incomingProducts.length + incomingCustomers.length + deletedProductIds.length + deletedCustomerIds.length;
+      markMasterSyncSuccess(
+        changeCount > 0 ? `Sinkron ${changeCount} perubahan data master` : 'Data terbaru',
+        {
+          ...syncStatus,
+          lastCheckedAt: new Date().toISOString(),
+          serverTime: syncChanges.serverTime || syncStatus.serverTime || previousMeta?.serverTime || '',
+        },
+      );
+      return { mode: 'delta', statusEndpointAvailable: true, changeCount };
+    } catch (error) {
+      if (Number(error?.status || 0) === 401) {
+        handleSessionExpired();
+        return { failed: true, reason: 'unauthorized' };
+      }
+      setMasterSyncStatus((prev) => ({
+        ...prev,
+        state: 'error',
+        label: `Gagal sinkron, coba lagi: ${error?.message || 'Unknown error'}`,
+      }));
+      return { failed: true, reason: 'error', error };
+    } finally {
+      masterSyncInFlightRef.current = false;
+    }
+  };
+  masterSyncRunnerRef.current = runMasterDataSync;
 
   const openMataAyamStockNoticeIfNeeded = (error, title = 'SETOK HABIS', context = {}) => {
     const guidanceMessage = buildMataAyamStockGuidanceMessage(error, context);
@@ -4200,58 +4615,17 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       try {
         setIsPreparingApp(true);
         setPrepareMessage(PREPARE_LOADING_TEXT);
-        const [productsRows, finishingRows, materialsRows, productionMaterialsRows, customerRows, customerTypeRows, posSettingsPayload] = await Promise.all([
-          fetchPosProducts(),
-          fetchPosFinishings().catch(() => []),
-          fetchPosMaterials(),
-          fetchPosProductionMaterials().catch(() => []),
-          fetchPosCustomers(),
-          fetchPosCustomerTypes().catch(() => []),
-          fetchPosSettings().catch(() => null),
-        ]);
-
-        setProducts(toDataRows(productsRows));
-        setFinishingCatalog(Array.isArray(finishingRows) ? finishingRows : []);
-        setMaterials((Array.isArray(materialsRows) ? materialsRows : []).map(normalizeMaterialRow));
-        const materialNameMap = {};
-        (Array.isArray(productionMaterialsRows) ? productionMaterialsRows : []).forEach((row) => {
-          const id = Number(row?.id || 0);
-          const name = String(row?.name || '').trim();
-          if (id > 0 && name) {
-            materialNameMap[id] = name;
-          }
-        });
-        setCatalogMaterialNameMap(materialNameMap);
-        setCustomers((Array.isArray(customerRows) ? customerRows : []).map(normalizeCustomerRow));
-        const normalizedTypes = (Array.isArray(customerTypeRows) ? customerTypeRows : [])
-          .map(normalizeCustomerTypeRow)
-          .filter((row) => row.name);
-        const mergedTypes = [...normalizedTypes];
-
-        DEFAULT_CUSTOMER_TYPES.forEach((fallback) => {
-          if (!mergedTypes.some((row) => row.code === fallback.code || normalizeText(row.name) === normalizeText(fallback.name))) {
-            mergedTypes.push(fallback);
-          }
-        });
-
-        mergedTypes.sort((a, b) => {
-          const pa = CUSTOMER_TYPE_PRIORITY[a.code] || 99;
-          const pb = CUSTOMER_TYPE_PRIORITY[b.code] || 99;
-          if (pa !== pb) return pa - pb;
-          return String(a.name || '').localeCompare(String(b.name || ''), 'id');
-        });
-        setCustomerTypes(mergedTypes);
-        if (posSettingsPayload && typeof posSettingsPayload === 'object' && !Array.isArray(posSettingsPayload)) {
-          setPosSettings((prev) => ({
-            ...prev,
-            ...normalizeReceiptSettings(posSettingsPayload),
-          }));
-        }
+        const snapshot = await fetchMasterDataSnapshot();
+        applyMasterDataSnapshot(snapshot, { resetProductDetails: true });
         setBackendReady(true);
         setHealthStatus({
           state: 'online',
           label: 'Online',
           checkedAt: new Date().toISOString(),
+        });
+        markMasterSyncSuccess('Data master siap dipakai', {
+          lastCheckedAt: new Date().toISOString(),
+          lastFullSyncAt: new Date().toISOString(),
         });
         const queue = loadOrderQueue();
         setQueueCount(queue.length);
@@ -4260,9 +4634,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         setAuditLogs(loadOrderAuditLogs());
       } catch (error) {
         if (Number(error?.status || 0) === 401) {
-          Alert.alert('Sesi Login Berakhir', 'Silakan login kembali untuk mengakses POS.', [
-            { text: 'OK', onPress: () => onLogout?.() },
-          ]);
+          handleSessionExpired();
           setIsPreparingApp(false);
           return;
         }
@@ -4300,9 +4672,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       } catch (error) {
         if (isCancelled) return;
         if (Number(error?.status || 0) === 401) {
-          Alert.alert('Sesi Login Berakhir', 'Silakan login kembali untuk mengakses POS.', [
-            { text: 'OK', onPress: () => onLogout?.() },
-          ]);
+          handleSessionExpired();
           return;
         }
         setHealthStatus({
@@ -4367,6 +4737,74 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     if (backendReady) {
       flushQueuedOrders();
     }
+  }, [backendReady]);
+
+  useEffect(() => {
+    if (!backendReady) {
+      return undefined;
+    }
+
+    masterSyncRunnerRef.current?.({ reason: 'startup', silent: true }).catch(() => {});
+    const timer = setInterval(() => {
+      masterSyncRunnerRef.current?.({ reason: 'poll', silent: true }).catch(() => {});
+    }, MASTER_SYNC_POLL_INTERVAL_MS);
+
+    return () => clearInterval(timer);
+  }, [backendReady]);
+
+  useEffect(() => {
+    const handleAppStateChange = (nextAppState) => {
+      const previousState = appStateRef.current;
+      appStateRef.current = nextAppState;
+      const isReturningToForeground =
+        (previousState === 'inactive' || previousState === 'background')
+        && nextAppState === 'active';
+
+      if (isReturningToForeground) {
+        masterSyncRunnerRef.current?.({ reason: 'foreground', forceFull: true }).catch(() => {});
+        if (backendReady) {
+          flushQueuedOrders();
+        }
+      }
+    };
+
+    const subscription = AppState.addEventListener('change', handleAppStateChange);
+    return () => {
+      subscription.remove();
+    };
+  }, [backendReady]);
+
+  useEffect(() => {
+    if (typeof globalThis?.addEventListener !== 'function') {
+      return undefined;
+    }
+
+    const handleOnline = () => {
+      setHealthStatus({
+        state: 'online',
+        label: 'Online',
+        checkedAt: new Date().toISOString(),
+      });
+      masterSyncRunnerRef.current?.({ reason: 'network_online', forceFull: false }).catch(() => {});
+      if (backendReady) {
+        flushQueuedOrders();
+      }
+    };
+    const handleOffline = () => {
+      setHealthStatus({
+        state: 'offline',
+        label: 'Offline',
+        checkedAt: new Date().toISOString(),
+      });
+    };
+
+    globalThis.addEventListener('online', handleOnline);
+    globalThis.addEventListener('offline', handleOffline);
+
+    return () => {
+      globalThis.removeEventListener('online', handleOnline);
+      globalThis.removeEventListener('offline', handleOffline);
+    };
   }, [backendReady]);
 
   const subtotal = useMemo(
@@ -8375,6 +8813,17 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                   <Text style={styles.tagihanText}>Tagihan : {formatRupiah(grandTotal)}</Text>
                   {queueCount > 0 ? <Text style={styles.payloadFlag}>Antrian invoice disimpan offline: {queueCount}</Text> : null}
                   {lastSyncInfo ? <Text style={styles.payloadFlag}>{lastSyncInfo}</Text> : null}
+                  {masterSyncStatus?.label ? (
+                    <Text
+                      style={[
+                        styles.payloadFlag,
+                        masterSyncStatus.state === 'error' ? styles.payloadFlagError : null,
+                        masterSyncStatus.state === 'syncing' ? styles.payloadFlagInfo : null,
+                      ]}
+                    >
+                      {masterSyncStatus.label}
+                    </Text>
+                  ) : null}
                 </View>
               </View>
 
@@ -10227,6 +10676,12 @@ const styles = StyleSheet.create({
     fontSize: 11,
     color: '#2457d6',
     fontWeight: '700',
+  },
+  payloadFlagInfo: {
+    color: '#1d4ed8',
+  },
+  payloadFlagError: {
+    color: '#b42318',
   },
   healthBar: {
     borderWidth: 1,
