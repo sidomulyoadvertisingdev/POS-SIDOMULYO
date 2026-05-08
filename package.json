@@ -1,14 +1,14 @@
 {
   "name": "pos-kasir-expo",
-  "version": "1.6.4",
+  "version": "1.6.5",
   "description": "Aplikasi desktop POS Kasir untuk operasional penjualan dan closing harian.",
   "author": "Sidomulyo",
   "main": "index.js",
   "scripts": {
-    "start": "expo start",
-    "android": "expo start --android",
-    "ios": "expo start --ios",
-    "web": "expo start --web",
+    "start": "set NODE_OPTIONS=--max-old-space-size=4096 && expo start --offline --max-workers 1",
+    "android": "set NODE_OPTIONS=--max-old-space-size=4096 && expo start --offline --android --max-workers 1",
+    "ios": "set NODE_OPTIONS=--max-old-space-size=4096 && expo start --offline --ios --max-workers 1",
+    "web": "set NODE_OPTIONS=--max-old-space-size=4096 && expo start --offline --web --max-workers 1",
     "test:product-picker": "node --test src/utils/__tests__/productPickerTree.test.cjs",
     "test:receipt-summary": "node --test src/utils/__tests__/receiptSummary.test.cjs",
     "test:receipt-render": "npx tsc --noEmit src/printing/renderReceiptText.ts src/printing/receiptHelpers.ts src/printing/profiles.ts src/printing/types.ts src/printing/__tests__/renderReceiptText.test.ts",
@@ -19,12 +19,15 @@
     "build:win:dir": "npm run build:web && set NODE_OPTIONS=--max-old-space-size=8192 && electron-builder --win dir",
     "build:win:legacy": "npm run build:web && set NODE_OPTIONS=--max-old-space-size=8192 && electron-builder --win nsis"
   },
+  "engines": {
+    "node": ">=20.19.0 <24"
+  },
   "dependencies": {
     "@expo-google-fonts/poppins": "^0.4.1",
-    "expo": "~54.0.33",
+    "expo": "~54.0.34",
     "expo-asset": "~12.0.13",
     "expo-constants": "~18.0.13",
-    "expo-font": "^55.0.6",
+    "expo-font": "~14.0.11",
     "expo-status-bar": "~3.0.9",
     "react": "19.1.0",
     "react-dom": "19.1.0",

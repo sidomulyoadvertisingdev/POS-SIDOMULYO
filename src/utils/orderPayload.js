@@ -47,6 +47,9 @@ export const mapPaymentStatusToTransactionType = (paymentStatus) => {
 
 export const mapPaymentMethodToBackend = (paymentMethod) => {
   const text = normalizeText(paymentMethod);
+  if (['saldo pelanggan', 'deposit customer', 'customer deposit', 'customer_deposit', 'deposit'].includes(text)) {
+    return 'customer_deposit';
+  }
   if (['cash', 'tunai'].includes(text)) {
     return 'cash';
   }
@@ -64,6 +67,9 @@ export const mapPaymentMethodToBackend = (paymentMethod) => {
 
 export const mapPaymentMethodToBankAccountId = (paymentMethod) => {
   const method = mapPaymentMethodToBackend(paymentMethod);
+  if (method === 'customer_deposit') {
+    return 0;
+  }
   const byMethod = {
     cash: toPositiveInt(appEnv.bankAccountCashId),
     transfer: toPositiveInt(appEnv.bankAccountTransferId),

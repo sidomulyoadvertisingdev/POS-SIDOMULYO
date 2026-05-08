@@ -361,6 +361,34 @@ export const fetchPosBankAccounts = async () => {
   return toDataList(payload);
 };
 
+export const getCustomerDepositBalance = async (customerId) => {
+  await ensureAuthenticated();
+  const body = await requestWithEndpointCandidates([
+    `/finance/customers/${customerId}/deposit`,
+    `/pos/customers/${customerId}/deposit`,
+  ]);
+  return toDataItem(body);
+};
+
+export const topUpCustomerDeposit = async (customerId, payload) => {
+  await ensureAuthenticated();
+  const body = await requestWithEndpointCandidates([
+    `/pos/customers/${customerId}/deposit/top-up`,
+  ], {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+  return toDataItem(body);
+};
+
+export const getCustomerDepositMutations = async (customerId) => {
+  await ensureAuthenticated();
+  const body = await requestOptionalEndpointCandidates([
+    `/finance/customers/${customerId}/deposit-mutations`,
+  ]);
+  return body ? toDataList(body) : [];
+};
+
 export const createPosInvoicePayment = async (invoiceId, payload) => {
   await ensureAuthenticated();
   return request(`/pos/invoices/${invoiceId}/payments`, {

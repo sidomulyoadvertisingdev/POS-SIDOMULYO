@@ -41,9 +41,11 @@ import {
   fetchPosSyncStatus,
   pickupPosOrder,
   fetchAuthMe,
+  getCustomerDepositBalance,
   getApiBaseUrl,
   previewPosPricing,
   submitPosCloserOrder,
+  topUpCustomerDeposit,
   updatePosProductionItemStatus,
   updatePosOrderStatus,
 } from '../services/erpApi';
@@ -2599,6 +2601,10 @@ const resolveSelectedMaterialWarning = (usedMaterialInfo, productName = '') => {
   return buildSelectedMaterialLowStockWarning(usedMaterialInfo, productName);
 };
 const PAYMENT_METHOD_LABELS = ['Cash', 'Transfer', 'QRIS', 'Card'];
+const CUSTOMER_DEPOSIT_PAYMENT_LABEL = 'Saldo Pelanggan';
+const CUSTOMER_DEPOSIT_TOP_UP_TITLE = 'Top Up Saldo Customer';
+const CHECKOUT_PAYMENT_METHOD_LABELS = [...PAYMENT_METHOD_LABELS, CUSTOMER_DEPOSIT_PAYMENT_LABEL];
+const RECEIVABLE_PAYMENT_METHOD_LABELS = [...PAYMENT_METHOD_LABELS, CUSTOMER_DEPOSIT_PAYMENT_LABEL];
 const DEFAULT_CASH_FLOW_QUICK_CATEGORIES = {
   expense: [
     'Beli ATK',
@@ -2672,12 +2678,60 @@ const normalizePaymentMethodLabel = (value) => {
   if (['transfer', 'bank transfer'].includes(text)) return 'Transfer';
   if (['qris', 'qr'].includes(text)) return 'QRIS';
   if (['card', 'kartu', 'debit', 'credit card'].includes(text)) return 'Card';
+  if (['saldo pelanggan', 'deposit customer', 'customer deposit', 'customer_deposit', 'deposit'].includes(text)) return CUSTOMER_DEPOSIT_PAYMENT_LABEL;
   return value;
 };
+const isCustomerDepositPaymentMethod = (value) => normalizePaymentMethodLabel(value) === CUSTOMER_DEPOSIT_PAYMENT_LABEL;
+const mapReceivablePaymentMethodToBackend = (value) => (
+  isCustomerDepositPaymentMethod(value) ? 'customer_deposit' : mapPaymentMethodToBackend(value)
+);
 const humanizePaymentMethod = (value) => {
   const normalized = normalizePaymentMethodLabel(value);
   const text = String(normalized || '').trim();
   return text || 'Lainnya';
+};
+const toMoneyNumber = (value) => {
+  const parsed = Number(String(value ?? '').replace(/,/g, ''));
+  return Number.isFinite(parsed) ? roundMoney(parsed) : 0;
+};
+const extractCustomerDepositBalance = (payload) => {
+  if (payload == null) {
+    return 0;
+  }
+  if (typeof payload === 'number' || typeof payload === 'string') {
+    return toMoneyNumber(payload);
+  }
+  if (typeof payload !== 'object' || Array.isArray(payload)) {
+    return 0;
+  }
+  const candidates = [
+    payload?.balance,
+    payload?.deposit_balance,
+    payload?.available_balance,
+    payload?.remaining_balance,
+    payload?.deposit?.balance,
+    payload?.deposit?.available_balance,
+    payload?.data?.balance,
+    payload?.data?.deposit_balance,
+    payload?.data?.deposit?.balance,
+  ];
+  for (const candidate of candidates) {
+    if (candidate !== undefined && candidate !== null && candidate !== '') {
+      return toMoneyNumber(candidate);
+    }
+  }
+  return 0;
+};
+const isValidIsoDateText = (value) => {
+  const text = String(value || '').trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(text)) {
+    return false;
+  }
+  const parsed = new Date(`${text}T00:00:00`);
+  if (Number.isNaN(parsed.getTime())) {
+    return false;
+  }
+  return formatIsoDate(parsed) === text;
 };
 const formatCashFlowSourceLabel = (value) => {
   const source = String(value || '').trim().toLowerCase();
@@ -3146,11 +3200,46 @@ const SalesScreen = ({ currentUser, onLogout }) => {
   const [hasSavedPrinterProfile, setHasSavedPrinterProfile] = useState(() => Boolean(loadStoredPrinterProfile()));
   const [bankAccounts, setBankAccounts] = useState([]);
   const [selectedBankAccountId, setSelectedBankAccountId] = useState(null);
+  const [depositModalVisible, setDepositModalVisible] = useState(false);
+  const [depositDate, setDepositDate] = useState(formatIsoDate(new Date()));
+  const [depositAmount, setDepositAmount] = useState('');
+  const [depositPaymentMethod, setDepositPaymentMethod] = useState('Cash');
+  const [depositAccountId, setDepositAccountId] = useState(null);
+  const [depositReferenceNo, setDepositReferenceNo] = useState('');
+  const [depositNotes, setDepositNotes] = useState('');
+  const [customerDepositBalance, setCustomerDepositBalance] = useState(0);
+  const [loadingDepositBalance, setLoadingDepositBalance] = useState(false);
+  const [submittingDepositTopUp, setSubmittingDepositTopUp] = useState(false);
+  const [depositAccountOptions, setDepositAccountOptions] = useState([]);
+  const [loadingDepositAccounts, setLoadingDepositAccounts] = useState(false);
   const selectedBankAccountRow = useMemo(
     () => bankAccounts.find((row) => Number(row?.id || 0) === Number(selectedBankAccountId || 0)) || null,
     [bankAccounts, selectedBankAccountId],
   );
+  const checkoutSubtotalPreview = cartItems.reduce((total, item) => total + Number(item?.lineTotal || 0), 0);
+  const checkoutDiscountPercentPreview = Math.min(Math.max(Number(discountPercent) || 0, 0), 100);
+  const checkoutDiscountAmountPreview = Math.min(
+    Math.max(Number(discountAmount) || 0, 0),
+    checkoutSubtotalPreview,
+  );
+  const checkoutDiscountFromPercentPreview = Math.round(
+    (checkoutSubtotalPreview * checkoutDiscountPercentPreview) / 100,
+  );
+  const checkoutFinalDiscountPreview = discountMode === 'amount'
+    ? checkoutDiscountAmountPreview
+    : checkoutDiscountFromPercentPreview;
+  const checkoutGrandTotalPreview = Math.max(checkoutSubtotalPreview - checkoutFinalDiscountPreview, 0);
   const paymentMethodHelperText = useMemo(() => {
+    if (isCustomerDepositPaymentMethod(paymentMethod)) {
+      const balance = roundMoney(Number(customerDepositBalance || 0));
+      if (!(Number(selectedCustomerId || 0) > 0)) {
+        return 'Saldo Pelanggan hanya bisa dipakai jika customer sudah dipilih.';
+      }
+      if (balance < checkoutGrandTotalPreview) {
+        return `Saldo pelanggan tersedia ${formatRupiah(balance)}. Checkout ini butuh ${formatRupiah(checkoutGrandTotalPreview)} dan belum bisa dibayar penuh memakai saldo pelanggan.`;
+      }
+      return `Saldo pelanggan tersedia ${formatRupiah(balance)}. Order akan dibuat dulu, lalu invoice langsung dibayar full-cover memakai saldo pelanggan tanpa menambah kas/bank baru.`;
+    }
     const method = mapPaymentMethodToBackend(paymentMethod);
     const selectedAccountName = String(
       selectedBankAccountRow?.displayTitle
@@ -3179,17 +3268,20 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     return selectedAccountName
       ? `Pembayaran transfer akan otomatis dicatat ke rekening tujuan: ${selectedAccountName}.`
       : 'Pembayaran transfer akan otomatis dicatat ke rekening tujuan sesuai mapping backend.';
-  }, [paymentMethod, selectedBankAccountRow]);
+  }, [checkoutGrandTotalPreview, customerDepositBalance, paymentMethod, selectedBankAccountRow, selectedCustomerId]);
   const [receivablePaymentModal, setReceivablePaymentModal] = useState({
     visible: false,
     orderId: 0,
     invoiceId: 0,
     invoiceNo: '',
+    customerId: 0,
     customerName: 'Pelanggan umum',
     customerPhone: '',
     dueTotal: 0,
     amount: '',
     method: 'Cash',
+    customerDepositBalance: 0,
+    isLoadingDepositBalance: false,
     selectedAccountId: null,
     accountOptions: [],
     isLoadingAccounts: false,
@@ -3201,6 +3293,9 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     [receivablePaymentModal.accountOptions, receivablePaymentModal.selectedAccountId],
   );
   const receivablePaymentHelperText = useMemo(() => {
+    if (isCustomerDepositPaymentMethod(receivablePaymentModal.method)) {
+      return 'Pembayaran ini adalah settlement non-cash: saldo pelanggan berkurang dan tidak menambah kas/bank baru.';
+    }
     const method = mapPaymentMethodToBackend(receivablePaymentModal.method);
     const selectedAccountName = String(
       selectedReceivableAccountRow?.displayTitle
@@ -3226,6 +3321,49 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       ? `Pelunasan transfer akan dicatat ke rekening tujuan: ${selectedAccountName}.`
       : 'Pelunasan transfer akan dicatat ke rekening tujuan yang dipilih.';
   }, [receivablePaymentModal.method, selectedReceivableAccountRow]);
+  const depositTopUpHelperText = useMemo(() => {
+    const selectedAccount = depositAccountOptions.find((row) => Number(row?.id || 0) === Number(depositAccountId || 0)) || null;
+    const selectedAccountName = String(
+      selectedAccount?.displayTitle
+      || selectedAccount?.displayName
+      || ''
+    ).trim();
+    const method = mapPaymentMethodToBackend(depositPaymentMethod);
+    if (selectedAccountName) {
+      return `Dana masuk akan dicatat ke rekening/kas ${selectedAccountName}, lalu backend menyimpan receipt dana penampung sebelum dialokasikan ke saldo customer.`;
+    }
+    if (method === 'cash') {
+      return 'Top up tunai wajib memilih akun kas sumber. Dana dicatat sebagai dana titipan customer pada tanggal yang dipilih, bukan omzet order baru.';
+    }
+    return 'Transfer customer wajib memilih rekening/bank sumber dana. Backend akan mencatat uang masuk ke dana penampung dulu, lalu mengalokasikannya ke saldo customer.';
+  }, [depositAccountId, depositAccountOptions, depositPaymentMethod]);
+  const receivableDepositShortage = useMemo(() => {
+    if (!isCustomerDepositPaymentMethod(receivablePaymentModal.method)) {
+      return false;
+    }
+    return roundMoney(Number(receivablePaymentModal.customerDepositBalance || 0)) < roundMoney(Number(receivablePaymentModal.dueTotal || 0));
+  }, [receivablePaymentModal.customerDepositBalance, receivablePaymentModal.dueTotal, receivablePaymentModal.method]);
+  const isDepositDateValid = useMemo(
+    () => isValidIsoDateText(depositDate),
+    [depositDate],
+  );
+  const isDepositSubmitDisabled = useMemo(() => (
+    submittingDepositTopUp
+    || loadingDepositAccounts
+    || !(Number(selectedCustomerId || 0) > 0)
+    || !isDepositDateValid
+    || roundMoney(parseCurrencyInput(depositAmount)) <= 0
+    || !PAYMENT_METHOD_LABELS.includes(normalizePaymentMethodLabel(depositPaymentMethod))
+    || !(Number(depositAccountId || 0) > 0)
+  ), [
+    depositAccountId,
+    depositAmount,
+    depositPaymentMethod,
+    isDepositDateValid,
+    loadingDepositAccounts,
+    selectedCustomerId,
+    submittingDepositTopUp,
+  ]);
   const [pickupModal, setPickupModal] = useState({
     visible: false,
     orderId: 0,
@@ -4007,11 +4145,13 @@ const SalesScreen = ({ currentUser, onLogout }) => {
   };
 
   const buildOrderPreviewSnapshot = () => {
-    const paymentTargetName = String(
-      selectedBankAccountRow?.displayTitle
-      || selectedBankAccountRow?.displayName
-      || ''
-    ).trim();
+    const paymentTargetName = isCustomerDepositPaymentMethod(paymentMethod)
+      ? 'Saldo Customer'
+      : String(
+        selectedBankAccountRow?.displayTitle
+        || selectedBankAccountRow?.displayName
+        || ''
+      ).trim();
     return {
       draftNo: currentDraftSourceId ? `DRF-${currentDraftSourceId}` : '-',
       transactionDate,
@@ -4021,7 +4161,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       paymentMethod: normalizePaymentMethodLabel(paymentMethod),
       paymentTargetName,
       paymentStatus,
-      paymentAmount: paidAmount,
+      paymentAmount: isCustomerDepositPaymentMethod(paymentMethod) ? grandTotal : paidAmount,
       discountAmount: finalDiscount,
       subtotal,
       grandTotal,
@@ -4610,50 +4750,52 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     };
   }, [noticeModal.visible, noticeModal.autoCloseMs]);
 
-  useEffect(() => {
-    const bootstrap = async () => {
-      try {
-        setIsPreparingApp(true);
-        setPrepareMessage(PREPARE_LOADING_TEXT);
-        const snapshot = await fetchMasterDataSnapshot();
-        applyMasterDataSnapshot(snapshot, { resetProductDetails: true });
-        setBackendReady(true);
-        setHealthStatus({
-          state: 'online',
-          label: 'Online',
-          checkedAt: new Date().toISOString(),
-        });
-        markMasterSyncSuccess('Data master siap dipakai', {
-          lastCheckedAt: new Date().toISOString(),
-          lastFullSyncAt: new Date().toISOString(),
-        });
-        const queue = loadOrderQueue();
-        setQueueCount(queue.length);
-        setPrepareMessage(PREPARE_LOADING_TEXT);
-        await flushQueuedOrders(true);
-        setAuditLogs(loadOrderAuditLogs());
-      } catch (error) {
-        if (Number(error?.status || 0) === 401) {
-          handleSessionExpired();
-          setIsPreparingApp(false);
-          return;
-        }
-        setHealthStatus({
-          state: 'offline',
-          label: 'Offline',
-          checkedAt: new Date().toISOString(),
-        });
-        Alert.alert(
-          'Koneksi Backend Gagal',
-          `${error.message}\nBase URL: ${getApiBaseUrl()}`,
-        );
-        setPrepareMessage(PREPARE_LOADING_TEXT);
-      } finally {
+  const bootstrapApp = async () => {
+    try {
+      setIsPreparingApp(true);
+      setPrepareMessage('Menghubungkan POS ke backend...');
+      const snapshot = await fetchMasterDataSnapshot();
+      setPrepareMessage('Merapikan data master POS...');
+      applyMasterDataSnapshot(snapshot, { resetProductDetails: true });
+      setBackendReady(true);
+      setHealthStatus({
+        state: 'online',
+        label: 'Online',
+        checkedAt: new Date().toISOString(),
+      });
+      markMasterSyncSuccess('Data master siap dipakai', {
+        lastCheckedAt: new Date().toISOString(),
+        lastFullSyncAt: new Date().toISOString(),
+      });
+      const queue = loadOrderQueue();
+      setQueueCount(queue.length);
+      setPrepareMessage('Memeriksa antrian offline...');
+      await flushQueuedOrders(true);
+      setAuditLogs(loadOrderAuditLogs());
+      setPrepareMessage('Data master siap dipakai.');
+    } catch (error) {
+      if (Number(error?.status || 0) === 401) {
+        handleSessionExpired();
         setIsPreparingApp(false);
+        return;
       }
-    };
+      setHealthStatus({
+        state: 'offline',
+        label: 'Offline',
+        checkedAt: new Date().toISOString(),
+      });
+      setPrepareMessage(`Gagal menyiapkan POS: ${error.message}. Base URL: ${getApiBaseUrl()}`);
+      Alert.alert(
+        'Koneksi Backend Gagal',
+        `${error.message}\nBase URL: ${getApiBaseUrl()}`,
+      );
+    } finally {
+      setIsPreparingApp(false);
+    }
+  };
 
-    bootstrap();
+  useEffect(() => {
+    bootstrapApp();
   }, []);
 
   useEffect(() => {
@@ -4842,11 +4984,27 @@ const SalesScreen = ({ currentUser, onLogout }) => {
   const paidAmount = useMemo(() => Number(paymentAmount) || 0, [paymentAmount]);
   const changeAmount = useMemo(() => Math.max(paidAmount - grandTotal, 0), [paidAmount, grandTotal]);
   const paymentStatus = useMemo(() => {
+    if (isCustomerDepositPaymentMethod(paymentMethod)) return 'Lunas via Saldo';
     if (paidAmount <= 0) return 'Belum Bayar';
     if (paidAmount >= grandTotal) return 'Lunas';
     return 'DP';
-  }, [paidAmount, grandTotal]);
+  }, [paidAmount, grandTotal, paymentMethod]);
+  const checkoutDepositShortage = useMemo(() => {
+    if (!isCustomerDepositPaymentMethod(paymentMethod)) {
+      return false;
+    }
+    return roundMoney(Number(customerDepositBalance || 0)) < roundMoney(Number(grandTotal || 0));
+  }, [customerDepositBalance, grandTotal, paymentMethod]);
   useEffect(() => {
+    if (isCustomerDepositPaymentMethod(paymentMethod)) {
+      const nextAmountText = String(Math.max(0, Math.round(grandTotal)));
+      if (sanitizeNumericInput(String(paymentAmount || '')) !== nextAmountText) {
+        setPaymentAmount(nextAmountText);
+      }
+      previousGrandTotalRef.current = grandTotal;
+      return;
+    }
+
     const currentAmountText = sanitizeNumericInput(String(paymentAmount || ''));
     const currentGrandTotalText = String(Math.max(0, Math.round(grandTotal)));
     const previousGrandTotal = previousGrandTotalRef.current;
@@ -4863,7 +5021,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     }
 
     previousGrandTotalRef.current = grandTotal;
-  }, [grandTotal, paymentAmount]);
+  }, [grandTotal, paymentAmount, paymentMethod]);
   useEffect(() => {
     setIsProfileMenuOpen(false);
   }, [activeMenu]);
@@ -4875,6 +5033,43 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     () => customers.find((row) => Number(row.id) === Number(selectedCustomerId)) || null,
     [customers, selectedCustomerId],
   );
+  useEffect(() => {
+    const customerId = Number(selectedCustomerId || 0);
+    if (!(customerId > 0) || !backendReady) {
+      setCustomerDepositBalance(0);
+      setLoadingDepositBalance(false);
+      if (!(customerId > 0)) {
+        setDepositModalVisible(false);
+        resetDepositModalForm();
+      }
+      return undefined;
+    }
+
+    let cancelled = false;
+    setLoadingDepositBalance(true);
+    getCustomerDepositBalance(customerId)
+      .then((payload) => {
+        if (cancelled) {
+          return;
+        }
+        setCustomerDepositBalance(extractCustomerDepositBalance(payload));
+      })
+      .catch(() => {
+        if (cancelled) {
+          return;
+        }
+        setCustomerDepositBalance(0);
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setLoadingDepositBalance(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [backendReady, selectedCustomerId]);
   const selectedProductRow = useMemo(() => {
     if (selectedProductId) {
       const byId = products.find((row) => Number(row?.id) === Number(selectedProductId));
@@ -6817,8 +7012,33 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     }
 
     const canonicalMethodLabel = normalizePaymentMethodLabel(paymentMethod);
-    if (!PAYMENT_METHOD_LABELS.includes(canonicalMethodLabel)) {
-      openNotice('Validasi', `Metode Bayar wajib salah satu: ${PAYMENT_METHOD_LABELS.join(', ')}.`);
+    if (!CHECKOUT_PAYMENT_METHOD_LABELS.includes(canonicalMethodLabel)) {
+      openNotice('Validasi', `Metode Bayar wajib salah satu: ${CHECKOUT_PAYMENT_METHOD_LABELS.join(', ')}.`);
+      return null;
+    }
+
+    if (isCustomerDepositPaymentMethod(canonicalMethodLabel)) {
+      const customerId = Number(selectedCustomerId || 0);
+      if (!(customerId > 0)) {
+        openNotice('Saldo Pelanggan', 'Pilih customer terlebih dahulu sebelum memakai saldo pelanggan.');
+        return null;
+      }
+      if (loadingDepositBalance) {
+        openNotice('Saldo Pelanggan', 'Saldo pelanggan masih dimuat. Coba lagi sebentar.');
+        return null;
+      }
+      const latestBalance = await loadCustomerDepositBalance(customerId).catch(() => roundMoney(Number(customerDepositBalance || 0)));
+      if (roundMoney(Number(latestBalance || 0)) < roundMoney(Number(grandTotal || 0))) {
+        openNotice(
+          'Saldo Pelanggan',
+          `Saldo pelanggan tidak cukup. Tersedia ${formatRupiah(latestBalance || 0)}, butuh ${formatRupiah(grandTotal || 0)}.`,
+        );
+        return null;
+      }
+    }
+
+    if (mode !== 'draft' && roundMoney(Number(grandTotal || 0)) <= 0) {
+      openNotice('Validasi', 'Total order harus lebih dari nol.');
       return null;
     }
 
@@ -6833,6 +7053,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
 
     const isDraftMode = mode === 'draft';
     const { canonicalMethodLabel } = validation;
+    const usingCustomerDeposit = isCustomerDepositPaymentMethod(canonicalMethodLabel);
     const method = mapPaymentMethodToBackend(canonicalMethodLabel);
     const selectedBankId = Number(options?.bankAccountId || 0);
     const fallbackBankId = mapPaymentMethodToBankAccountId(canonicalMethodLabel);
@@ -7021,15 +7242,21 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         });
       });
 
-      const paymentTransactionType = isDraftMode ? 'unpaid' : transactionType;
+      const paymentTransactionType = isDraftMode
+        ? 'unpaid'
+        : usingCustomerDeposit
+          ? 'unpaid'
+          : transactionType;
       const paymentAmountPayload = isDraftMode
         ? 0
-        : transactionType === 'full'
-          ? grandTotal
-          : transactionType === 'dp'
-            ? Math.min(paidAmount, grandTotal)
-            : 0;
-      if (!isDraftMode && paymentAmountPayload > 0 && !(bankAccountId > 0)) {
+        : usingCustomerDeposit
+          ? 0
+          : transactionType === 'full'
+            ? grandTotal
+            : transactionType === 'dp'
+              ? Math.min(paidAmount, grandTotal)
+              : 0;
+      if (!isDraftMode && !usingCustomerDeposit && paymentAmountPayload > 0 && !(bankAccountId > 0)) {
         openNotice('Akun Pembayaran', 'Akun pembayaran wajib dipilih sebelum proses order.');
         return null;
       }
@@ -7053,7 +7280,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         payment: {
           transaction_type: paymentTransactionType,
           method,
-          ...(!isDraftMode ? { bank_account_id: bankAccountId || null } : {}),
+          ...(!isDraftMode && !usingCustomerDeposit ? { bank_account_id: bankAccountId || null } : {}),
           amount: roundMoney(paymentAmountPayload),
           note: paymentNotes || null,
           paid_at: new Date().toISOString(),
@@ -7063,7 +7290,31 @@ const SalesScreen = ({ currentUser, onLogout }) => {
 
       const created = await createPosOrder(payload);
       const backendOrderId = Number(created?.id || 0) || null;
+      const createdInvoiceId = Number(created?.invoice?.id || 0) || 0;
       const invoiceNo = created?.invoice?.invoice_no || '-';
+      let customerDepositAutoPaid = false;
+      let customerDepositAutoPayWarning = '';
+      let customerDepositBalanceAfterPayment = roundMoney(Number(customerDepositBalance || 0));
+      if (!isDraftMode && usingCustomerDeposit) {
+        if (!(createdInvoiceId > 0)) {
+          customerDepositAutoPayWarning = 'Order berhasil dibuat, tetapi invoice belum ditemukan untuk dipotong dari saldo pelanggan.';
+        } else {
+          try {
+            await createPosInvoicePayment(createdInvoiceId, {
+              method: 'customer_deposit',
+              payment_method: 'customer_deposit',
+              amount: roundMoney(grandTotal),
+              transaction_type: 'pelunasan',
+              note: paymentNotes || 'Pembayaran order via saldo pelanggan',
+              paid_at: new Date().toISOString(),
+            });
+            customerDepositAutoPaid = true;
+            customerDepositBalanceAfterPayment = await loadCustomerDepositBalance(customerId).catch(() => roundMoney(Number(customerDepositBalance || 0)));
+          } catch (depositPaymentError) {
+            customerDepositAutoPayWarning = formatBackendValidationError(depositPaymentError);
+          }
+        }
+      }
       if (created?.receipt && typeof created.receipt === 'object' && !Array.isArray(created.receipt)) {
         setPosSettings((prev) => ({
           ...prev,
@@ -7111,22 +7362,50 @@ const SalesScreen = ({ currentUser, onLogout }) => {
               payment_type: payload.payment.transaction_type,
               payment_method: payload.payment.method,
               bank_account_id: payload.payment.bank_account_id || null,
+              customer_deposit_auto_paid: customerDepositAutoPaid,
           },
         }),
       );
 
       openNotice(
-        mode === 'draft' ? 'Draft Berhasil Tersimpan' : 'Order Berhasil Diproses',
-        `Order backend ID: ${backendOrderId}\nInvoice: ${invoiceNo}\nTotal: ${formatRupiah(grandTotal)}${draftStatusWarning}`,
+        mode === 'draft'
+          ? 'Draft Berhasil Tersimpan'
+          : usingCustomerDeposit
+            ? (customerDepositAutoPaid ? 'Order & Saldo Berhasil Diproses' : 'Order Berhasil Dibuat')
+            : 'Order Berhasil Diproses',
+        [
+          `Order backend ID: ${backendOrderId}`,
+          `Invoice: ${invoiceNo}`,
+          `Total: ${formatRupiah(grandTotal)}`,
+          usingCustomerDeposit
+            ? (customerDepositAutoPaid
+              ? `Pembayaran saldo customer berhasil. Saldo terbaru: ${formatRupiah(customerDepositBalanceAfterPayment || 0)}.`
+              : `Order dibuat, tetapi pembayaran saldo customer belum berhasil: ${customerDepositAutoPayWarning || 'cek invoice pelanggan.'}`)
+            : null,
+        ].filter(Boolean).join('\n') + draftStatusWarning,
         resetTransaction,
       );
       loadDraftInvoices();
-      return { ok: true, backendOrderId, invoiceNo, receipt: created?.receipt || null };
+      return {
+        ok: true,
+        backendOrderId,
+        invoiceNo,
+        receipt: created?.receipt || null,
+        customerDepositAutoPaid,
+        customerDepositAutoPayWarning,
+      };
     } catch (error) {
       const status = Number(error?.status || 0);
       const shouldQueue = status === 0 || status >= 500 || /network|fetch|timeout|Failed to fetch/i.test(String(error?.message || ''));
 
       if (shouldQueue) {
+        if (mode === 'process' && usingCustomerDeposit) {
+          openNotice(
+            'Saldo Pelanggan Butuh Online',
+            'Proses order dengan saldo pelanggan tidak bisa diantrikan offline karena saldo harus dipotong langsung dari backend.',
+          );
+          return null;
+        }
         if (mode === 'process') {
           setAuditLogs(
             appendOrderAuditLog({
@@ -7151,15 +7430,21 @@ const SalesScreen = ({ currentUser, onLogout }) => {
           notes: paymentNotes || null,
           items: cartItems.map((item) => enforceDesignFirstFlow(item.backendItem)),
           payment: {
-            transaction_type: isDraftMode ? 'unpaid' : transactionType,
+            transaction_type: isDraftMode
+              ? 'unpaid'
+              : usingCustomerDeposit
+                ? 'unpaid'
+                : transactionType,
             method,
-            ...(!isDraftMode ? { bank_account_id: bankAccountId || null } : {}),
+            ...(!isDraftMode && !usingCustomerDeposit ? { bank_account_id: bankAccountId || null } : {}),
             amount: roundMoney(
               isDraftMode
                 ? 0
-                : transactionType === 'full'
-                  ? grandTotal
-                  : paidAmount,
+                : usingCustomerDeposit
+                  ? 0
+                  : transactionType === 'full'
+                    ? grandTotal
+                    : paidAmount,
             ),
             note: paymentNotes || null,
             paid_at: new Date().toISOString(),
@@ -7278,6 +7563,10 @@ const SalesScreen = ({ currentUser, onLogout }) => {
 
   const resolveAutoPaymentAccountId = async (methodLabel) => {
     const currentMethod = mapPaymentMethodToBackend(methodLabel);
+    if (currentMethod === 'customer_deposit') {
+      setSelectedBankAccountId(null);
+      return 0;
+    }
     const options = await loadPaymentAccountOptionsForMethod(methodLabel);
     if (options.length === 0) {
       openNotice(
@@ -7300,9 +7589,163 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     return selectedId;
   };
 
+  const loadCustomerDepositBalance = async (customerId) => {
+    const resolvedCustomerId = Number(customerId || 0);
+    if (!(resolvedCustomerId > 0) || !backendReady) {
+      setCustomerDepositBalance(0);
+      setLoadingDepositBalance(false);
+      return 0;
+    }
+
+    setLoadingDepositBalance(true);
+    try {
+      const payload = await getCustomerDepositBalance(resolvedCustomerId);
+      const balance = extractCustomerDepositBalance(payload);
+      setCustomerDepositBalance(balance);
+      return balance;
+    } catch (error) {
+      throw error;
+    } finally {
+      setLoadingDepositBalance(false);
+    }
+  };
+
+  const loadDepositAccountOptions = async (methodLabel, options = {}) => {
+    const normalizedMethod = normalizePaymentMethodLabel(methodLabel || 'Cash');
+    if (options?.updateLoading !== false) {
+      setLoadingDepositAccounts(true);
+    }
+    try {
+      const rows = await loadPaymentAccountOptionsForMethod(normalizedMethod);
+      setDepositAccountOptions(rows);
+      setDepositPaymentMethod(normalizedMethod);
+      setDepositAccountId(Number(rows[0]?.id || 0) || null);
+      return rows;
+    } finally {
+      if (options?.updateLoading !== false) {
+        setLoadingDepositAccounts(false);
+      }
+    }
+  };
+
+  const resetDepositModalForm = () => {
+    setDepositDate(formatIsoDate(new Date()));
+    setDepositAmount('');
+    setDepositPaymentMethod('Cash');
+    setDepositAccountId(null);
+    setDepositReferenceNo('');
+    setDepositNotes('');
+    setDepositAccountOptions([]);
+    setLoadingDepositAccounts(false);
+  };
+
+  const openDepositModal = async () => {
+    const customerId = Number(selectedCustomerId || 0);
+    if (!(customerId > 0)) {
+      openNotice(CUSTOMER_DEPOSIT_TOP_UP_TITLE, 'Pilih customer dulu.');
+      return;
+    }
+
+    resetDepositModalForm();
+    setDepositModalVisible(true);
+    try {
+      await Promise.all([
+        loadDepositAccountOptions('Cash'),
+        loadCustomerDepositBalance(customerId).catch(() => 0),
+      ]);
+    } catch (error) {
+      openNotice(CUSTOMER_DEPOSIT_TOP_UP_TITLE, `Gagal memuat akun top up: ${error.message}`);
+    }
+  };
+
+  const closeDepositModal = () => {
+    if (submittingDepositTopUp) {
+      return;
+    }
+    setDepositModalVisible(false);
+    resetDepositModalForm();
+  };
+
+  const handleChangeCheckoutPaymentMethod = async (value) => {
+    const normalized = normalizePaymentMethodLabel(value);
+    setPaymentMethod(normalized);
+    if (isCustomerDepositPaymentMethod(normalized)) {
+      const customerId = Number(selectedCustomerId || 0);
+      if (customerId > 0) {
+        await loadCustomerDepositBalance(customerId).catch(() => roundMoney(Number(customerDepositBalance || 0)));
+      }
+    }
+  };
+
+  const submitDepositTopUp = async () => {
+    const customerId = Number(selectedCustomerId || 0);
+    const topUpDate = String(depositDate || '').trim();
+    const amount = roundMoney(parseCurrencyInput(depositAmount));
+    const method = normalizePaymentMethodLabel(depositPaymentMethod);
+    const sourceAccountId = Number(depositAccountId || 0);
+    if (!(customerId > 0)) {
+      openNotice(CUSTOMER_DEPOSIT_TOP_UP_TITLE, 'Customer wajib dipilih.');
+      return;
+    }
+    if (!topUpDate) {
+      openNotice(CUSTOMER_DEPOSIT_TOP_UP_TITLE, 'Tanggal top up wajib diisi.');
+      return;
+    }
+    if (!isValidIsoDateText(topUpDate)) {
+      openNotice(CUSTOMER_DEPOSIT_TOP_UP_TITLE, 'Format tanggal top up harus YYYY-MM-DD.');
+      return;
+    }
+    if (amount <= 0) {
+      openNotice(CUSTOMER_DEPOSIT_TOP_UP_TITLE, 'Nominal top up wajib lebih dari nol.');
+      return;
+    }
+    if (!method || !PAYMENT_METHOD_LABELS.includes(method)) {
+      openNotice(CUSTOMER_DEPOSIT_TOP_UP_TITLE, 'Metode pembayaran wajib dipilih.');
+      return;
+    }
+    if (!(sourceAccountId > 0)) {
+      openNotice(CUSTOMER_DEPOSIT_TOP_UP_TITLE, 'Pilih akun kas / bank sumber dana terlebih dahulu.');
+      return;
+    }
+
+    setSubmittingDepositTopUp(true);
+    try {
+      const payload = {
+        amount,
+        payment_method: mapPaymentMethodToBackend(method),
+        received_at: `${topUpDate}T00:00:00`,
+        reference_no: String(depositReferenceNo || '').trim() || undefined,
+        notes: String(depositNotes || '').trim() || undefined,
+        bank_account_id: sourceAccountId,
+      };
+      const result = await topUpCustomerDeposit(customerId, payload);
+      const nextBalance = extractCustomerDepositBalance(result);
+      setCustomerDepositBalance(nextBalance);
+      setDepositModalVisible(false);
+      resetDepositModalForm();
+      const refreshedBalance = await loadCustomerDepositBalance(customerId).catch(() => nextBalance);
+      openNotice(
+        CUSTOMER_DEPOSIT_TOP_UP_TITLE,
+        `Top up tanggal ${topUpDate} berhasil. Dana masuk sudah tercatat dan saldo customer sekarang ${formatRupiah(refreshedBalance)}.`,
+        null,
+        { autoCloseMs: 2200 },
+      );
+    } catch (error) {
+      openNotice(CUSTOMER_DEPOSIT_TOP_UP_TITLE, formatBackendValidationError(error));
+    } finally {
+      setSubmittingDepositTopUp(false);
+    }
+  };
+
   const handleOpenReceivablePaymentModal = async (row) => {
     const invoiceId = Number(row?.invoice?.id || 0);
     const dueTotal = roundMoney(Number(row?.invoice?.due_total || 0));
+    const customerId = Number(
+      row?.customer?.id
+      || row?.customer_id
+      || row?.invoice?.customer_id
+      || 0,
+    );
     if (!(invoiceId > 0) || dueTotal <= 0) {
       openNotice('Piutang Pelanggan', 'Invoice ini tidak memiliki sisa piutang untuk dibayar.');
       return;
@@ -7313,11 +7756,14 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       orderId: Number(row?.id || 0),
       invoiceId,
       invoiceNo: String(row?.invoice?.invoice_no || '-'),
+      customerId,
       customerName: String(row?.customer?.name || 'Pelanggan umum'),
       customerPhone: String(row?.customer?.phone || '').trim(),
       dueTotal,
       amount: String(Math.max(0, dueTotal)),
       method: 'Cash',
+      customerDepositBalance: 0,
+      isLoadingDepositBalance: customerId > 0,
       selectedAccountId: null,
       accountOptions: [],
       isLoadingAccounts: true,
@@ -7325,11 +7771,18 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     });
 
     try {
-      const options = await loadPaymentAccountOptionsForMethod('Cash');
+      const [options, depositBalance] = await Promise.all([
+        loadPaymentAccountOptionsForMethod('Cash'),
+        customerId > 0
+          ? getCustomerDepositBalance(customerId).then(extractCustomerDepositBalance).catch(() => 0)
+          : Promise.resolve(0),
+      ]);
       if (options.length === 0) {
         setReceivablePaymentModal((prev) => ({
           ...prev,
           isLoadingAccounts: false,
+          isLoadingDepositBalance: false,
+          customerDepositBalance: depositBalance,
           accountOptions: [],
           selectedAccountId: null,
         }));
@@ -7339,6 +7792,8 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       setReceivablePaymentModal((prev) => ({
         ...prev,
         isLoadingAccounts: false,
+        isLoadingDepositBalance: false,
+        customerDepositBalance: depositBalance,
         accountOptions: options,
         selectedAccountId: Number(options[0]?.id || 0) || null,
       }));
@@ -7346,6 +7801,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       setReceivablePaymentModal((prev) => ({
         ...prev,
         isLoadingAccounts: false,
+        isLoadingDepositBalance: false,
       }));
       openNotice('Piutang Pelanggan', `Gagal memuat akun pembayaran: ${error.message}`);
     }
@@ -7363,6 +7819,34 @@ const SalesScreen = ({ currentUser, onLogout }) => {
 
   const handleChangeReceivablePaymentMethod = async (value) => {
     const nextMethod = normalizePaymentMethodLabel(value);
+    if (isCustomerDepositPaymentMethod(nextMethod)) {
+      const customerId = Number(receivablePaymentModal.customerId || 0);
+      setReceivablePaymentModal((prev) => ({
+        ...prev,
+        method: nextMethod,
+        amount: String(Math.max(0, roundMoney(Number(prev.dueTotal || 0)))),
+        isLoadingAccounts: false,
+        isLoadingDepositBalance: customerId > 0,
+        selectedAccountId: null,
+        accountOptions: [],
+      }));
+      if (customerId > 0) {
+        try {
+          const latestBalance = await getCustomerDepositBalance(customerId).then(extractCustomerDepositBalance);
+          setReceivablePaymentModal((prev) => ({
+            ...prev,
+            customerDepositBalance: latestBalance,
+            isLoadingDepositBalance: false,
+          }));
+        } catch (_error) {
+          setReceivablePaymentModal((prev) => ({
+            ...prev,
+            isLoadingDepositBalance: false,
+          }));
+        }
+      }
+      return;
+    }
     setReceivablePaymentModal((prev) => ({
       ...prev,
       method: nextMethod,
@@ -7391,7 +7875,10 @@ const SalesScreen = ({ currentUser, onLogout }) => {
   const handleSubmitReceivablePayment = async () => {
     const invoiceId = Number(receivablePaymentModal.invoiceId || 0);
     const accountId = Number(receivablePaymentModal.selectedAccountId || 0);
-    const amount = roundMoney(parseCurrencyInput(receivablePaymentModal.amount));
+    const usingDeposit = isCustomerDepositPaymentMethod(receivablePaymentModal.method);
+    const amount = usingDeposit
+      ? roundMoney(Number(receivablePaymentModal.dueTotal || 0))
+      : roundMoney(parseCurrencyInput(receivablePaymentModal.amount));
     const dueTotal = roundMoney(Number(receivablePaymentModal.dueTotal || 0));
 
     if (!(invoiceId > 0)) {
@@ -7406,7 +7893,11 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       openNotice('Piutang Pelanggan', 'Nominal pembayaran melebihi sisa piutang pelanggan.');
       return;
     }
-    if (!(accountId > 0)) {
+    if (usingDeposit && roundMoney(Number(receivablePaymentModal.customerDepositBalance || 0)) < dueTotal) {
+      openNotice('Piutang Pelanggan', 'Saldo pelanggan tidak cukup.');
+      return;
+    }
+    if (!usingDeposit && !(accountId > 0)) {
       openNotice('Piutang Pelanggan', 'Pilih akun pembayaran terlebih dahulu.');
       return;
     }
@@ -7416,13 +7907,18 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       isSubmitting: true,
     }));
     try {
-      await createPosInvoicePayment(invoiceId, {
-        method: mapPaymentMethodToBackend(receivablePaymentModal.method),
-        bank_account_id: accountId,
+      const backendMethod = mapReceivablePaymentMethodToBackend(receivablePaymentModal.method);
+      const paymentPayload = {
+        method: backendMethod,
+        payment_method: backendMethod,
         amount,
         transaction_type: amount >= dueTotal ? 'pelunasan' : 'angsuran',
         paid_at: new Date().toISOString(),
-      });
+      };
+      if (!usingDeposit && accountId > 0) {
+        paymentPayload.bank_account_id = accountId;
+      }
+      await createPosInvoicePayment(invoiceId, paymentPayload);
       setReceivablePaymentModal((prev) => ({
         ...prev,
         visible: false,
@@ -7430,6 +7926,11 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       }));
       await loadDraftInvoices();
       await loadClosingWorkspace(closingReportDate);
+      if (usingDeposit && Number(receivablePaymentModal.customerId || 0) > 0) {
+        if (Number(selectedCustomerId || 0) === Number(receivablePaymentModal.customerId || 0)) {
+          await loadCustomerDepositBalance(receivablePaymentModal.customerId).catch(() => {});
+        }
+      }
       openNotice(
         'Piutang Pelanggan',
         `Pembayaran piutang untuk ${receivablePaymentModal.customerName} sebesar ${formatRupiah(amount)} berhasil dicatat.`,
@@ -7464,9 +7965,11 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       return false;
     }
 
-    const bankId = await resolveAutoPaymentAccountId(validation.canonicalMethodLabel);
-    if (!(bankId > 0)) {
-      return false;
+    if (!isCustomerDepositPaymentMethod(validation.canonicalMethodLabel)) {
+      const bankId = await resolveAutoPaymentAccountId(validation.canonicalMethodLabel);
+      if (!(bankId > 0)) {
+        return false;
+      }
     }
     setIsOrderPreviewOpen(true);
     return true;
@@ -7487,9 +7990,11 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       return false;
     }
 
-    const bankId = await resolveAutoPaymentAccountId(validation.canonicalMethodLabel);
-    if (!(bankId > 0)) {
-      return false;
+    if (!isCustomerDepositPaymentMethod(validation.canonicalMethodLabel)) {
+      const bankId = await resolveAutoPaymentAccountId(validation.canonicalMethodLabel);
+      if (!(bankId > 0)) {
+        return false;
+      }
     }
 
     setIsProcessOrderDetailOpen(true);
@@ -7506,12 +8011,16 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       return;
     }
 
-    const bankId = await resolveAutoPaymentAccountId(paymentMethod);
-    if (!(bankId > 0)) {
-      return;
+    const usingDeposit = isCustomerDepositPaymentMethod(paymentMethod);
+    let bankId = 0;
+    if (!usingDeposit) {
+      bankId = await resolveAutoPaymentAccountId(paymentMethod);
+      if (!(bankId > 0)) {
+        return;
+      }
     }
 
-    const result = await submitTransaction('process', { bankAccountId: bankId });
+    const result = await submitTransaction('process', usingDeposit ? {} : { bankAccountId: bankId });
     if (result?.ok) {
       setIsProcessOrderDetailOpen(false);
     }
@@ -7568,16 +8077,20 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       await handleCopyOrderSnapshot(snapshot, 'Salin Pesanan');
       return;
     }
-    const bankId = await resolveAutoPaymentAccountId(paymentMethod);
-    if (!(bankId > 0)) {
-      return;
+    const usingDeposit = isCustomerDepositPaymentMethod(paymentMethod);
+    let bankId = 0;
+    if (!usingDeposit) {
+      bankId = await resolveAutoPaymentAccountId(paymentMethod);
+      if (!(bankId > 0)) {
+        return;
+      }
     }
     const shouldPrint = action === 'print';
     const shouldCopyInvoice = action === 'copy_invoice';
     const snapshot = (shouldPrint || shouldCopyInvoice) ? buildOrderPreviewSnapshot() : null;
     try {
       setIsOrderPreviewSubmitting(true);
-      const result = await submitTransaction('process', { bankAccountId: bankId });
+      const result = await submitTransaction('process', usingDeposit ? {} : { bankAccountId: bankId });
       if (result?.ok) {
         const verification = snapshot
           ? await verifySubmittedOrderAgainstPreview(snapshot, result)
@@ -8704,8 +9217,54 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       minute: '2-digit',
     }),
   });
-  const orderPreviewReceiptText = renderReceiptText(orderPreviewReceiptData, activePrinterProfile);
-  const thermalPreviewWidth = activePrinterProfile?.paperWidth === '58mm' ? 280 : 360;
+  let orderPreviewReceiptText = '';
+  let orderPreviewProfile = activePrinterProfile;
+  try {
+    orderPreviewReceiptText = renderReceiptText(orderPreviewReceiptData, activePrinterProfile);
+  } catch (_error) {
+    orderPreviewProfile = getDefaultPrinterProfile();
+    orderPreviewReceiptText = renderReceiptText(orderPreviewReceiptData, orderPreviewProfile);
+  }
+  const thermalPreviewWidth = orderPreviewProfile?.paperWidth === '58mm' ? 280 : 360;
+
+  if (isPreparingApp) {
+    return (
+      <View style={styles.screen}>
+        <View style={styles.topBlueLine} />
+        <View style={styles.bootstrapScreen}>
+          <View style={styles.loadingCard}>
+            <ActivityIndicator size="small" color="#2f64ef" />
+            <Text style={styles.loadingTitle}>Sedang Menyiapkan Data</Text>
+            <Text style={styles.loadingMessage}>{prepareMessage}</Text>
+          </View>
+        </View>
+      </View>
+    );
+  }
+
+  if (!backendReady) {
+    return (
+      <View style={styles.screen}>
+        <View style={styles.topBlueLine} />
+        <View style={styles.bootstrapScreen}>
+          <View style={styles.loadingCard}>
+            <Text style={styles.loadingTitle}>POS Belum Siap</Text>
+            <Text style={styles.loadingMessage}>
+              {prepareMessage || `Backend belum merespons. Base URL: ${getApiBaseUrl()}`}
+            </Text>
+            <View style={styles.popupActions}>
+              <Pressable style={styles.popupButton} onPress={bootstrapApp}>
+                <Text style={styles.popupButtonText}>Coba Lagi</Text>
+              </Pressable>
+              <Pressable style={[styles.popupButton, styles.popupButtonSecondary]} onPress={() => onLogout?.()}>
+                <Text style={[styles.popupButtonText, styles.popupButtonTextSecondary]}>Kembali</Text>
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      </View>
+    );
+  }
 
   return (
     <View style={styles.screen}>
@@ -8803,10 +9362,14 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                   transactionDate={transactionDate}
                   customers={customers}
                   selectedCustomerId={selectedCustomerId}
+                  selectedCustomer={selectedCustomer}
                   onSelectCustomerId={setSelectedCustomerId}
                   customerTypes={customerTypes}
                   onCreateCustomer={handleCreateCustomer}
                   backendReady={backendReady}
+                  customerDepositBalance={customerDepositBalance}
+                  onPressDeposit={openDepositModal}
+                  loadingDepositBalance={loadingDepositBalance}
                 />
 
                 <View style={styles.tagihanPanel}>
@@ -8890,12 +9453,14 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                 }}
                 grandTotal={grandTotal}
                 paymentMethod={paymentMethod}
-                paymentMethodOptions={PAYMENT_METHOD_LABELS}
+                paymentMethodOptions={CHECKOUT_PAYMENT_METHOD_LABELS}
+                disabledPaymentMethodOptions={selectedCustomerId ? [] : [CUSTOMER_DEPOSIT_PAYMENT_LABEL]}
                 paymentMethodHelperText={paymentMethodHelperText}
-                onChangePaymentMethod={(value) => setPaymentMethod(normalizePaymentMethodLabel(value))}
+                onChangePaymentMethod={handleChangeCheckoutPaymentMethod}
                 paymentStatus={paymentStatus}
                 paymentAmount={paymentAmount}
                 onChangePaymentAmount={handleChangePaymentAmount}
+                paymentAmountEditable={!isCustomerDepositPaymentMethod(paymentMethod)}
                 changeAmount={changeAmount}
                 paymentNotes={paymentNotes}
                 onChangePaymentNotes={setPaymentNotes}
@@ -9986,7 +10551,9 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                   styles.previewFlowBadge,
                   mapPaymentMethodToBackend(orderPreviewSnapshot.paymentMethod) === 'cash'
                     ? styles.previewFlowBadgeCash
-                    : styles.previewFlowBadgeNonCash,
+                    : isCustomerDepositPaymentMethod(orderPreviewSnapshot.paymentMethod)
+                      ? styles.previewFlowBadgeDeposit
+                      : styles.previewFlowBadgeNonCash,
                 ]}
               >
                 <Text
@@ -9994,10 +10561,16 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                     styles.previewFlowBadgeText,
                     mapPaymentMethodToBackend(orderPreviewSnapshot.paymentMethod) === 'cash'
                       ? styles.previewFlowBadgeTextCash
+                      : isCustomerDepositPaymentMethod(orderPreviewSnapshot.paymentMethod)
+                        ? styles.previewFlowBadgeTextDeposit
                       : styles.previewFlowBadgeTextNonCash,
                   ]}
                 >
-                  {mapPaymentMethodToBackend(orderPreviewSnapshot.paymentMethod) === 'cash' ? 'TUNAI FISIK' : 'MASUK REKENING'}
+                  {mapPaymentMethodToBackend(orderPreviewSnapshot.paymentMethod) === 'cash'
+                    ? 'TUNAI FISIK'
+                    : isCustomerDepositPaymentMethod(orderPreviewSnapshot.paymentMethod)
+                      ? 'SALDO CUSTOMER'
+                      : 'MASUK REKENING'}
                 </Text>
               </View>
               {String(orderPreviewSnapshot.paymentTargetName || '').trim() ? (
@@ -10007,7 +10580,9 @@ const SalesScreen = ({ currentUser, onLogout }) => {
               ) : null}
             </View>
             <Text style={styles.popupMessage}>
-              Akan masuk ke akun {mapPaymentMethodToBackend(orderPreviewSnapshot.paymentMethod) === 'cash' ? 'kas' : 'pembayaran'}: {orderPreviewSnapshot.paymentTargetName || '-'}
+              {isCustomerDepositPaymentMethod(orderPreviewSnapshot.paymentMethod)
+                ? `Order akan dibuat dulu lalu invoice dibayar penuh memakai ${orderPreviewSnapshot.paymentTargetName || 'saldo customer'}.`
+                : `Akan masuk ke akun ${mapPaymentMethodToBackend(orderPreviewSnapshot.paymentMethod) === 'cash' ? 'kas' : 'pembayaran'}: ${orderPreviewSnapshot.paymentTargetName || '-'}`}
             </Text>
 
             <ScrollView style={styles.processOrderItemList} contentContainerStyle={styles.processOrderItemListContent}>
@@ -10220,6 +10795,160 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       </Modal>
 
       <Modal
+        visible={depositModalVisible}
+        transparent
+        animationType="fade"
+        onRequestClose={closeDepositModal}
+      >
+        <View style={styles.popupBackdrop}>
+          <View style={[styles.popupCard, styles.bankPickerCard]}>
+            <Text style={styles.popupTitle}>{CUSTOMER_DEPOSIT_TOP_UP_TITLE}</Text>
+            <Text style={styles.popupMessage}>Customer: {selectedCustomer?.name || 'Pilih customer'}</Text>
+            <Text style={styles.popupMessage}>Saldo saat ini: {formatRupiah(customerDepositBalance || 0)}</Text>
+            <Text style={styles.depositModalNotice}>
+              Dana transfer customer masuk dulu ke rekening atau kas sumber, lalu backend mencatatnya sebagai dana penampung sebelum diauto-allocate ke saldo customer. Nilai ini tidak menambah omzet order baru.
+            </Text>
+
+            <View style={styles.receivablePaymentForm}>
+              <Text style={styles.reportInputLabel}>Tanggal Top Up</Text>
+              <TextInput
+                value={depositDate}
+                onChangeText={setDepositDate}
+                placeholder="YYYY-MM-DD"
+                placeholderTextColor="#6c7485"
+                style={[
+                  styles.reportInput,
+                  !isDepositDateValid && String(depositDate || '').trim() ? styles.depositInputError : null,
+                ]}
+                editable={!submittingDepositTopUp}
+              />
+              <Text style={!isDepositDateValid && String(depositDate || '').trim() ? styles.depositErrorText : styles.receivableHelperText}>
+                Gunakan format `YYYY-MM-DD` agar mutasi deposit tercatat di tanggal top up yang benar.
+              </Text>
+
+              <Text style={styles.reportInputLabel}>Nominal Top Up</Text>
+              <TextInput
+                value={depositAmount}
+                onChangeText={(value) => setDepositAmount(sanitizeCurrencyInput(value))}
+                keyboardType="numeric"
+                placeholder="0"
+                placeholderTextColor="#6c7485"
+                style={styles.reportInput}
+                editable={!submittingDepositTopUp}
+              />
+
+              <Text style={styles.reportInputLabel}>Metode Pembayaran</Text>
+              <View style={styles.methodQuickRowWrap}>
+                {PAYMENT_METHOD_LABELS.map((option) => {
+                  const active = String(option) === String(depositPaymentMethod || '');
+                  return (
+                    <Pressable
+                      key={`deposit-method-${option}`}
+                      style={[styles.receivableMethodChip, active ? styles.receivableMethodChipActive : null]}
+                        disabled={submittingDepositTopUp || loadingDepositAccounts}
+                        onPress={async () => {
+                          try {
+                            await loadDepositAccountOptions(option);
+                          } catch (error) {
+                            openNotice(CUSTOMER_DEPOSIT_TOP_UP_TITLE, `Gagal memuat akun top up: ${error.message}`);
+                          }
+                        }}
+                    >
+                      <Text style={[styles.receivableMethodChipText, active ? styles.receivableMethodChipTextActive : null]}>
+                        {option}
+                      </Text>
+                    </Pressable>
+                  );
+                })}
+              </View>
+
+              <Text style={styles.reportInputLabel}>Akun Kas / Bank Sumber Dana</Text>
+              <Text style={styles.receivableHelperText}>{depositTopUpHelperText}</Text>
+              {loadingDepositAccounts ? (
+                <View style={styles.bankPickerLoadingWrap}>
+                  <ActivityIndicator size="small" color="#2f64ef" />
+                  <Text style={styles.loadingMessage}>Memuat akun top up...</Text>
+                </View>
+              ) : (
+                <>
+                  <ScrollView style={styles.bankPickerList}>
+                    {depositAccountOptions.map((row, index) => {
+                      const rowId = Number(row?.id || 0);
+                      const active = rowId > 0 && rowId === Number(depositAccountId || 0);
+                      return (
+                        <Pressable
+                          key={`deposit-account-${rowId || index}`}
+                          style={[styles.bankPickerItem, active ? styles.bankPickerItemActive : null]}
+                          onPress={() => setDepositAccountId(rowId || null)}
+                        >
+                          <Text style={styles.bankPickerItemTitle}>
+                            {row?.displayTitle || row?.displayName || `Akun #${rowId}`}
+                          </Text>
+                          {row?.displaySubtitle ? (
+                            <Text style={styles.bankPickerItemMeta}>{row.displaySubtitle}</Text>
+                          ) : null}
+                          {row?.displayDetail ? (
+                            <Text style={styles.bankPickerItemDetail}>{row.displayDetail}</Text>
+                          ) : null}
+                        </Pressable>
+                      );
+                    })}
+                  </ScrollView>
+                  {depositAccountOptions.length === 0 ? (
+                    <Text style={styles.depositOptionalText}>
+                      Belum ada akun yang cocok. Top up belum bisa disimpan sebelum akun kas / bank sumber dana tersedia.
+                    </Text>
+                  ) : null}
+                </>
+              )}
+
+              <Text style={styles.reportInputLabel}>Nomor Referensi</Text>
+              <TextInput
+                value={depositReferenceNo}
+                onChangeText={setDepositReferenceNo}
+                placeholder="Opsional"
+                placeholderTextColor="#6c7485"
+                style={styles.reportInput}
+                editable={!submittingDepositTopUp}
+              />
+
+              <Text style={styles.reportInputLabel}>Catatan</Text>
+              <TextInput
+                value={depositNotes}
+                onChangeText={setDepositNotes}
+                placeholder="Opsional"
+                placeholderTextColor="#6c7485"
+                multiline
+                numberOfLines={3}
+                textAlignVertical="top"
+                style={[styles.reportInput, styles.reportTextarea]}
+                editable={!submittingDepositTopUp}
+              />
+            </View>
+
+            <View style={styles.popupActions}>
+              <Pressable
+                style={[styles.popupButton, styles.popupButtonSecondary]}
+                disabled={submittingDepositTopUp}
+                onPress={closeDepositModal}
+              >
+                <Text style={[styles.popupButtonText, styles.popupButtonTextSecondary]}>Tutup</Text>
+              </Pressable>
+              <Pressable
+                style={styles.popupButton}
+                disabled={isDepositSubmitDisabled}
+                onPress={submitDepositTopUp}
+              >
+                <Text style={styles.popupButtonText}>
+                  {submittingDepositTopUp ? 'Menyimpan...' : 'Simpan Top Up'}
+                </Text>
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      <Modal
         visible={receivablePaymentModal.visible}
         transparent
         animationType="fade"
@@ -10238,15 +10967,27 @@ const SalesScreen = ({ currentUser, onLogout }) => {
             <View style={styles.receivablePaymentForm}>
               <Text style={styles.reportInputLabel}>Metode Bayar</Text>
               <View style={styles.methodQuickRowWrap}>
-                {PAYMENT_METHOD_LABELS.map((option) => {
+                {RECEIVABLE_PAYMENT_METHOD_LABELS.map((option) => {
                   const active = String(option) === String(receivablePaymentModal.method || '');
+                  const disabled = option === CUSTOMER_DEPOSIT_PAYMENT_LABEL && !(Number(receivablePaymentModal.customerId || 0) > 0);
                   return (
                     <Pressable
                       key={`receivable-method-${option}`}
-                      style={[styles.receivableMethodChip, active ? styles.receivableMethodChipActive : null]}
+                      style={[
+                        styles.receivableMethodChip,
+                        active ? styles.receivableMethodChipActive : null,
+                        disabled ? styles.receivableMethodChipDisabled : null,
+                      ]}
+                      disabled={disabled || receivablePaymentModal.isSubmitting}
                       onPress={() => handleChangeReceivablePaymentMethod(option)}
                     >
-                      <Text style={[styles.receivableMethodChipText, active ? styles.receivableMethodChipTextActive : null]}>
+                      <Text
+                        style={[
+                          styles.receivableMethodChipText,
+                          active ? styles.receivableMethodChipTextActive : null,
+                          disabled ? styles.receivableMethodChipTextDisabled : null,
+                        ]}
+                      >
                         {option}
                       </Text>
                     </Pressable>
@@ -10254,6 +10995,21 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                 })}
               </View>
               <Text style={styles.receivableHelperText}>{receivablePaymentHelperText}</Text>
+              {isCustomerDepositPaymentMethod(receivablePaymentModal.method) ? (
+                <>
+                  <Text style={styles.receivableDepositInfo}>
+                    Saldo Pelanggan Tersedia:{' '}
+                    {receivablePaymentModal.isLoadingDepositBalance
+                      ? 'Memuat...'
+                      : formatRupiah(receivablePaymentModal.customerDepositBalance || 0)}
+                  </Text>
+                  {receivableDepositShortage ? (
+                    <View style={styles.reportWarningBox}>
+                      <Text style={styles.reportWarningText}>Saldo pelanggan tidak cukup.</Text>
+                    </View>
+                  ) : null}
+                </>
+              ) : null}
 
               <Text style={styles.reportInputLabel}>Nominal Bayar</Text>
               <TextInput
@@ -10262,42 +11018,50 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                 keyboardType="numeric"
                 placeholder="0"
                 placeholderTextColor="#6c7485"
-                style={styles.reportInput}
+                style={[
+                  styles.reportInput,
+                  isCustomerDepositPaymentMethod(receivablePaymentModal.method) ? styles.reportInputReadonly : null,
+                ]}
+                editable={!isCustomerDepositPaymentMethod(receivablePaymentModal.method)}
               />
 
-              <Text style={styles.reportInputLabel}>
-                {mapPaymentMethodToBackend(receivablePaymentModal.method) === 'cash' ? 'Akun Kas' : 'Akun / Rekening Tujuan'}
-              </Text>
-              {receivablePaymentModal.isLoadingAccounts ? (
-                <View style={styles.bankPickerLoadingWrap}>
-                  <ActivityIndicator size="small" color="#2f64ef" />
-                  <Text style={styles.loadingMessage}>Memuat akun pembayaran...</Text>
-                </View>
-              ) : (
-                <ScrollView style={styles.bankPickerList}>
-                  {(Array.isArray(receivablePaymentModal.accountOptions) ? receivablePaymentModal.accountOptions : []).map((row, index) => {
-                    const rowId = Number(row?.id || 0);
-                    const active = rowId > 0 && rowId === Number(receivablePaymentModal.selectedAccountId || 0);
-                    return (
-                      <Pressable
-                        key={`receivable-account-${rowId || index}`}
-                        style={[styles.bankPickerItem, active ? styles.bankPickerItemActive : null]}
-                        onPress={() => setReceivablePaymentModal((prev) => ({ ...prev, selectedAccountId: rowId }))}
-                      >
-                        <Text style={styles.bankPickerItemTitle}>
-                          {row?.displayTitle || row?.displayName || `Akun #${rowId}`}
-                        </Text>
-                        {row?.displaySubtitle ? (
-                          <Text style={styles.bankPickerItemMeta}>{row.displaySubtitle}</Text>
-                        ) : null}
-                        {row?.displayDetail ? (
-                          <Text style={styles.bankPickerItemDetail}>{row.displayDetail}</Text>
-                        ) : null}
-                      </Pressable>
-                    );
-                  })}
-                </ScrollView>
-              )}
+              {!isCustomerDepositPaymentMethod(receivablePaymentModal.method) ? (
+                <>
+                  <Text style={styles.reportInputLabel}>
+                    {mapPaymentMethodToBackend(receivablePaymentModal.method) === 'cash' ? 'Akun Kas' : 'Akun / Rekening Tujuan'}
+                  </Text>
+                  {receivablePaymentModal.isLoadingAccounts ? (
+                    <View style={styles.bankPickerLoadingWrap}>
+                      <ActivityIndicator size="small" color="#2f64ef" />
+                      <Text style={styles.loadingMessage}>Memuat akun pembayaran...</Text>
+                    </View>
+                  ) : (
+                    <ScrollView style={styles.bankPickerList}>
+                      {(Array.isArray(receivablePaymentModal.accountOptions) ? receivablePaymentModal.accountOptions : []).map((row, index) => {
+                        const rowId = Number(row?.id || 0);
+                        const active = rowId > 0 && rowId === Number(receivablePaymentModal.selectedAccountId || 0);
+                        return (
+                          <Pressable
+                            key={`receivable-account-${rowId || index}`}
+                            style={[styles.bankPickerItem, active ? styles.bankPickerItemActive : null]}
+                            onPress={() => setReceivablePaymentModal((prev) => ({ ...prev, selectedAccountId: rowId }))}
+                          >
+                            <Text style={styles.bankPickerItemTitle}>
+                              {row?.displayTitle || row?.displayName || `Akun #${rowId}`}
+                            </Text>
+                            {row?.displaySubtitle ? (
+                              <Text style={styles.bankPickerItemMeta}>{row.displaySubtitle}</Text>
+                            ) : null}
+                            {row?.displayDetail ? (
+                              <Text style={styles.bankPickerItemDetail}>{row.displayDetail}</Text>
+                            ) : null}
+                          </Pressable>
+                        );
+                      })}
+                    </ScrollView>
+                  )}
+                </>
+              ) : null}
             </View>
 
             <View style={styles.popupActions}>
@@ -10310,7 +11074,11 @@ const SalesScreen = ({ currentUser, onLogout }) => {
               </Pressable>
               <Pressable
                 style={styles.popupButton}
-                disabled={receivablePaymentModal.isSubmitting}
+                disabled={
+                  receivablePaymentModal.isSubmitting
+                  || receivablePaymentModal.isLoadingDepositBalance
+                  || receivableDepositShortage
+                }
                 onPress={handleSubmitReceivablePayment}
               >
                 <Text style={styles.popupButtonText}>
@@ -10940,6 +11708,10 @@ const styles = StyleSheet.create({
     borderColor: '#2f64ef',
     backgroundColor: '#2f64ef',
   },
+  receivableMethodChipDisabled: {
+    borderColor: '#ccd3e1',
+    backgroundColor: '#eef1f6',
+  },
   receivableMethodChipText: {
     fontSize: 11,
     fontWeight: '700',
@@ -10948,10 +11720,41 @@ const styles = StyleSheet.create({
   receivableMethodChipTextActive: {
     color: '#ffffff',
   },
+  receivableMethodChipTextDisabled: {
+    color: '#7a8599',
+  },
   receivableHelperText: {
     fontSize: 10,
     lineHeight: 15,
     color: '#4e5b75',
+  },
+  receivableDepositInfo: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#1d6a3c',
+  },
+  depositModalNotice: {
+    marginTop: 4,
+    fontSize: 11,
+    lineHeight: 17,
+    color: '#5d4a12',
+    fontWeight: '700',
+  },
+  depositInputError: {
+    borderColor: '#c53b3b',
+    backgroundColor: '#fff5f5',
+  },
+  depositErrorText: {
+    fontSize: 10,
+    lineHeight: 15,
+    color: '#b42318',
+    fontWeight: '700',
+  },
+  depositOptionalText: {
+    marginTop: 8,
+    fontSize: 10,
+    lineHeight: 15,
+    color: '#5b6780',
   },
   reportDateInput: {
     minWidth: 160,
@@ -11370,6 +12173,13 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     padding: 16,
   },
+  bootstrapScreen: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 16,
+    backgroundColor: '#d9dadc',
+  },
   loadingCard: {
     width: '100%',
     maxWidth: 420,
@@ -11678,6 +12488,10 @@ const styles = StyleSheet.create({
     borderColor: '#a8c6f0',
     backgroundColor: '#eef4ff',
   },
+  previewFlowBadgeDeposit: {
+    borderColor: '#b8dfc7',
+    backgroundColor: '#f3fbf6',
+  },
   previewFlowBadgeText: {
     fontSize: 10,
     fontWeight: '800',
@@ -11688,6 +12502,9 @@ const styles = StyleSheet.create({
   },
   previewFlowBadgeTextNonCash: {
     color: '#1e4f99',
+  },
+  previewFlowBadgeTextDeposit: {
+    color: '#1d6a3c',
   },
   previewTargetBadge: {
     borderWidth: 1,

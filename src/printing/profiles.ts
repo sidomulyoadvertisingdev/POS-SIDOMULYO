@@ -71,9 +71,14 @@ export const resolveDefaultCharsPerLine = (paperWidth: PaperWidth): number => {
 };
 
 export const normalizePrinterProfile = (profile: PrinterProfile): PrinterProfile => {
-  const charsPerLine = Number(profile.charsPerLine || 0) || DEFAULT_CHARS_PER_LINE[profile.paperWidth || 'custom'];
+  const rawPaperWidth = String(profile?.paperWidth || '').trim();
+  const paperWidth: PaperWidth = ['58mm', '80mm', 'custom'].includes(rawPaperWidth)
+    ? rawPaperWidth as PaperWidth
+    : (profile?.type === 'browser' ? 'custom' : '80mm');
+  const charsPerLine = Number(profile?.charsPerLine || 0) || DEFAULT_CHARS_PER_LINE[paperWidth];
   return {
     ...profile,
+    paperWidth,
     charsPerLine,
     port: profile.port || (profile.connection === 'lan' || profile.connection === 'wifi' ? 9100 : profile.port),
   };

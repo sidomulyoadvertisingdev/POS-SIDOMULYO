@@ -28,6 +28,7 @@ npm-debug.*
 yarn-debug.*
 yarn-error.*
 package-lock.before-regenerate.json
+.expo-*.log
 
 # macOS
 .DS_Store

@@ -37,10 +37,14 @@ const TransactionHeader = ({
   transactionDate,
   customers,
   selectedCustomerId,
+  selectedCustomer: selectedCustomerProp,
   onSelectCustomerId,
   customerTypes,
   onCreateCustomer,
   backendReady,
+  customerDepositBalance = 0,
+  onPressDeposit,
+  loadingDepositBalance = false,
 }) => {
   const [isCustomerModalOpen, setIsCustomerModalOpen] = useState(false);
   const [customerSearch, setCustomerSearch] = useState('');
@@ -55,8 +59,8 @@ const TransactionHeader = ({
   const [formCustomerTypeId, setFormCustomerTypeId] = useState(null);
 
   const selectedCustomer = useMemo(
-    () => (customers || []).find((row) => Number(row.id) === Number(selectedCustomerId)) || null,
-    [customers, selectedCustomerId],
+    () => selectedCustomerProp || (customers || []).find((row) => Number(row.id) === Number(selectedCustomerId)) || null,
+    [customers, selectedCustomerId, selectedCustomerProp],
   );
 
   const selectedType = useMemo(
@@ -163,29 +167,66 @@ const TransactionHeader = ({
 
         <View style={styles.row}>
           <Text style={styles.label}>Customer</Text>
-          <Pressable
-            style={[styles.selector, !backendReady ? styles.selectorDisabled : null]}
-            onPress={() => setIsCustomerModalOpen(true)}
-            disabled={!backendReady}
-          >
-            <View>
-              <Text style={styles.selectorText}>
-                {selectedCustomer?.name || 'Pilih customer'}
-              </Text>
-              {selectedCustomer ? (
-                <Text style={styles.selectorHintText}>
-                  {resolveCustomerTypeLabel(selectedCustomer)}
+          <View style={styles.customerField}>
+            <View style={styles.customerActionRow}>
+              <Pressable
+                style={[styles.selector, !backendReady ? styles.selectorDisabled : null]}
+                onPress={() => setIsCustomerModalOpen(true)}
+                disabled={!backendReady}
+              >
+                <View>
+                  <Text style={styles.selectorText}>
+                    {selectedCustomer?.name || 'Pilih customer'}
+                  </Text>
+                  {selectedCustomer ? (
+                    <Text style={styles.selectorHintText}>
+                      {resolveCustomerTypeLabel(selectedCustomer)}
+                    </Text>
+                  ) : null}
+                </View>
+              </Pressable>
+              <Pressable
+                style={[styles.addButton, !backendReady ? styles.selectorDisabled : null]}
+                onPress={() => setIsCreateModalOpen(true)}
+                disabled={!backendReady}
+              >
+                <Text style={styles.addButtonText}>+</Text>
+              </Pressable>
+              <Pressable
+                style={[
+                  styles.depositButton,
+                  (!backendReady || !selectedCustomer) ? styles.depositButtonDisabled : null,
+                ]}
+                onPress={() => onPressDeposit?.()}
+                disabled={!backendReady || !selectedCustomer}
+              >
+                <Text
+                  style={[
+                    styles.depositButtonText,
+                    (!backendReady || !selectedCustomer) ? styles.depositButtonTextDisabled : null,
+                  ]}
+                >
+                  Deposit
                 </Text>
-              ) : null}
+              </Pressable>
             </View>
-          </Pressable>
-          <Pressable
-            style={[styles.addButton, !backendReady ? styles.selectorDisabled : null]}
-            onPress={() => setIsCreateModalOpen(true)}
-            disabled={!backendReady}
-          >
-            <Text style={styles.addButtonText}>+</Text>
-          </Pressable>
+
+            {selectedCustomer ? (
+              <View style={styles.depositMetaRow}>
+                <View style={styles.depositBadge}>
+                  {loadingDepositBalance ? (
+                    <ActivityIndicator size="small" color="#1d6a3c" />
+                  ) : (
+                    <Text style={styles.depositBadgeText}>
+                      Saldo Customer: Rp {Number(customerDepositBalance || 0).toLocaleString('id-ID')}
+                    </Text>
+                  )}
+                </View>
+              </View>
+            ) : (
+              <Text style={styles.helperText}>Pilih customer dulu untuk cek saldo dan top up</Text>
+            )}
+          </View>
         </View>
 
         <View style={styles.row}>
@@ -381,7 +422,7 @@ const styles = StyleSheet.create({
   },
   row: {
     flexDirection: 'row',
-    alignItems: 'center',
+    alignItems: 'flex-start',
     gap: 8,
   },
   label: {
@@ -389,6 +430,16 @@ const styles = StyleSheet.create({
     fontSize: 12,
     color: '#2b2b2b',
     fontWeight: '600',
+    paddingTop: 6,
+  },
+  customerField: {
+    flex: 1,
+    gap: 6,
+  },
+  customerActionRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
   },
   value: {
     flex: 1,
@@ -435,6 +486,50 @@ const styles = StyleSheet.create({
     fontSize: 16,
     lineHeight: 16,
     fontWeight: '800',
+  },
+  depositButton: {
+    borderWidth: 1,
+    borderColor: '#1d7a45',
+    backgroundColor: '#ecf8f0',
+    minHeight: 26,
+    paddingHorizontal: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  depositButtonDisabled: {
+    borderColor: '#c4cad5',
+    backgroundColor: '#eef1f5',
+  },
+  depositButtonText: {
+    color: '#1d6a3c',
+    fontSize: 11,
+    fontWeight: '800',
+  },
+  depositButtonTextDisabled: {
+    color: '#7b8798',
+  },
+  depositMetaRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  depositBadge: {
+    borderWidth: 1,
+    borderColor: '#b8dfc7',
+    backgroundColor: '#f3fbf6',
+    minHeight: 28,
+    paddingHorizontal: 9,
+    paddingVertical: 5,
+    justifyContent: 'center',
+  },
+  depositBadgeText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#1d6a3c',
+  },
+  helperText: {
+    fontSize: 10,
+    color: '#6a7485',
+    fontWeight: '700',
   },
   modalBackdrop: {
     flex: 1,

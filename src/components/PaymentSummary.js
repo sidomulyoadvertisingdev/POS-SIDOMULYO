@@ -12,9 +12,11 @@ const PaymentSummary = ({
   paymentMethodHelperText,
   onChangePaymentMethod,
   paymentMethodOptions,
+  disabledPaymentMethodOptions = [],
   paymentStatus,
   paymentAmount,
   onChangePaymentAmount,
+  paymentAmountEditable = true,
   changeAmount,
   paymentNotes,
   onChangePaymentNotes,
@@ -29,10 +31,15 @@ const PaymentSummary = ({
   const methodOptions = Array.isArray(paymentMethodOptions) && paymentMethodOptions.length > 0
     ? paymentMethodOptions
     : ['Cash', 'Transfer', 'QRIS', 'Card'];
+  const disabledOptions = Array.isArray(disabledPaymentMethodOptions)
+    ? disabledPaymentMethodOptions.map((value) => String(value))
+    : [];
   const normalizedMethod = String(paymentMethod || '').trim().toLowerCase();
   const paymentFlowBadge = normalizedMethod === 'cash'
     ? { label: 'Tunai Fisik', tone: 'cash' }
-    : { label: 'Masuk Rekening', tone: 'noncash' };
+    : normalizedMethod === 'saldo pelanggan'
+      ? { label: 'Settlement Saldo', tone: 'wallet' }
+      : { label: 'Masuk Rekening', tone: 'noncash' };
 
   return (
     <View style={styles.wrapper}>
@@ -80,13 +87,25 @@ const PaymentSummary = ({
               <View style={styles.methodQuickRow}>
                 {methodOptions.map((option) => {
                   const active = String(option) === String(paymentMethod || '');
+                  const disabled = disabledOptions.includes(String(option));
                   return (
                     <Pressable
                       key={`quick-${String(option)}`}
-                      style={[styles.methodQuickChip, active ? styles.methodQuickChipActive : null]}
+                      style={[
+                        styles.methodQuickChip,
+                        active ? styles.methodQuickChipActive : null,
+                        disabled ? styles.methodQuickChipDisabled : null,
+                      ]}
+                      disabled={disabled}
                       onPress={() => onChangePaymentMethod?.(String(option))}
                     >
-                      <Text style={[styles.methodQuickChipText, active ? styles.methodQuickChipTextActive : null]}>
+                      <Text
+                        style={[
+                          styles.methodQuickChipText,
+                          active ? styles.methodQuickChipTextActive : null,
+                          disabled ? styles.methodQuickChipTextDisabled : null,
+                        ]}
+                      >
                         {String(option)}
                       </Text>
                     </Pressable>
@@ -99,6 +118,8 @@ const PaymentSummary = ({
                     styles.paymentFlowBadge,
                     paymentFlowBadge.tone === 'cash'
                       ? styles.paymentFlowBadgeCash
+                      : paymentFlowBadge.tone === 'wallet'
+                        ? styles.paymentFlowBadgeWallet
                       : styles.paymentFlowBadgeNonCash,
                   ]}
                 >
@@ -107,6 +128,8 @@ const PaymentSummary = ({
                       styles.paymentFlowBadgeText,
                       paymentFlowBadge.tone === 'cash'
                         ? styles.paymentFlowBadgeTextCash
+                        : paymentFlowBadge.tone === 'wallet'
+                          ? styles.paymentFlowBadgeTextWallet
                         : styles.paymentFlowBadgeTextNonCash,
                     ]}
                   >
@@ -132,7 +155,8 @@ const PaymentSummary = ({
               onChangeText={onChangePaymentAmount}
               keyboardType="numeric"
               placeholder="0"
-              style={styles.input}
+              style={[styles.input, !paymentAmountEditable ? styles.inputReadonly : null]}
+              editable={paymentAmountEditable}
             />
           </View>
 
@@ -181,16 +205,24 @@ const PaymentSummary = ({
             <ScrollView style={styles.modalList}>
               {methodOptions.map((option) => {
                 const active = String(option) === String(paymentMethod || '');
+                const disabled = disabledOptions.includes(String(option));
                 return (
                   <Pressable
                     key={String(option)}
-                    style={[styles.modalItem, active ? styles.modalItemActive : null]}
+                    style={[
+                      styles.modalItem,
+                      active ? styles.modalItemActive : null,
+                      disabled ? styles.modalItemDisabled : null,
+                    ]}
+                    disabled={disabled}
                     onPress={() => {
                       onChangePaymentMethod?.(String(option));
                       setIsPaymentMethodModalOpen(false);
                     }}
                   >
-                    <Text style={styles.modalItemText}>{String(option)}</Text>
+                    <Text style={[styles.modalItemText, disabled ? styles.modalItemTextDisabled : null]}>
+                      {String(option)}
+                    </Text>
                   </Pressable>
                 );
               })}
@@ -291,6 +323,10 @@ const styles = StyleSheet.create({
     borderColor: '#2250c9',
     backgroundColor: '#2f64ef',
   },
+  methodQuickChipDisabled: {
+    borderColor: '#ccd3e1',
+    backgroundColor: '#eef1f6',
+  },
   methodQuickChipText: {
     fontSize: 11,
     fontWeight: '700',
@@ -298,6 +334,9 @@ const styles = StyleSheet.create({
   },
   methodQuickChipTextActive: {
     color: '#ffffff',
+  },
+  methodQuickChipTextDisabled: {
+    color: '#7a8599',
   },
   paymentFlowBadgeRow: {
     flexDirection: 'row',
@@ -316,6 +355,10 @@ const styles = StyleSheet.create({
     borderColor: '#a8c6f0',
     backgroundColor: '#eef4ff',
   },
+  paymentFlowBadgeWallet: {
+    borderColor: '#b8dfc7',
+    backgroundColor: '#f3fbf6',
+  },
   paymentFlowBadgeText: {
     fontSize: 10,
     fontWeight: '800',
@@ -327,10 +370,17 @@ const styles = StyleSheet.create({
   paymentFlowBadgeTextNonCash: {
     color: '#1e4f99',
   },
+  paymentFlowBadgeTextWallet: {
+    color: '#1d6a3c',
+  },
   paymentMethodHelperText: {
     fontSize: 10,
     lineHeight: 15,
     color: '#43506a',
+  },
+  inputReadonly: {
+    backgroundColor: '#eef1f6',
+    color: '#5a6578',
   },
   notesInput: {
     minHeight: 60,
@@ -422,10 +472,16 @@ const styles = StyleSheet.create({
   modalItemActive: {
     backgroundColor: '#e4ecff',
   },
+  modalItemDisabled: {
+    backgroundColor: '#f3f4f6',
+  },
   modalItemText: {
     fontSize: 12,
     fontWeight: '700',
     color: '#1f1f1f',
+  },
+  modalItemTextDisabled: {
+    color: '#8a94a6',
   },
   modalActions: {
     flexDirection: 'row',
