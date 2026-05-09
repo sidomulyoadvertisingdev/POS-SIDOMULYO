@@ -60,7 +60,7 @@ jobs:
               Invoke-WebRequest -Uri $url -OutFile (Join-Path $outputDir $name) -TimeoutSec 120
               Write-Host "Restored $name"
             } catch {
-              Write-Warning "Skip restore $name: $($_.Exception.Message)"
+              Write-Warning "Skip restore ${name}: $($_.Exception.Message)"
             }
           }
 
@@ -80,7 +80,7 @@ jobs:
               Invoke-WebRequest -Uri $url -OutFile $destination -TimeoutSec 600
               Write-Host "Restored $fileName"
             } catch {
-              Write-Warning "Skip restore $fileName: $($_.Exception.Message)"
+              Write-Warning "Skip restore ${fileName}: $($_.Exception.Message)"
             }
           }
 
