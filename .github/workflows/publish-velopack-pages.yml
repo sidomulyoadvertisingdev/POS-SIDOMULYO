@@ -45,6 +45,45 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Restore previous Velopack releases
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $baseUrl = 'https://sidomulyoadvertisingdev.github.io/POS-SIDOMULYO'
+          $outputDir = Join-Path $PWD 'release/velopack'
+          New-Item -ItemType Directory -Force -Path $outputDir | Out-Null
+
+          $metadataFiles = @('releases.win.json', 'RELEASES', 'assets.win.json')
+          foreach ($name in $metadataFiles) {
+            $url = "$baseUrl/$name"
+            try {
+              Invoke-WebRequest -Uri $url -OutFile (Join-Path $outputDir $name) -TimeoutSec 120
+              Write-Host "Restored $name"
+            } catch {
+              Write-Warning "Skip restore $name: $($_.Exception.Message)"
+            }
+          }
+
+          $releaseJsonPath = Join-Path $outputDir 'releases.win.json'
+          if (-not (Test-Path $releaseJsonPath)) {
+            Write-Host 'No existing releases.win.json found. Build will continue with fresh release metadata.'
+            exit 0
+          }
+
+          $releaseJson = Get-Content $releaseJsonPath -Raw | ConvertFrom-Json
+          $assetNames = @($releaseJson.Assets | ForEach-Object { $_.FileName } | Where-Object { $_ })
+
+          foreach ($fileName in $assetNames) {
+            $url = "$baseUrl/$fileName"
+            $destination = Join-Path $outputDir $fileName
+            try {
+              Invoke-WebRequest -Uri $url -OutFile $destination -TimeoutSec 600
+              Write-Host "Restored $fileName"
+            } catch {
+              Write-Warning "Skip restore $fileName: $($_.Exception.Message)"
+            }
+          }
+
       - name: Build GitHub Pages site
         run: npm run build:pages
 
