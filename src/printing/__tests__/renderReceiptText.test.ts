@@ -155,3 +155,45 @@ test('renderReceiptText keeps payment summary lines consistent with discount and
   assert.match(output, /20\.000/);
   assert.match(output, /Sisa/);
 });
+
+test('renderReceiptText can render production work order without payment section', () => {
+  const profile = createPrinterProfile({
+    id: 'test-spk',
+    name: 'Thermal SPK',
+    type: 'thermal_escpos',
+    connection: 'qz_tray',
+    paperWidth: '58mm',
+    charsPerLine: 32,
+  });
+  const spkReceipt: ReceiptData = {
+    ...receipt,
+    store: {
+      ...receipt.store,
+      title: 'SPK PRODUKSI',
+    },
+    payment: undefined,
+    layout: {
+      showPaymentDetail: false,
+    },
+    detail: {
+      ...receipt.detail,
+      footerNotes: [
+        'Estimasi: -',
+        'Prioritas: Normal',
+        'Checklist Produksi',
+        '[ ] Desain / brief siap',
+        'TTD Produksi: ____________',
+      ],
+      thankYouText: 'SPK PRODUKSI',
+    },
+  };
+
+  const output = renderReceiptText(spkReceipt, profile);
+  output.trimEnd().split('\n').forEach((line) => {
+    assert.ok(line.length <= 32);
+  });
+  assert.match(output, /SPK PRODUKSI/);
+  assert.match(output, /Checklist Produksi/);
+  assert.match(output, /TTD Produksi/);
+  assert.doesNotMatch(output, /Pembayaran/);
+});

@@ -5,16 +5,15 @@ const resolveDefaultApiBaseUrl = () => {
 };
 
 const ONLINE_ERP_API_BASE_URL = 'https://dashboard.sidomulyoproject.com/api';
+const LOCAL_ERP_API_BASE_URL = 'http://127.0.0.1:8000/api';
+const FORCE_LOCAL_ERP_API = false;
 
 const resolveRuntimeApiBaseUrl = (configuredUrl) => {
-  const normalizedConfiguredUrl = String(configuredUrl || '').trim();
-  const hostname = String(globalThis?.location?.hostname || '').trim().toLowerCase();
-  const isLocalRuntime = hostname === 'localhost' || hostname === '127.0.0.1';
-
-  if (isLocalRuntime && normalizedConfiguredUrl === ONLINE_ERP_API_BASE_URL) {
-    return resolveDefaultApiBaseUrl();
+  if (FORCE_LOCAL_ERP_API) {
+    return LOCAL_ERP_API_BASE_URL;
   }
 
+  const normalizedConfiguredUrl = String(configuredUrl || '').trim();
   return normalizedConfiguredUrl || resolveDefaultApiBaseUrl();
 };
 
@@ -316,9 +315,15 @@ export const fetchPosMaterials = async () => {
   return toDataList(payload);
 };
 
-export const fetchPosCustomers = async (search = '') => {
+export const fetchPosCustomers = async (search = '', options = {}) => {
   await ensureAuthenticated();
-  const query = search ? `?per_page=500&search=${encodeURIComponent(search)}` : '?per_page=500';
+  const requestedPerPage = Number(options?.perPage || 0);
+  const perPage = Number.isFinite(requestedPerPage) && requestedPerPage > 0
+    ? Math.min(Math.max(Math.trunc(requestedPerPage), 1), 500)
+    : 500;
+  const query = search
+    ? `?per_page=${perPage}&search=${encodeURIComponent(search)}`
+    : `?per_page=${perPage}`;
   const payload = await request(`/pos/customers${query}`);
   return toDataList(payload);
 };

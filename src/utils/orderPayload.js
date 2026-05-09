@@ -53,7 +53,7 @@ export const mapPaymentMethodToBackend = (paymentMethod) => {
   if (['cash', 'tunai'].includes(text)) {
     return 'cash';
   }
-  if (['transfer', 'bank transfer'].includes(text)) {
+  if (['transfer', 'bank transfer', 'transfer bank'].includes(text)) {
     return 'transfer';
   }
   if (['qris', 'qr', 'qris payment'].includes(text)) {
@@ -62,7 +62,7 @@ export const mapPaymentMethodToBackend = (paymentMethod) => {
   if (['card', 'kartu', 'debit', 'credit card'].includes(text)) {
     return 'card';
   }
-  return 'cash';
+  return text || 'cash';
 };
 
 export const mapPaymentMethodToBankAccountId = (paymentMethod) => {

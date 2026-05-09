@@ -5,6 +5,8 @@ import CartList from '../components/CartList';
 import PaymentSummary from '../components/PaymentSummary';
 import ProductForm from '../components/ProductForm';
 import ProductionPanel from '../components/ProductionPanel';
+import SuccessAnimation from '../components/SuccessAnimation';
+import SyncLoadingAnimation from '../components/SyncLoadingAnimation';
 import TransactionHeader from '../components/TransactionHeader';
 import { formatRupiah } from '../utils/currency';
 import {
@@ -316,6 +318,79 @@ const formatMeterNumber = (value) => {
   const num = toPositiveNumber(value);
   if (num <= 0) return '';
   return num.toFixed(4).replace(/\.?0+$/, '');
+};
+const formatComponentQtyText = (qty, unit = '') => {
+  const num = Number(qty);
+  if (!Number.isFinite(num) || num <= 0) return '-';
+  const formatted = num % 1 === 0 ? String(num) : num.toFixed(4).replace(/\.?0+$/, '');
+  const suffix = String(unit || '').trim();
+  return suffix ? `${formatted} ${suffix}` : formatted;
+};
+const formatBundleDimensionText = (widthMm, heightMm) => {
+  const widthMeter = toPositiveNumber(widthMm) / 1000;
+  const heightMeter = toPositiveNumber(heightMm) / 1000;
+  if (widthMeter <= 0 || heightMeter <= 0) {
+    return '';
+  }
+  return `${formatMeterNumber(widthMeter)} x ${formatMeterNumber(heightMeter)} m`;
+};
+const normalizeBundleComponentRows = (rows = []) => {
+  if (!Array.isArray(rows)) {
+    return [];
+  }
+  return rows
+    .map((row, index) => {
+      const deductionMode = String(row?.deduction_mode || '').trim().toLowerCase();
+      const widthMm = Number(row?.internal_width_mm || row?.input_width_mm || 0) || 0;
+      const heightMm = Number(row?.internal_height_mm || row?.input_height_mm || 0) || 0;
+      const sizeText = formatBundleDimensionText(widthMm, heightMm);
+      const usageSummary = String(row?.usage_summary || '').trim();
+      const qtyText = usageSummary || formatComponentQtyText(row?.qty_deducted, row?.unit);
+      const detailParts = [];
+
+      if (deductionMode === 'mirror_material_usage') {
+        detailParts.push('Potong ikut ukuran aktual');
+        if (sizeText) {
+          detailParts.push(`Ukuran ${sizeText}`);
+        }
+        if (!usageSummary && Number(row?.material_usage_qty || 0) > 0) {
+          detailParts.push(`Terpakai ${formatComponentQtyText(row?.material_usage_qty, row?.calc_unit)}`);
+        }
+      } else if (deductionMode === 'fixed_per_order') {
+        detailParts.push('Komponen tetap per order');
+      } else if (deductionMode === 'fixed_per_qty') {
+        detailParts.push('Komponen tetap per qty');
+      }
+
+      return {
+        key: String(row?.id || `bundle-${index}`),
+        name: toLabel(row?.component_name, row?.component_sku, `Komponen ${index + 1}`),
+        qtyText,
+        detailText: detailParts.join(' | '),
+        deductionMode,
+        isMainMaterial: deductionMode === 'mirror_material_usage',
+      };
+    })
+    .filter((row) => row.name);
+};
+const resolveCancellationSummaryText = (cancellation) => {
+  const source = cancellation && typeof cancellation === 'object' ? cancellation : null;
+  if (!source) {
+    return '';
+  }
+  const activeMethods = Array.isArray(source.active_payment_methods)
+    ? source.active_payment_methods.map((item) => String(item || '').trim()).filter(Boolean)
+    : [];
+  if (source.reason === 'already_cancelled') {
+    return 'Order sudah dibatalkan.';
+  }
+  if (Boolean(source.requires_refund)) {
+    return `Perlu refund terpisah${activeMethods.length > 0 ? ` (${activeMethods.join(', ')})` : ''}.`;
+  }
+  if (Boolean(source.can_cancel)) {
+    return 'Bisa auto-cancel selama belum ada pembayaran kas/bank aktif.';
+  }
+  return '';
 };
 const parseCurrencyInput = (value) => {
   const digits = sanitizeCurrencyInput(value);
@@ -1116,6 +1191,13 @@ const hasSyncStatusChanged = (previousMeta = {}, nextStatus = null) => {
     || toSyncVersionValue(previousMeta?.pricesVersion) !== toSyncVersionValue(nextStatus?.pricesVersion)
     || toSyncVersionValue(previousMeta?.stocksVersion) !== toSyncVersionValue(nextStatus?.stocksVersion)
   );
+};
+const hasSyncVersionChanged = (previousMeta = {}, nextStatus = null, key = '') => {
+  const normalizedKey = String(key || '').trim();
+  if (!normalizedKey || !nextStatus) {
+    return false;
+  }
+  return toSyncVersionValue(previousMeta?.[normalizedKey]) !== toSyncVersionValue(nextStatus?.[normalizedKey]);
 };
 const buildCatalogMaterialNameMap = (rows) => {
   const materialNameMap = {};
@@ -2751,11 +2833,61 @@ const resolveSelectedMaterialWarning = (usedMaterialInfo, productName = '') => {
   }
   return buildSelectedMaterialLowStockWarning(usedMaterialInfo, productName);
 };
-const PAYMENT_METHOD_LABELS = ['Cash', 'Transfer', 'QRIS', 'Card'];
+const PAYMENT_METHOD_LABELS = ['Cash', 'Transfer Bank', 'QRIS', 'Card / Debit / Credit'];
 const CUSTOMER_DEPOSIT_PAYMENT_LABEL = 'Saldo Pelanggan';
 const CUSTOMER_DEPOSIT_TOP_UP_TITLE = 'Top Up Saldo Customer';
-const CHECKOUT_PAYMENT_METHOD_LABELS = [...PAYMENT_METHOD_LABELS, CUSTOMER_DEPOSIT_PAYMENT_LABEL];
-const RECEIVABLE_PAYMENT_METHOD_LABELS = [...PAYMENT_METHOD_LABELS, CUSTOMER_DEPOSIT_PAYMENT_LABEL];
+const DEFAULT_PAYMENT_METHOD_CONFIGS = [
+  {
+    id: 0,
+    code: 'cash',
+    type: 'cash',
+    name: 'Cash',
+    isDefault: true,
+    requiresPaymentAccount: true,
+    isAvailable: true,
+    accounts: [],
+  },
+  {
+    id: 0,
+    code: 'bank_transfer',
+    type: 'bank_transfer',
+    name: 'Transfer Bank',
+    isDefault: false,
+    requiresPaymentAccount: true,
+    isAvailable: true,
+    accounts: [],
+  },
+  {
+    id: 0,
+    code: 'qris',
+    type: 'qris',
+    name: 'QRIS',
+    isDefault: false,
+    requiresPaymentAccount: true,
+    isAvailable: true,
+    accounts: [],
+  },
+  {
+    id: 0,
+    code: 'card',
+    type: 'card',
+    name: 'Card / Debit / Credit',
+    isDefault: false,
+    requiresPaymentAccount: true,
+    isAvailable: true,
+    accounts: [],
+  },
+  {
+    id: 0,
+    code: 'customer_balance',
+    type: 'customer_balance',
+    name: CUSTOMER_DEPOSIT_PAYMENT_LABEL,
+    isDefault: false,
+    requiresPaymentAccount: false,
+    isAvailable: true,
+    accounts: [],
+  },
+];
 const DEFAULT_CASH_FLOW_QUICK_CATEGORIES = {
   expense: [
     'Beli ATK',
@@ -2826,9 +2958,9 @@ const normalizeReceiptSettings = (value = null) => {
 const normalizePaymentMethodLabel = (value) => {
   const text = normalizeText(value);
   if (['cash', 'tunai'].includes(text)) return 'Cash';
-  if (['transfer', 'bank transfer'].includes(text)) return 'Transfer';
+  if (['transfer', 'bank transfer', 'transfer bank', 'bank_transfer'].includes(text)) return 'Transfer Bank';
   if (['qris', 'qr'].includes(text)) return 'QRIS';
-  if (['card', 'kartu', 'debit', 'credit card'].includes(text)) return 'Card';
+  if (['card', 'kartu', 'debit', 'credit card', 'edc'].includes(text)) return 'Card / Debit / Credit';
   if (['saldo pelanggan', 'deposit customer', 'customer deposit', 'customer_deposit', 'deposit'].includes(text)) return CUSTOMER_DEPOSIT_PAYMENT_LABEL;
   return value;
 };
@@ -2836,10 +2968,178 @@ const isCustomerDepositPaymentMethod = (value) => normalizePaymentMethodLabel(va
 const mapReceivablePaymentMethodToBackend = (value) => (
   isCustomerDepositPaymentMethod(value) ? 'customer_deposit' : mapPaymentMethodToBackend(value)
 );
+const normalizePaymentMethodType = (value) => {
+  const text = normalizeText(value);
+  if (['cash', 'tunai'].includes(text)) return 'cash';
+  if (['transfer', 'bank transfer', 'transfer bank', 'bank_transfer'].includes(text)) return 'bank_transfer';
+  if (['qris', 'qr'].includes(text)) return 'qris';
+  if (['card', 'kartu', 'debit', 'credit card', 'edc'].includes(text)) return 'card';
+  if (['saldo pelanggan', 'deposit customer', 'customer deposit', 'customer_deposit', 'deposit', 'customer_balance'].includes(text)) return 'customer_balance';
+  return text || 'custom';
+};
+const normalizePosPaymentMethodRow = (row) => {
+  const normalizedName = normalizePaymentMethodLabel(
+    row?.name
+    || row?.label
+    || row?.title
+    || row?.code
+    || ''
+  );
+  const type = normalizePaymentMethodType(row?.type || row?.code || normalizedName);
+  const accounts = Array.isArray(row?.accounts)
+    ? row.accounts.map((account) => ({
+      ...account,
+      payment_method_id: row?.id,
+      payment_method_code: row?.code,
+      payment_method_name: normalizedName,
+      payment_type: type,
+      type,
+    }))
+    : [];
+  return {
+    id: Number(row?.id || 0) || 0,
+    code: String(row?.code || '').trim().toLowerCase() || normalizePaymentMethodType(type),
+    type,
+    name: normalizedName || String(row?.name || row?.label || 'Metode Pembayaran').trim(),
+    isDefault: Boolean(row?.is_default),
+    isActive: row?.is_active !== false,
+    requiresPaymentAccount: Boolean(row?.requires_payment_account),
+    isAvailable: row?.is_available !== false,
+    availabilityMessage: String(row?.availability_message || '').trim(),
+    accounts,
+  };
+};
+const buildPaymentMethodConfigsFromAccountRows = (rows = []) => {
+  const grouped = new Map();
+
+  (Array.isArray(rows) ? rows : []).forEach((rawRow) => {
+    const accountRow = normalizeBankAccountRow(rawRow);
+    const methodId = Number(accountRow?.paymentMethodId || 0) || 0;
+    const methodCode = String(accountRow?.paymentMethodCode || '').trim().toLowerCase();
+    const methodName = normalizePaymentMethodLabel(
+      accountRow?.paymentMethodName
+      || accountRow?.payment_method_name
+      || accountRow?.paymentType
+      || accountRow?.payment_type
+      || methodCode
+      || ''
+    );
+    const methodType = normalizePaymentMethodType(
+      accountRow?.paymentType
+      || accountRow?.payment_type
+      || methodCode
+      || methodName
+    );
+    const groupKey = String(methodId > 0 ? `id:${methodId}` : `code:${methodCode || methodName}`);
+
+    if (!grouped.has(groupKey)) {
+      grouped.set(groupKey, {
+        id: methodId,
+        code: methodCode || methodType || 'custom',
+        type: methodType || 'custom',
+        name: methodName || 'Metode Pembayaran',
+        isDefault: methodType === 'cash',
+        isActive: true,
+        requiresPaymentAccount: methodType !== 'customer_balance',
+        isAvailable: true,
+        availabilityMessage: '',
+        accounts: [],
+      });
+    }
+
+    grouped.get(groupKey).accounts.push({
+      ...accountRow,
+      payment_method_id: methodId || null,
+      payment_method_code: methodCode || '',
+      payment_method_name: methodName,
+      payment_type: methodType || '',
+      type: methodType || '',
+    });
+  });
+
+  return Array.from(grouped.values())
+    .filter((row) => String(row?.name || '').trim() !== '')
+    .sort((a, b) => {
+      if (Boolean(a?.isDefault) !== Boolean(b?.isDefault)) {
+        return a?.isDefault ? -1 : 1;
+      }
+      return String(a?.name || '').localeCompare(String(b?.name || ''));
+    });
+};
+const resolvePaymentMethodsFromSettingsPayload = (payload) => {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+    return [];
+  }
+
+  return Array.isArray(payload?.payment_methods) && payload.payment_methods.length > 0
+    ? payload.payment_methods.map((row) => normalizePosPaymentMethodRow(row))
+    : [];
+};
+const getDefaultPaymentMethodConfigs = () => DEFAULT_PAYMENT_METHOD_CONFIGS.map((row) => ({ ...row, accounts: [] }));
+const findPaymentMethodConfig = (rows, value) => {
+  const normalizedLabel = normalizePaymentMethodLabel(value);
+  const normalizedType = normalizePaymentMethodType(value);
+  return (Array.isArray(rows) ? rows : []).find((row) => (
+    normalizePaymentMethodLabel(row?.name) === normalizedLabel
+    || normalizeText(row?.code) === normalizeText(value)
+    || normalizePaymentMethodType(row?.type || row?.code || row?.name) === normalizedType
+  )) || null;
+};
+const getPaymentMethodLabels = (rows, options = {}) => {
+  const includeUnavailable = options?.includeUnavailable === true;
+  return (Array.isArray(rows) ? rows : [])
+    .filter((row) => includeUnavailable || row?.isAvailable !== false)
+    .map((row) => String(row?.name || '').trim())
+    .filter(Boolean);
+};
+const getDefaultCheckoutPaymentMethodOptions = () => getPaymentMethodLabels(
+  getDefaultPaymentMethodConfigs(),
+  { includeUnavailable: true },
+);
 const humanizePaymentMethod = (value) => {
   const normalized = normalizePaymentMethodLabel(value);
   const text = String(normalized || '').trim();
   return text || 'Lainnya';
+};
+const resolveOrderPaymentMethodLabel = (row) => humanizePaymentMethod(
+  row?.payment?.method
+  || row?.payment_method
+  || row?.invoice?.payment_method
+  || row?.payment?.payment_method
+  || '',
+);
+const resolveOrderPaymentTargetLabel = (row, accountRows = []) => {
+  const resolvedBankAccountId = Number(
+    row?.bank_account_id
+    || row?.invoice?.bank_account_id
+    || row?.payment?.bank_account_id
+    || row?.payment_debug?.last_payment_bank_account_id
+    || row?.payment_debug?.invoice_sales_bank_account_id
+    || 0
+  ) || 0;
+  const resolvedPaymentTarget = (Array.isArray(accountRows) ? accountRows : []).find((accountRow) => (
+    Number(accountRow?.id || 0) === resolvedBankAccountId
+    || Number(accountRow?.accountingAccountId || 0) === resolvedBankAccountId
+  )) || null;
+  const fallbackPaymentTargetName = [(
+    row?.payment_debug?.last_payment_bank_account_code
+    || row?.payment_debug?.invoice_sales_bank_account_code
+    || ''
+  ), (
+    row?.payment_debug?.last_payment_bank_account_name
+    || row?.payment_debug?.invoice_sales_bank_account_name
+    || ''
+  )]
+    .map((value) => String(value || '').trim())
+    .filter(Boolean)
+    .join(' - ');
+
+  return String(
+    resolvedPaymentTarget?.displayTitle
+    || resolvedPaymentTarget?.displayName
+    || fallbackPaymentTargetName
+    || ''
+  ).trim();
 };
 const toMoneyNumber = (value) => {
   const parsed = Number(String(value ?? '').replace(/,/g, ''));
@@ -2977,6 +3277,13 @@ const toDataRows = (payload) => {
 const normalizeBankAccountRow = (row) => {
   const id = Number(
     row?.id
+    || row?.payment_account_id
+    || row?.bank_account_id
+    || row?.account_id
+    || 0,
+  );
+  const accountingAccountId = Number(
+    row?.accounting_account_id
     || row?.bank_account_id
     || row?.account_id
     || 0,
@@ -3038,6 +3345,7 @@ const normalizeBankAccountRow = (row) => {
   return {
     ...row,
     id,
+    accountingAccountId,
     label,
     code,
     bankName,
@@ -3049,6 +3357,9 @@ const normalizeBankAccountRow = (row) => {
     displayDetail,
     displayName,
     paymentType,
+    paymentMethodId: Number(row?.payment_method_id || 0) || null,
+    paymentMethodCode: String(row?.payment_method_code || '').trim().toLowerCase() || '',
+    paymentMethodName: toLabel(row?.payment_method_name),
   };
 };
 const isDraftCandidate = (row) => {
@@ -3252,7 +3563,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
   const [discountPercent, setDiscountPercent] = useState('0');
   const [discountAmount, setDiscountAmount] = useState('0');
   const [discountMode, setDiscountMode] = useState('percent');
-  const [paymentMethod, setPaymentMethod] = useState('Cash');
+  const [selectedPaymentMethod, setSelectedPaymentMethod] = useState('');
   const [paymentAmount, setPaymentAmount] = useState('');
   const [paymentNotes, setPaymentNotes] = useState('');
   const [activeMenu, setActiveMenu] = useState('pos');
@@ -3342,11 +3653,14 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     actions: [],
     showDefaultAction: true,
     autoCloseMs: 0,
+    visual: 'default',
   });
   const [isOrderPreviewOpen, setIsOrderPreviewOpen] = useState(false);
   const [isOrderPreviewSubmitting, setIsOrderPreviewSubmitting] = useState(false);
-  const [isProcessOrderDetailOpen, setIsProcessOrderDetailOpen] = useState(false);
+  const [modalDetailPesanan, setModalDetailPesanan] = useState(false);
+  const [modalPilihPembayaran, setModalPilihPembayaran] = useState(false);
   const [posSettings, setPosSettings] = useState(DEFAULT_RECEIPT_SETTINGS);
+  const [paymentMethodConfigs, setPaymentMethodConfigs] = useState(() => getDefaultPaymentMethodConfigs());
   const [printerProfile, setPrinterProfile] = useState(() => loadStoredPrinterProfile() || getDefaultPrinterProfile());
   const [hasSavedPrinterProfile, setHasSavedPrinterProfile] = useState(() => Boolean(loadStoredPrinterProfile()));
   const [bankAccounts, setBankAccounts] = useState([]);
@@ -3363,6 +3677,26 @@ const SalesScreen = ({ currentUser, onLogout }) => {
   const [submittingDepositTopUp, setSubmittingDepositTopUp] = useState(false);
   const [depositAccountOptions, setDepositAccountOptions] = useState([]);
   const [loadingDepositAccounts, setLoadingDepositAccounts] = useState(false);
+  const paymentMethod = selectedPaymentMethod;
+  const setPaymentMethod = setSelectedPaymentMethod;
+  const checkoutPaymentMethodOptions = useMemo(
+    () => {
+      const labels = getPaymentMethodLabels(paymentMethodConfigs, { includeUnavailable: true });
+      return labels.length > 0 ? labels : getDefaultCheckoutPaymentMethodOptions();
+    },
+    [paymentMethodConfigs],
+  );
+  const enabledCheckoutPaymentMethodOptions = useMemo(
+    () => {
+      const labels = getPaymentMethodLabels(paymentMethodConfigs, { includeUnavailable: false });
+      return labels.length > 0 ? labels : getDefaultCheckoutPaymentMethodOptions();
+    },
+    [paymentMethodConfigs],
+  );
+  const selectedPaymentMethodConfig = useMemo(
+    () => findPaymentMethodConfig(paymentMethodConfigs, paymentMethod),
+    [paymentMethodConfigs, paymentMethod],
+  );
   const selectedBankAccountRow = useMemo(
     () => bankAccounts.find((row) => Number(row?.id || 0) === Number(selectedBankAccountId || 0)) || null,
     [bankAccounts, selectedBankAccountId],
@@ -3381,6 +3715,9 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     : checkoutDiscountFromPercentPreview;
   const checkoutGrandTotalPreview = Math.max(checkoutSubtotalPreview - checkoutFinalDiscountPreview, 0);
   const paymentMethodHelperText = useMemo(() => {
+    if (!String(paymentMethod || '').trim()) {
+      return 'Metode pembayaran dipilih saat klik Proses Order agar kasir tidak salah kirim ke metode default.';
+    }
     if (isCustomerDepositPaymentMethod(paymentMethod)) {
       const balance = roundMoney(Number(customerDepositBalance || 0));
       if (!(Number(selectedCustomerId || 0) > 0)) {
@@ -3391,7 +3728,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       }
       return `Saldo pelanggan tersedia ${formatRupiah(balance)}. Order akan dibuat dulu, lalu invoice langsung dibayar full-cover memakai saldo pelanggan tanpa menambah kas/bank baru.`;
     }
-    const method = mapPaymentMethodToBackend(paymentMethod);
+    const method = normalizePaymentMethodType(selectedPaymentMethodConfig?.type || selectedPaymentMethodConfig?.code || paymentMethod);
     const selectedAccountName = String(
       selectedBankAccountRow?.displayTitle
       || selectedBankAccountRow?.displayName
@@ -3419,7 +3756,21 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     return selectedAccountName
       ? `Pembayaran transfer akan otomatis dicatat ke rekening tujuan: ${selectedAccountName}.`
       : 'Pembayaran transfer akan otomatis dicatat ke rekening tujuan sesuai mapping backend.';
-  }, [checkoutGrandTotalPreview, customerDepositBalance, paymentMethod, selectedBankAccountRow, selectedCustomerId]);
+  }, [checkoutGrandTotalPreview, customerDepositBalance, paymentMethod, selectedBankAccountRow, selectedCustomerId, selectedPaymentMethodConfig]);
+  const processOrderSelectedMethodLabel = String(paymentMethod || '').trim() || 'Belum dipilih';
+  const processOrderSelectedAccountLabel = isCustomerDepositPaymentMethod(paymentMethod)
+    ? 'Saldo Customer'
+    : String(
+      selectedBankAccountRow?.displayTitle
+      || selectedBankAccountRow?.displayName
+      || ''
+    ).trim();
+  const processOrderNeedsAccountSelection = Boolean(
+    String(paymentMethod || '').trim()
+    && !isCustomerDepositPaymentMethod(paymentMethod)
+    && normalizePaymentMethodType(paymentMethod) !== 'cash'
+    && !processOrderSelectedAccountLabel
+  );
   const [receivablePaymentModal, setReceivablePaymentModal] = useState({
     visible: false,
     orderId: 0,
@@ -3447,7 +3798,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     if (isCustomerDepositPaymentMethod(receivablePaymentModal.method)) {
       return 'Pembayaran ini adalah settlement non-cash: saldo pelanggan berkurang dan tidak menambah kas/bank baru.';
     }
-    const method = mapPaymentMethodToBackend(receivablePaymentModal.method);
+    const method = normalizePaymentMethodType(findPaymentMethodConfig(paymentMethodConfigs, receivablePaymentModal.method)?.type || receivablePaymentModal.method);
     const selectedAccountName = String(
       selectedReceivableAccountRow?.displayTitle
       || selectedReceivableAccountRow?.displayName
@@ -3471,7 +3822,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     return selectedAccountName
       ? `Pelunasan transfer akan dicatat ke rekening tujuan: ${selectedAccountName}.`
       : 'Pelunasan transfer akan dicatat ke rekening tujuan yang dipilih.';
-  }, [receivablePaymentModal.method, selectedReceivableAccountRow]);
+  }, [paymentMethodConfigs, receivablePaymentModal.method, selectedReceivableAccountRow]);
   const depositTopUpHelperText = useMemo(() => {
     const selectedAccount = depositAccountOptions.find((row) => Number(row?.id || 0) === Number(depositAccountId || 0)) || null;
     const selectedAccountName = String(
@@ -3479,7 +3830,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       || selectedAccount?.displayName
       || ''
     ).trim();
-    const method = mapPaymentMethodToBackend(depositPaymentMethod);
+    const method = normalizePaymentMethodType(findPaymentMethodConfig(paymentMethodConfigs, depositPaymentMethod)?.type || depositPaymentMethod);
     if (selectedAccountName) {
       return `Dana masuk akan dicatat ke rekening/kas ${selectedAccountName}, lalu backend menyimpan receipt dana penampung sebelum dialokasikan ke saldo customer.`;
     }
@@ -3487,7 +3838,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       return 'Top up tunai wajib memilih akun kas sumber. Dana dicatat sebagai dana titipan customer pada tanggal yang dipilih, bukan omzet order baru.';
     }
     return 'Transfer customer wajib memilih rekening/bank sumber dana. Backend akan mencatat uang masuk ke dana penampung dulu, lalu mengalokasikannya ke saldo customer.';
-  }, [depositAccountId, depositAccountOptions, depositPaymentMethod]);
+  }, [depositAccountId, depositAccountOptions, depositPaymentMethod, paymentMethodConfigs]);
   const receivableDepositShortage = useMemo(() => {
     if (!isCustomerDepositPaymentMethod(receivablePaymentModal.method)) {
       return false;
@@ -3538,6 +3889,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     total: 0,
     createdAt: '-',
     pickedUpText: 'Belum diambil',
+    cancellationText: '',
     items: [],
     canPickup: false,
   });
@@ -3831,6 +4183,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       actions: [],
       showDefaultAction: options?.showDefaultAction !== false,
       autoCloseMs: Number(options?.autoCloseMs || 0),
+      visual: options?.visual === 'success' ? 'success' : 'default',
     });
   };
 
@@ -3843,6 +4196,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       actions: Array.isArray(actions) ? actions : [],
       showDefaultAction: options?.showDefaultAction !== false,
       autoCloseMs: Number(options?.autoCloseMs || 0),
+      visual: options?.visual === 'success' ? 'success' : 'default',
     });
   };
 
@@ -3863,6 +4217,34 @@ const SalesScreen = ({ currentUser, onLogout }) => {
   };
 
   const fetchMasterDataSnapshot = async () => {
+    const paymentAccountsPromise = fetchPosBankAccounts().catch(() => []);
+    const settingsResultPromise = fetchPosSettings()
+      .then((payload) => ({ payload, source: 'settings', warning: '' }))
+      .catch(async (error) => {
+        try {
+          const paymentAccountRows = await paymentAccountsPromise;
+          const inferredPaymentMethods = buildPaymentMethodConfigsFromAccountRows(paymentAccountRows);
+          if (inferredPaymentMethods.length > 0) {
+            return {
+              payload: {
+                payment_methods: inferredPaymentMethods,
+                default_payment_method: inferredPaymentMethods.find((row) => row?.isDefault)?.code || inferredPaymentMethods[0]?.code || 'cash',
+              },
+              source: 'payment_accounts_fallback',
+              warning: String(error?.message || 'Gagal memuat pengaturan POS backend.'),
+            };
+          }
+        } catch (_fallbackError) {
+          // lanjut ke fallback default lokal di bawah
+        }
+
+        return {
+          payload: null,
+          source: 'default_fallback',
+          warning: String(error?.message || 'Gagal memuat pengaturan POS backend.'),
+        };
+      });
+
     const [
       productsRows,
       finishingRows,
@@ -3870,16 +4252,41 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       productionMaterialsRows,
       customerRows,
       customerTypeRows,
-      posSettingsPayload,
+      paymentAccountRows,
+      posSettingsResult,
     ] = await Promise.all([
       fetchPosProducts(),
       fetchPosFinishings().catch(() => []),
-      fetchPosMaterials(),
+      fetchPosMaterials().catch(() => []),
       fetchPosProductionMaterials().catch(() => []),
-      fetchPosCustomers(),
+      fetchPosCustomers('', { perPage: 100 }).catch(() => []),
       fetchPosCustomerTypes().catch(() => []),
-      fetchPosSettings().catch(() => null),
+      paymentAccountsPromise,
+      settingsResultPromise,
     ]);
+
+    const posSettingsPayload = posSettingsResult?.payload ?? null;
+    const posSettingsSource = String(posSettingsResult?.source || 'settings');
+    const posSettingsWarning = String(posSettingsResult?.warning || '').trim();
+    const posPaymentDebug = posSettingsPayload?.payment_methods_debug && typeof posSettingsPayload.payment_methods_debug === 'object'
+      ? posSettingsPayload.payment_methods_debug
+      : null;
+    const posPaymentDebugWarning = String(posPaymentDebug?.warning || '').trim();
+    const settingsPaymentMethods = resolvePaymentMethodsFromSettingsPayload(posSettingsPayload);
+    const inferredPaymentMethods = buildPaymentMethodConfigsFromAccountRows(paymentAccountRows);
+    const effectivePaymentMethods = settingsPaymentMethods.length > 0
+      ? settingsPaymentMethods
+      : inferredPaymentMethods;
+    const paymentMethodsSource = settingsPaymentMethods.length > 0
+      ? posSettingsSource
+      : (inferredPaymentMethods.length > 0 ? 'payment_accounts_fallback' : 'default_fallback');
+    const effectiveDefaultPaymentMethod = normalizePaymentMethodLabel(
+      posSettingsPayload?.payment_methods?.find?.((row) => row?.is_default)?.name
+      || posSettingsPayload?.default_payment_method
+      || effectivePaymentMethods.find((row) => row?.isDefault)?.name
+      || effectivePaymentMethods[0]?.name
+      || 'Cash',
+    );
 
     return {
       products: toDataRows(productsRows),
@@ -3888,8 +4295,19 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       catalogMaterialNameMap: buildCatalogMaterialNameMap(productionMaterialsRows),
       customers: (Array.isArray(customerRows) ? customerRows : []).map(normalizeCustomerRow),
       customerTypes: mergeCustomerTypesWithFallback(customerTypeRows),
-      posSettings: posSettingsPayload && typeof posSettingsPayload === 'object' && !Array.isArray(posSettingsPayload)
-        ? normalizeReceiptSettings(posSettingsPayload)
+      posSettingsMeta: {
+        source: paymentMethodsSource,
+        warning: posSettingsWarning || posPaymentDebugWarning,
+        paymentDebug: posPaymentDebug,
+      },
+      posSettings: (posSettingsPayload && typeof posSettingsPayload === 'object' && !Array.isArray(posSettingsPayload)) || effectivePaymentMethods.length > 0
+        ? {
+          receipt: normalizeReceiptSettings(posSettingsPayload),
+          paymentMethods: effectivePaymentMethods.length > 0
+            ? effectivePaymentMethods
+            : getDefaultPaymentMethodConfigs(),
+          defaultPaymentMethod: effectiveDefaultPaymentMethod,
+        }
         : null,
     };
   };
@@ -3907,8 +4325,32 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     if (nextSnapshot.posSettings) {
       setPosSettings((prev) => ({
         ...prev,
-        ...nextSnapshot.posSettings,
+        ...(nextSnapshot.posSettings.receipt || {}),
       }));
+      setPaymentMethodConfigs(Array.isArray(nextSnapshot.posSettings.paymentMethods) && nextSnapshot.posSettings.paymentMethods.length > 0
+        ? nextSnapshot.posSettings.paymentMethods
+        : getDefaultPaymentMethodConfigs());
+      setPaymentMethod((currentMethod) => {
+        const preferredMethod = nextSnapshot.posSettings.defaultPaymentMethod || currentMethod || 'Cash';
+        const available = getPaymentMethodLabels(
+          Array.isArray(nextSnapshot.posSettings.paymentMethods) ? nextSnapshot.posSettings.paymentMethods : [],
+          { includeUnavailable: true },
+        );
+        const normalizedCurrentMethod = normalizePaymentMethodLabel(currentMethod || '');
+
+        if (normalizedCurrentMethod && available.includes(normalizedCurrentMethod)) {
+          return normalizedCurrentMethod;
+        }
+
+        return '';
+      });
+      if (nextSnapshot.posSettingsMeta?.source && nextSnapshot.posSettingsMeta.source !== 'settings') {
+        setLastSyncInfo(`Metode bayar fallback: ${nextSnapshot.posSettingsMeta.source}`);
+      } else if (nextSnapshot.posSettingsMeta?.warning) {
+        setLastSyncInfo(`Metode bayar backend: ${nextSnapshot.posSettingsMeta.warning}`);
+      } else if (nextSnapshot.posSettingsMeta?.paymentDebug?.schema_ready === false) {
+        setLastSyncInfo('Metode bayar backend: schema payment POS belum siap di database aktif.');
+      }
     }
     if (options?.resetProductDetails !== false) {
       setProductDetails({});
@@ -3995,6 +4437,8 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       }
 
       const statusChanged = hasSyncStatusChanged(previousMeta, syncStatus);
+      const paymentConfigChanged = hasSyncVersionChanged(previousMeta, syncStatus, 'pricesVersion');
+      const stockSnapshotChanged = hasSyncVersionChanged(previousMeta, syncStatus, 'stocksVersion');
       const shouldRefreshFullSnapshot = forceFull || fullRefreshOverdue;
 
       if (!statusChanged && !shouldRefreshFullSnapshot) {
@@ -4006,7 +4450,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         return { mode: 'status_only', statusEndpointAvailable: true };
       }
 
-      if (shouldRefreshFullSnapshot) {
+      if (shouldRefreshFullSnapshot || paymentConfigChanged || stockSnapshotChanged) {
         const snapshot = await fetchMasterDataSnapshot();
         applyMasterDataSnapshot(snapshot, { resetProductDetails: true });
         markMasterSyncSuccess('Data master diperbarui', {
@@ -4117,6 +4561,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       actions: [],
       showDefaultAction: true,
       autoCloseMs: 0,
+      visual: 'default',
     });
     if (typeof callback === 'function') {
       callback();
@@ -4306,6 +4751,8 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     return {
       draftNo: currentDraftSourceId ? `DRF-${currentDraftSourceId}` : '-',
       transactionDate,
+      estimatedDoneAt: '-',
+      priorityLabel: 'Normal',
       customerName: String(selectedCustomer?.name || 'Pelanggan umum'),
       customerPhone: String(selectedCustomer?.phone || selectedCustomer?.mobile || selectedCustomer?.whatsapp || '-'),
       cashierName: String(currentUser?.name || 'Kasir'),
@@ -4314,6 +4761,8 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       paymentStatus,
       paymentAmount: isCustomerDepositPaymentMethod(paymentMethod) ? grandTotal : paidAmount,
       discountAmount: finalDiscount,
+      taxAmount: 0,
+      extraChargeAmount: 0,
       subtotal,
       grandTotal,
       notes: paymentNotes || '-',
@@ -4378,6 +4827,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       `No. HP: ${customerPhone}`,
       `Status Pembayaran: ${receiptData?.transaction?.paymentStatus || '-'}`,
       `Metode Pembayaran: ${receiptData?.payment?.method || '-'}`,
+      ...(receiptData?.payment?.targetAccount ? [`Akun Tujuan: ${receiptData.payment.targetAccount}`] : []),
       `Estimasi Selesai: ${estimatedDoneAt}`,
       ...(orderNotes ? [`Catatan: ${orderNotes}`] : []),
     ]);
@@ -4473,6 +4923,41 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     }
   };
 
+  const buildProductionWorkOrderReceiptData = (snapshot) => {
+    const productionNotes = [
+      `Estimasi: ${String(snapshot?.estimatedDoneAt || '-').trim() || '-'}`,
+      `Prioritas: ${String(snapshot?.priorityLabel || 'Normal').trim() || 'Normal'}`,
+      'Checklist Produksi',
+      '[ ] Desain / brief siap',
+      '[ ] Ukuran + bahan cek',
+      '[ ] Finishing sesuai',
+      '[ ] Qty sesuai',
+      '[ ] Siap proses',
+      'TTD Produksi: ____________',
+      'Catatan: ________________',
+    ];
+
+    return buildReceiptDataFromSnapshot(snapshot, {
+      invoiceNo: `SPK-${String(snapshot?.draftNo || 'PREVIEW').replace(/^DRF-/, '') || 'PREVIEW'}`,
+      receiptSettingsInput: {
+        ...posSettings,
+        receipt_title: 'SPK PRODUKSI',
+        receipt_show_payment_detail: false,
+      },
+      detailOverrides: {
+        footerNotes: productionNotes,
+        thankYouText: 'SPK PRODUKSI',
+      },
+      paymentOverride: null,
+    });
+  };
+
+  const handlePrintProductionWorkOrder = () => {
+    const receiptData = buildProductionWorkOrderReceiptData(orderPreviewSnapshot);
+    const html = buildBrowserReceiptPreviewHtml(receiptData, activePrinterProfile);
+    printHtmlDocument(html, 'Cetak Nota SPK');
+  };
+
   const buildReceiptDataFromSnapshot = (snapshot, options = {}) => {
     const receiptSettingsInput = options?.receiptSettingsInput || null;
     const receiptSettings = normalizeReceiptSettings(receiptSettingsInput || posSettings);
@@ -4490,6 +4975,17 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         .map((item) => String(item?.note || item?.notes || '').trim())
         .filter((value) => value && value !== '-')
       : [];
+    const detailOverrides = options?.detailOverrides && typeof options.detailOverrides === 'object'
+      ? options.detailOverrides
+      : {};
+    const paymentOverride = Object.prototype.hasOwnProperty.call(options || {}, 'paymentOverride')
+      ? options.paymentOverride
+      : {
+        method: String(snapshot?.paymentMethod || ''),
+        amount: Number(snapshot?.paymentAmount || 0) || 0,
+        targetAccount: String(snapshot?.paymentTargetName || ''),
+      };
+
     return {
       store: {
         title: receiptSettings.receipt_title,
@@ -4534,20 +5030,19 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         change: Math.max(0, (Number(snapshot?.paymentAmount || 0) || 0) - (Number(snapshot?.grandTotal || 0) || 0)),
         remainingDue: Math.max(0, (Number(snapshot?.grandTotal || 0) || 0) - (Number(snapshot?.paymentAmount || 0) || 0)),
       },
-      payment: {
-        method: String(snapshot?.paymentMethod || ''),
-        amount: Number(snapshot?.paymentAmount || 0) || 0,
-        targetAccount: String(snapshot?.paymentTargetName || ''),
-      },
+      payment: paymentOverride,
       layout: {
         showOrderId: Boolean(receiptSettings.receipt_show_order_id),
         showCashier: Boolean(receiptSettings.receipt_show_cashier),
         showCustomer: Boolean(receiptSettings.receipt_show_customer),
         showPaymentDetail: Boolean(receiptSettings.receipt_show_payment_detail),
       },
-      detail: buildReceiptDetailSection({
-        orderDetails: detailLines,
-      }),
+      detail: {
+        ...buildReceiptDetailSection({
+          orderDetails: detailLines,
+        }),
+        ...detailOverrides,
+      },
     };
   };
 
@@ -4703,10 +5198,26 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       || sourceRow?.payment?.bank_account_id
       || 0
     );
-    const resolvedPaymentTarget = bankAccounts.find((row) => Number(row?.id || 0) === resolvedBankAccountId) || null;
+    const resolvedPaymentTarget = bankAccounts.find((row) => (
+      Number(row?.id || 0) === resolvedBankAccountId
+      || Number(row?.accountingAccountId || 0) === resolvedBankAccountId
+    )) || null;
+    const fallbackPaymentTargetName = [(
+      sourceRow?.payment_debug?.last_payment_bank_account_code
+      || sourceRow?.payment_debug?.invoice_sales_bank_account_code
+      || ''
+    ), (
+      sourceRow?.payment_debug?.last_payment_bank_account_name
+      || sourceRow?.payment_debug?.invoice_sales_bank_account_name
+      || ''
+    )]
+      .map((value) => String(value || '').trim())
+      .filter(Boolean)
+      .join(' - ');
     const paymentTargetName = String(
       resolvedPaymentTarget?.displayTitle
       || resolvedPaymentTarget?.displayName
+      || fallbackPaymentTargetName
       || ''
     ).trim();
     const paymentMethodLabel = normalizePaymentMethodLabel(
@@ -5135,6 +5646,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
   const paidAmount = useMemo(() => parseMoneyAmountInput(paymentAmount), [paymentAmount]);
   const changeAmount = useMemo(() => Math.max(paidAmount - grandTotal, 0), [paidAmount, grandTotal]);
   const paymentStatus = useMemo(() => {
+    if (!String(paymentMethod || '').trim()) return 'Pilih saat Proses';
     if (isCustomerDepositPaymentMethod(paymentMethod)) return 'Lunas via Saldo';
     if (paidAmount <= 0) return 'Belum Bayar';
     if (paidAmount >= grandTotal) return 'Lunas';
@@ -6756,7 +7268,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     setDiscountPercent('0');
     setDiscountAmount('0');
     setDiscountMode('percent');
-    setPaymentMethod('Cash');
+    setPaymentMethod('');
     setPaymentAmount('');
     setPaymentNotes('');
     setSelectedBankAccountId(null);
@@ -7128,7 +7640,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     ]);
   };
 
-  const validateTransactionBeforeSubmit = async (mode = 'draft') => {
+  const validateTransactionBeforeSubmit = async (mode = 'draft', options = {}) => {
     if (isSubmitting) {
       openNotice('Informasi', 'Transaksi sedang diproses, mohon tunggu.');
       return null;
@@ -7183,9 +7695,35 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       return null;
     }
 
-    const canonicalMethodLabel = normalizePaymentMethodLabel(paymentMethod);
-    if (!CHECKOUT_PAYMENT_METHOD_LABELS.includes(canonicalMethodLabel)) {
-      openNotice('Validasi', `Metode Bayar wajib salah satu: ${CHECKOUT_PAYMENT_METHOD_LABELS.join(', ')}.`);
+    const fallbackDraftMethodLabel = paymentMethodConfigs.find((row) => row?.isDefault)?.name
+      || paymentMethodConfigs[0]?.name
+      || 'Cash';
+    const effectivePaymentMethod = mode === 'draft' && !String(paymentMethod || '').trim()
+      ? fallbackDraftMethodLabel
+      : paymentMethod;
+    if (options?.skipPaymentMethodValidation === true) {
+      if (mode !== 'draft' && roundMoney(Number(grandTotal || 0)) <= 0) {
+        openNotice('Validasi', 'Total order harus lebih dari nol.');
+        return null;
+      }
+
+      return {
+        canonicalMethodLabel: '',
+        selectedMethodConfig: null,
+      };
+    }
+    const canonicalMethodLabel = normalizePaymentMethodLabel(effectivePaymentMethod);
+    if (!checkoutPaymentMethodOptions.includes(canonicalMethodLabel)) {
+      openNotice('Validasi', `Metode Bayar wajib salah satu: ${checkoutPaymentMethodOptions.join(', ')}.`);
+      return null;
+    }
+
+    const selectedMethodConfig = findPaymentMethodConfig(paymentMethodConfigs, canonicalMethodLabel);
+    if (!selectedMethodConfig || selectedMethodConfig.isAvailable === false) {
+      openNotice(
+        'Metode Pembayaran',
+        selectedMethodConfig?.availabilityMessage || 'Metode pembayaran ini belum siap dipakai karena mapping akun belum lengkap.',
+      );
       return null;
     }
 
@@ -7214,7 +7752,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       return null;
     }
 
-    return { canonicalMethodLabel };
+    return { canonicalMethodLabel, selectedMethodConfig };
   };
 
   const submitTransaction = async (mode = 'draft', options = {}) => {
@@ -7224,12 +7762,27 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     }
 
     const isDraftMode = mode === 'draft';
-    const { canonicalMethodLabel } = validation;
+    const { canonicalMethodLabel, selectedMethodConfig } = validation;
     const usingCustomerDeposit = isCustomerDepositPaymentMethod(canonicalMethodLabel);
-    const method = mapPaymentMethodToBackend(canonicalMethodLabel);
+    const method = String(
+      selectedMethodConfig?.code
+      || mapPaymentMethodToBackend(canonicalMethodLabel)
+      || '',
+    ).trim();
     const selectedBankId = Number(options?.bankAccountId || 0);
-    const fallbackBankId = mapPaymentMethodToBankAccountId(canonicalMethodLabel);
-    const bankAccountId = selectedBankId > 0 ? selectedBankId : fallbackBankId;
+    const currentMethodAccounts = Array.isArray(selectedMethodConfig?.accounts)
+      ? selectedMethodConfig.accounts.map((row) => normalizeBankAccountRow(row))
+      : [];
+    const selectedAccountRow = currentMethodAccounts.find((row) => Number(row?.id || 0) === selectedBankId)
+      || currentMethodAccounts.find((row) => Number(row?.id || 0) === Number(selectedBankAccountId || 0))
+      || currentMethodAccounts[0]
+      || null;
+    const resolvedPaymentAccountId = Number(selectedAccountRow?.id || 0) || 0;
+    const resolvedAccountingAccountId = Number(
+      selectedAccountRow?.accountingAccountId
+      || selectedAccountRow?.accounting_account_id
+      || 0
+    );
 
     let payload = null;
 
@@ -7428,7 +7981,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
             : transactionType === 'dp'
               ? Math.min(paidAmount, grandTotal)
               : 0;
-      if (!isDraftMode && !usingCustomerDeposit && paymentAmountPayload > 0 && !(bankAccountId > 0)) {
+      if (!isDraftMode && !usingCustomerDeposit && selectedMethodConfig?.requiresPaymentAccount && paymentAmountPayload > 0 && !(resolvedPaymentAccountId > 0)) {
         openNotice('Akun Pembayaran', 'Akun pembayaran wajib dipilih sebelum proses order.');
         return null;
       }
@@ -7452,9 +8005,16 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         payment: {
           transaction_type: paymentTransactionType,
           method,
-          ...(!isDraftMode && !usingCustomerDeposit ? { bank_account_id: bankAccountId || null } : {}),
+          ...(!isDraftMode && !usingCustomerDeposit ? {
+            payment_method_id: Number(selectedMethodConfig?.id || 0) || null,
+            payment_account_id: resolvedPaymentAccountId || null,
+            bank_account_id: resolvedAccountingAccountId || null,
+          } : {
+            payment_method_id: Number(selectedMethodConfig?.id || 0) || null,
+          }),
           amount: roundMoney(paymentAmountPayload),
           note: paymentNotes || null,
+          reference_no: '',
           paid_at: new Date().toISOString(),
         },
       };
@@ -7555,8 +8115,14 @@ const SalesScreen = ({ currentUser, onLogout }) => {
               : `Order dibuat, tetapi pembayaran saldo customer belum berhasil: ${customerDepositAutoPayWarning || 'cek invoice pelanggan.'}`)
             : null,
         ].filter(Boolean).join('\n') + draftStatusWarning,
-        resetTransaction,
+        mode === 'draft' ? resetTransaction : null,
+        {
+          visual: mode === 'draft' ? 'default' : 'success',
+        },
       );
+      if (mode !== 'draft') {
+        resetTransaction();
+      }
       loadDraftInvoices();
       return {
         ok: true,
@@ -7706,36 +8272,73 @@ const SalesScreen = ({ currentUser, onLogout }) => {
   };
 
   const loadPaymentAccountOptionsForMethod = async (methodLabel) => {
+    const methodConfig = findPaymentMethodConfig(paymentMethodConfigs, methodLabel);
+    if (methodConfig && Array.isArray(methodConfig.accounts) && methodConfig.accounts.length > 0) {
+      return methodConfig.accounts
+        .map((row) => normalizeBankAccountRow(row))
+        .filter((row) => Number(row?.id || 0) > 0);
+    }
+
     const rows = await fetchPosBankAccounts();
     const allOptions = toDataRows(rows)
       .map((row) => normalizeBankAccountRow(row))
       .filter((row) => Number(row?.id || 0) > 0);
-    const currentMethod = mapPaymentMethodToBackend(methodLabel);
-    const filteredOptions = allOptions.filter((row) => {
-      const type = String(row?.paymentType || '').trim().toLowerCase();
+    const methodType = normalizePaymentMethodType(methodConfig?.type || methodConfig?.code || methodLabel);
+    return allOptions.filter((row) => {
+      const type = normalizePaymentMethodType(row?.paymentType || row?.type || '');
       if (!type) {
         return false;
       }
-      if (currentMethod === 'cash') {
-        return type === 'cash';
-      }
-      if (currentMethod === 'qris') {
-        return type === 'qris';
-      }
-      if (currentMethod === 'card') {
-        return type === 'card';
-      }
-      return type === 'transfer';
+      return type === methodType;
     });
-    if (filteredOptions.length > 0) {
-      return filteredOptions;
-    }
-    return currentMethod === 'cash' ? [] : allOptions;
   };
 
+  useEffect(() => {
+    const methodLabel = normalizePaymentMethodLabel(paymentMethod || 'Cash');
+    if (!String(paymentMethod || '').trim()) {
+      setBankAccounts([]);
+      setSelectedBankAccountId(null);
+      return undefined;
+    }
+    const methodConfig = findPaymentMethodConfig(paymentMethodConfigs, methodLabel);
+    const methodType = normalizePaymentMethodType(methodConfig?.type || methodConfig?.code || methodLabel);
+
+    if (methodType === 'customer_balance' || methodConfig?.isAvailable === false) {
+      setBankAccounts([]);
+      setSelectedBankAccountId(null);
+      return undefined;
+    }
+
+    let cancelled = false;
+
+    const syncPaymentAccounts = async () => {
+      const options = await loadPaymentAccountOptionsForMethod(methodLabel).catch(() => []);
+      if (cancelled) {
+        return;
+      }
+
+      setBankAccounts(options);
+      setSelectedBankAccountId((currentId) => {
+        const resolvedCurrentId = Number(currentId || 0);
+        if (resolvedCurrentId > 0 && options.some((row) => Number(row?.id || 0) === resolvedCurrentId)) {
+          return resolvedCurrentId;
+        }
+
+        return Number(options[0]?.id || 0) || null;
+      });
+    };
+
+    syncPaymentAccounts();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [paymentMethod, paymentMethodConfigs]);
+
   const resolveAutoPaymentAccountId = async (methodLabel) => {
-    const currentMethod = mapPaymentMethodToBackend(methodLabel);
-    if (currentMethod === 'customer_deposit') {
+    const methodConfig = findPaymentMethodConfig(paymentMethodConfigs, methodLabel);
+    const currentMethod = normalizePaymentMethodType(methodConfig?.type || methodConfig?.code || methodLabel);
+    if (currentMethod === 'customer_balance') {
       setSelectedBankAccountId(null);
       return 0;
     }
@@ -7840,13 +8443,24 @@ const SalesScreen = ({ currentUser, onLogout }) => {
 
   const handleChangeCheckoutPaymentMethod = async (value) => {
     const normalized = normalizePaymentMethodLabel(value);
+    const methodConfig = findPaymentMethodConfig(paymentMethodConfigs, normalized);
+    if (methodConfig?.isAvailable === false) {
+      openNotice('Metode Pembayaran', methodConfig.availabilityMessage || 'Metode pembayaran ini belum siap dipakai.');
+      return;
+    }
     setPaymentMethod(normalized);
     if (isCustomerDepositPaymentMethod(normalized)) {
+      setBankAccounts([]);
+      setSelectedBankAccountId(null);
       const customerId = Number(selectedCustomerId || 0);
       if (customerId > 0) {
         await loadCustomerDepositBalance(customerId).catch(() => roundMoney(Number(customerDepositBalance || 0)));
       }
+      return;
     }
+    const options = await loadPaymentAccountOptionsForMethod(normalized).catch(() => []);
+    setBankAccounts(options);
+    setSelectedBankAccountId(Number(options[0]?.id || 0) || null);
   };
 
   const submitDepositTopUp = async () => {
@@ -8079,16 +8693,25 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       isSubmitting: true,
     }));
     try {
-      const backendMethod = mapReceivablePaymentMethodToBackend(receivablePaymentModal.method);
+      const selectedMethodConfig = findPaymentMethodConfig(paymentMethodConfigs, receivablePaymentModal.method);
+      const selectedAccountRow = (Array.isArray(receivablePaymentModal.accountOptions) ? receivablePaymentModal.accountOptions : [])
+        .find((row) => Number(row?.id || 0) === accountId) || null;
+      const backendMethod = String(
+        selectedMethodConfig?.code
+        || mapReceivablePaymentMethodToBackend(receivablePaymentModal.method)
+        || '',
+      ).trim();
       const paymentPayload = {
         method: backendMethod,
         payment_method: backendMethod,
+        payment_method_id: Number(selectedMethodConfig?.id || 0) || null,
         amount,
         transaction_type: amount >= dueTotal ? 'pelunasan' : 'angsuran',
         paid_at: new Date().toISOString(),
       };
       if (!usingDeposit && accountId > 0) {
-        paymentPayload.bank_account_id = accountId;
+        paymentPayload.payment_account_id = accountId;
+        paymentPayload.bank_account_id = Number(selectedAccountRow?.accountingAccountId || 0) || null;
       }
       await createPosInvoicePayment(invoiceId, paymentPayload);
       setReceivablePaymentModal((prev) => ({
@@ -8132,12 +8755,14 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       return false;
     }
 
-    const validation = await validateTransactionBeforeSubmit('process');
+    const validation = await validateTransactionBeforeSubmit('process', {
+      skipPaymentMethodValidation: !String(paymentMethod || '').trim(),
+    });
     if (!validation) {
       return false;
     }
 
-    if (!isCustomerDepositPaymentMethod(validation.canonicalMethodLabel)) {
+    if (validation.canonicalMethodLabel && !isCustomerDepositPaymentMethod(validation.canonicalMethodLabel)) {
       const bankId = await resolveAutoPaymentAccountId(validation.canonicalMethodLabel);
       if (!(bankId > 0)) {
         return false;
@@ -8157,19 +8782,14 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       return false;
     }
 
-    const validation = await validateTransactionBeforeSubmit('process');
+    const validation = await validateTransactionBeforeSubmit('process', {
+      skipPaymentMethodValidation: true,
+    });
     if (!validation) {
       return false;
     }
 
-    if (!isCustomerDepositPaymentMethod(validation.canonicalMethodLabel)) {
-      const bankId = await resolveAutoPaymentAccountId(validation.canonicalMethodLabel);
-      if (!(bankId > 0)) {
-        return false;
-      }
-    }
-
-    setIsProcessOrderDetailOpen(true);
+    setModalDetailPesanan(true);
     return true;
   };
 
@@ -8177,9 +8797,23 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     await validateAndOpenProcessOrderDetail();
   };
 
-  const handleConfirmProcessOrder = async () => {
+  const handleOpenPaymentMethodModalFromDetail = () => {
+    setModalDetailPesanan(false);
+    setModalPilihPembayaran(true);
+  };
+
+  const handleProcessAndPrintOrder = async () => {
     if (isSubmitting || isOrderPreviewSubmitting) {
       openNotice('Informasi', 'Transaksi sedang diproses, mohon tunggu.');
+      return;
+    }
+
+    if (!String(paymentMethod || '').trim()) {
+      openNotice('Metode Pembayaran', 'Pilih metode pembayaran dulu di modal Proses Order.');
+      return;
+    }
+    if (processOrderNeedsAccountSelection) {
+      openNotice('Akun Pembayaran', 'Metode ini belum punya akun pembayaran aktif di backend. Pilih metode lain atau lengkapi mapping payment account dulu.');
       return;
     }
 
@@ -8194,9 +8828,14 @@ const SalesScreen = ({ currentUser, onLogout }) => {
 
     const result = await submitTransaction('process', usingDeposit ? {} : { bankAccountId: bankId });
     if (result?.ok) {
-      setIsProcessOrderDetailOpen(false);
+      setModalPilihPembayaran(false);
+      setModalDetailPesanan(false);
+      await printOrderPreview(orderPreviewSnapshot, result);
     }
   };
+
+  const isProcessOrderMethodMissing = !String(paymentMethod || '').trim();
+  const isProcessOrderBlocked = isProcessOrderMethodMissing || processOrderNeedsAccountSelection;
 
   const handleDownloadPreviewReceiptPdf = async () => {
     const filenameBase = String(
@@ -8235,7 +8874,8 @@ const SalesScreen = ({ currentUser, onLogout }) => {
   };
 
   const handleSaveTransactionFromProcessModal = async () => {
-    setIsProcessOrderDetailOpen(false);
+    setModalDetailPesanan(false);
+    setModalPilihPembayaran(false);
     await handleSaveTransaction();
   };
 
@@ -8249,6 +8889,16 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       await handleCopyOrderSnapshot(snapshot, 'Salin Pesanan');
       return;
     }
+    const shouldPrint = action === 'print';
+    const shouldCopyInvoice = action === 'copy_invoice';
+    if (shouldPrint) {
+      handlePrintPreviewReceipt();
+      return;
+    }
+    if (shouldCopyInvoice) {
+      await handleCopyPreviewInvoice();
+      return;
+    }
     const usingDeposit = isCustomerDepositPaymentMethod(paymentMethod);
     let bankId = 0;
     if (!usingDeposit) {
@@ -8257,16 +8907,11 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         return;
       }
     }
-    const shouldPrint = action === 'print';
-    const shouldCopyInvoice = action === 'copy_invoice';
-    const snapshot = (shouldPrint || shouldCopyInvoice) ? buildOrderPreviewSnapshot() : null;
     try {
       setIsOrderPreviewSubmitting(true);
       const result = await submitTransaction('process', usingDeposit ? {} : { bankAccountId: bankId });
       if (result?.ok) {
-        const verification = snapshot
-          ? await verifySubmittedOrderAgainstPreview(snapshot, result)
-          : { checked: false, mismatchMessages: [] };
+        const verification = { checked: false, mismatchMessages: [] };
         setIsOrderPreviewOpen(false);
         if (verification.checked && verification.mismatchMessages.length > 0) {
           openNotice(
@@ -8276,25 +8921,6 @@ const SalesScreen = ({ currentUser, onLogout }) => {
               ...verification.mismatchMessages,
             ].join('\n'),
           );
-        }
-        if (shouldPrint && snapshot) {
-          await printOrderPreview(snapshot, result);
-        }
-        if (shouldCopyInvoice && snapshot) {
-          const receiptData = buildReceiptDataFromPreview(snapshot, result, {
-            ...posSettings,
-            ...(result?.receipt && typeof result.receipt === 'object' ? { receipt: result.receipt } : {}),
-          });
-          try {
-            await copyTextToClipboard(buildInvoiceClipboardText(receiptData, {
-              customerPhone: snapshot?.customerPhone,
-            }));
-            openNotice('Salin Invoice', 'Invoice final berhasil disalin. Tinggal paste ke WhatsApp customer.', null, {
-              autoCloseMs: 2200,
-            });
-          } catch (copyError) {
-            openNotice('Salin Invoice', `Invoice sudah dibuat, tetapi gagal disalin: ${copyError.message}`);
-          }
         }
         if (!result?.queuedOffline) {
           setActiveMenu('production');
@@ -8488,6 +9114,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       total: 0,
       createdAt: '-',
       pickedUpText: 'Belum diambil',
+      cancellationText: '',
       items: [],
       canPickup: false,
     });
@@ -8516,6 +9143,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     const isPickedUp = orderStatus === 'picked_up' || Boolean(pickedUpAt);
     const canPickup = Boolean(sourceRow?.production?.can_pickup) && !isPickedUp;
     const productionSummary = summarizeProductionStatusForInvoice(sourceRow);
+    const cancellationText = resolveCancellationSummaryText(sourceRow?.cancellation);
     const items = Array.isArray(sourceRow?.items) ? sourceRow.items : [];
     const itemCount = items.length;
     const total = Number(
@@ -8543,6 +9171,12 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       const materialText = restored.materialText || '-';
       const pricingSummary = buildPricingSummaryFromBackendItem(item, materialText);
       const lineTotal = resolveItemGrandTotal(item, pricingSummary);
+      const bundleComponents = normalizeBundleComponentRows(
+        item?.bundle_components
+        || item?.bundleComponents
+        || item?.group_components
+        || [],
+      );
       return {
         key: String(item?.id || `item-${index}`),
         productName,
@@ -8557,6 +9191,9 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         productionStatusLabel: formatProductionStatusLabel(item?.production_status),
         pricingSummary,
         lineTotal,
+        isGroupProduct: Boolean(item?.is_group_product) || bundleComponents.length > 0,
+        groupSummary: toLabel(item?.group_summary, bundleComponents.length > 0 ? `${bundleComponents.length} komponen` : ''),
+        bundleComponents,
         note: toLabel(
           item?.notes,
           item?.note,
@@ -8615,6 +9252,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       total,
       createdAt: String(sourceRow?.created_at || '-'),
       pickedUpText,
+      cancellationText,
       items: detailItems,
       canPickup,
     });
@@ -9405,7 +10043,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         <View style={styles.topBlueLine} />
         <View style={styles.bootstrapScreen}>
           <View style={styles.loadingCard}>
-            <ActivityIndicator size="small" color="#2f64ef" />
+            <SyncLoadingAnimation size={280} />
             <Text style={styles.loadingTitle}>Sedang Menyiapkan Data</Text>
             <Text style={styles.loadingMessage}>{prepareMessage}</Text>
           </View>
@@ -9549,15 +10187,24 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                   {queueCount > 0 ? <Text style={styles.payloadFlag}>Antrian invoice disimpan offline: {queueCount}</Text> : null}
                   {lastSyncInfo ? <Text style={styles.payloadFlag}>{lastSyncInfo}</Text> : null}
                   {masterSyncStatus?.label ? (
-                    <Text
-                      style={[
-                        styles.payloadFlag,
-                        masterSyncStatus.state === 'error' ? styles.payloadFlagError : null,
-                        masterSyncStatus.state === 'syncing' ? styles.payloadFlagInfo : null,
-                      ]}
-                    >
-                      {masterSyncStatus.label}
-                    </Text>
+                    masterSyncStatus.state === 'syncing' ? (
+                      <View style={[styles.syncStatusInlineCard, styles.payloadFlagInfo]}>
+                        <SyncLoadingAnimation size={26} variant="sync" />
+                        <Text style={[styles.payloadFlag, styles.syncStatusInlineText]}>
+                          {masterSyncStatus.label}
+                        </Text>
+                      </View>
+                    ) : (
+                      <Text
+                        style={[
+                          styles.payloadFlag,
+                          masterSyncStatus.state === 'error' ? styles.payloadFlagError : null,
+                          masterSyncStatus.state === 'syncing' ? styles.payloadFlagInfo : null,
+                        ]}
+                      >
+                        {masterSyncStatus.label}
+                      </Text>
+                    )
                   ) : null}
                 </View>
               </View>
@@ -9629,8 +10276,11 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                 }}
                 grandTotal={grandTotal}
                 paymentMethod={paymentMethod}
-                paymentMethodOptions={CHECKOUT_PAYMENT_METHOD_LABELS}
-                disabledPaymentMethodOptions={selectedCustomerId ? [] : [CUSTOMER_DEPOSIT_PAYMENT_LABEL]}
+                paymentMethodOptions={checkoutPaymentMethodOptions}
+                disabledPaymentMethodOptions={[
+                  ...checkoutPaymentMethodOptions.filter((option) => !enabledCheckoutPaymentMethodOptions.includes(option)),
+                  ...(selectedCustomerId ? [] : [CUSTOMER_DEPOSIT_PAYMENT_LABEL]),
+                ]}
                 paymentMethodHelperText={paymentMethodHelperText}
                 onChangePaymentMethod={handleChangeCheckoutPaymentMethod}
                 paymentStatus={paymentStatus}
@@ -9645,6 +10295,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                 onProcessOrder={handleProcessOrder}
                 onCancelTransaction={handleCancelTransaction}
                 isSubmitting={isSubmitting}
+                deferPaymentMethodSelection
               />
             </>
           ) : activeMenu === 'draft' ? (
@@ -9805,6 +10456,9 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                     const productionLabel = isDraftRow ? 'Belum Masuk Produksi' : productionStage.label;
                     const productionColor = isDraftRow ? '#6b7280' : getProductionStatusTextColor(productionStage.key);
                     const snapshotState = isDraftRow ? resolveDraftSnapshotState(row) : null;
+                    const paymentMethodLabel = resolveOrderPaymentMethodLabel(row);
+                    const paymentTargetLabel = resolveOrderPaymentTargetLabel(row, bankAccounts);
+                    const paymentMethodType = normalizePaymentMethodType(paymentMethodLabel);
                     return (
                       <View key={String(row?.id || `row-${index}`)} style={styles.draftCard}>
                         <View style={styles.draftInfo}>
@@ -9840,6 +10494,36 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                               {productionLabel}
                               {!isDraftRow && productionStage.count > 0 ? ` (${productionStage.count} item)` : ''}
                             </Text>
+                          </View>
+                          <View style={styles.invoicePaymentBadgeRow}>
+                            <View
+                              style={[
+                                styles.invoicePaymentBadge,
+                                paymentMethodType === 'cash'
+                                  ? styles.invoicePaymentBadgeCash
+                                  : isCustomerDepositPaymentMethod(paymentMethodLabel)
+                                    ? styles.invoicePaymentBadgeDeposit
+                                    : styles.invoicePaymentBadgeNonCash,
+                              ]}
+                            >
+                              <Text
+                                style={[
+                                  styles.invoicePaymentBadgeText,
+                                  paymentMethodType === 'cash'
+                                    ? styles.invoicePaymentBadgeTextCash
+                                    : isCustomerDepositPaymentMethod(paymentMethodLabel)
+                                      ? styles.invoicePaymentBadgeTextDeposit
+                                      : styles.invoicePaymentBadgeTextNonCash,
+                                ]}
+                              >
+                                {paymentMethodLabel}
+                              </Text>
+                            </View>
+                            {paymentTargetLabel ? (
+                              <View style={styles.invoicePaymentTargetBadge}>
+                                <Text style={styles.invoicePaymentTargetBadgeText}>{paymentTargetLabel}</Text>
+                              </View>
+                            ) : null}
                           </View>
                           <Text style={styles.draftMeta}>Item: {itemCount} | Total: {formatRupiah(total)}</Text>
                           {Number(row?.invoice?.due_total || 0) > 0 ? (
@@ -10696,7 +11380,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       >
         <View style={styles.popupBackdrop}>
           <View style={styles.loadingCard}>
-            <ActivityIndicator size="small" color="#2f64ef" />
+            <SyncLoadingAnimation size={240} />
             <Text style={styles.loadingTitle}>Sedang Menyiapkan Data</Text>
             <Text style={styles.loadingMessage}>{prepareMessage}</Text>
           </View>
@@ -10704,69 +11388,34 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       </Modal>
 
       <Modal
-        visible={isProcessOrderDetailOpen}
+        visible={modalDetailPesanan}
         transparent
         animationType="fade"
         onRequestClose={() => {
           if (!isSubmitting) {
-            setIsProcessOrderDetailOpen(false);
+            setModalDetailPesanan(false);
           }
         }}
       >
         <View style={styles.popupBackdrop}>
           <View style={[styles.popupCard, styles.processOrderCard]}>
-            <Text style={styles.popupTitle}>Preview Nota Penjualan</Text>
-            <Text style={styles.popupMessage}>Invoice: Akan dibuat otomatis oleh backend setelah pesanan disimpan.</Text>
+            <Text style={styles.popupTitle}>Detail Pesanan</Text>
+            <Text style={styles.processOrderHint}>
+              Periksa item, qty, harga, diskon, dan total akhir dulu. Metode pembayaran dipilih di langkah berikutnya agar kasir tidak salah kirim pembayaran.
+            </Text>
             <Text style={styles.popupMessage}>Pelanggan: {orderPreviewSnapshot.customerName}</Text>
             <Text style={styles.popupMessage}>Tanggal: {orderPreviewSnapshot.transactionDate}</Text>
-            <Text style={styles.popupMessage}>Metode Bayar: {orderPreviewSnapshot.paymentMethod}</Text>
             <Text style={styles.popupMessage}>Catatan: {orderPreviewSnapshot.notes || '-'}</Text>
-            <View style={styles.previewBadgeRow}>
-              <View
-                style={[
-                  styles.previewFlowBadge,
-                  mapPaymentMethodToBackend(orderPreviewSnapshot.paymentMethod) === 'cash'
-                    ? styles.previewFlowBadgeCash
-                    : isCustomerDepositPaymentMethod(orderPreviewSnapshot.paymentMethod)
-                      ? styles.previewFlowBadgeDeposit
-                      : styles.previewFlowBadgeNonCash,
-                ]}
-              >
-                <Text
-                  style={[
-                    styles.previewFlowBadgeText,
-                    mapPaymentMethodToBackend(orderPreviewSnapshot.paymentMethod) === 'cash'
-                      ? styles.previewFlowBadgeTextCash
-                      : isCustomerDepositPaymentMethod(orderPreviewSnapshot.paymentMethod)
-                        ? styles.previewFlowBadgeTextDeposit
-                      : styles.previewFlowBadgeTextNonCash,
-                  ]}
-                >
-                  {mapPaymentMethodToBackend(orderPreviewSnapshot.paymentMethod) === 'cash'
-                    ? 'TUNAI FISIK'
-                    : isCustomerDepositPaymentMethod(orderPreviewSnapshot.paymentMethod)
-                      ? 'SALDO CUSTOMER'
-                      : 'MASUK REKENING'}
-                </Text>
-              </View>
-              {String(orderPreviewSnapshot.paymentTargetName || '').trim() ? (
-                <View style={styles.previewTargetBadge}>
-                  <Text style={styles.previewTargetBadgeText}>{orderPreviewSnapshot.paymentTargetName}</Text>
-                </View>
-              ) : null}
-            </View>
-            <Text style={styles.popupMessage}>
-              {isCustomerDepositPaymentMethod(orderPreviewSnapshot.paymentMethod)
-                ? `Order akan dibuat dulu lalu invoice dibayar penuh memakai ${orderPreviewSnapshot.paymentTargetName || 'saldo customer'}.`
-                : `Akan masuk ke akun ${mapPaymentMethodToBackend(orderPreviewSnapshot.paymentMethod) === 'cash' ? 'kas' : 'pembayaran'}: ${orderPreviewSnapshot.paymentTargetName || '-'}`}
-            </Text>
 
             <ScrollView style={styles.processOrderItemList} contentContainerStyle={styles.processOrderItemListContent}>
               {Array.isArray(orderPreviewSnapshot.items) && orderPreviewSnapshot.items.length > 0 ? (
                 orderPreviewSnapshot.items.map((item, index) => (
                   <View key={`process-detail-${item.no}-${index}`} style={[styles.previewItemCard, styles.processOrderItemCard]}>
                     <Text style={styles.previewItemTitle}>{index + 1}. {item.product}</Text>
-                    <Text style={styles.previewItemMeta}>Qty: {item.qty} | Ukuran: {item.size}</Text>
+                    <Text style={styles.previewItemMeta}>Qty: {item.qty}</Text>
+                    <Text style={styles.previewItemMeta}>Harga Satuan: {formatRupiah(item.price)}</Text>
+                    <Text style={styles.previewItemMeta}>Subtotal Item: {formatRupiah(item.total)}</Text>
+                    <Text style={styles.previewItemMeta}>Ukuran: {item.size}</Text>
                     <Text style={styles.previewItemMeta}>Finishing: {item.finishing}</Text>
                     <Text style={styles.previewItemMeta}>Bahan: {item.material}</Text>
                     {Number(item.pages || 1) > 1 ? (
@@ -10775,60 +11424,206 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                     {String(item.note || '').trim() && String(item.note || '').trim() !== '-' ? (
                       <Text style={styles.previewItemMeta}>Catatan: {item.note}</Text>
                     ) : null}
-                    <Text style={styles.previewItemTotal}>Total: {formatRupiah(item.total)}</Text>
                   </View>
                 ))
               ) : (
                 <Text style={styles.invoiceDetailEmpty}>Keranjang belum memiliki item.</Text>
               )}
             </ScrollView>
-            <Text style={styles.popupMessage}>Subtotal: {formatRupiah(orderPreviewSnapshot.subtotal)}</Text>
-            <Text style={styles.popupMessage}>Diskon: {formatRupiah(orderPreviewSnapshot.discountAmount)}</Text>
-            <Text style={styles.popupMessage}>Grand Total: {formatRupiah(orderPreviewSnapshot.grandTotal)}</Text>
-            <View style={[styles.popupActions, styles.processOrderActions]}>
+
+            <View style={styles.processOrderSummaryCard}>
+              <View style={styles.processOrderSummaryRow}>
+                <Text style={styles.processOrderSummaryLabel}>Subtotal</Text>
+                <Text style={styles.processOrderSummaryValue}>{formatRupiah(orderPreviewSnapshot.subtotal)}</Text>
+              </View>
+              <View style={styles.processOrderSummaryRow}>
+                <Text style={styles.processOrderSummaryLabel}>Diskon</Text>
+                <Text style={styles.processOrderSummaryValue}>{formatRupiah(orderPreviewSnapshot.discountAmount)}</Text>
+              </View>
+              {Number(orderPreviewSnapshot.taxAmount || 0) > 0 ? (
+                <View style={styles.processOrderSummaryRow}>
+                  <Text style={styles.processOrderSummaryLabel}>Pajak</Text>
+                  <Text style={styles.processOrderSummaryValue}>{formatRupiah(orderPreviewSnapshot.taxAmount)}</Text>
+                </View>
+              ) : null}
+              {Number(orderPreviewSnapshot.extraChargeAmount || 0) > 0 ? (
+                <View style={styles.processOrderSummaryRow}>
+                  <Text style={styles.processOrderSummaryLabel}>Biaya Tambahan</Text>
+                  <Text style={styles.processOrderSummaryValue}>{formatRupiah(orderPreviewSnapshot.extraChargeAmount)}</Text>
+                </View>
+              ) : null}
+              <View style={[styles.processOrderSummaryRow, styles.processOrderSummaryRowStrong]}>
+                <Text style={styles.processOrderSummaryLabelStrong}>Total Akhir</Text>
+                <Text style={styles.processOrderSummaryValueStrong}>{formatRupiah(orderPreviewSnapshot.grandTotal)}</Text>
+              </View>
+            </View>
+
+            <View style={[styles.popupActions, styles.processOrderActionsCompact]}>
               <Pressable
-                style={[styles.popupButton, styles.popupButtonSecondary, styles.processOrderActionButton]}
+                style={[styles.popupButton, styles.popupButtonSecondary, styles.processOrderActionButtonCompact]}
                 disabled={isSubmitting}
-                onPress={() => setIsProcessOrderDetailOpen(false)}
+                onPress={() => setModalDetailPesanan(false)}
               >
                 <Text style={[styles.popupButtonText, styles.popupButtonTextSecondary]}>Batal</Text>
               </Pressable>
               <Pressable
-                style={[styles.popupButton, styles.popupButtonSecondary, styles.processOrderActionButton]}
+                style={[styles.popupButton, styles.popupButtonSecondary, styles.processOrderActionButtonCompact]}
                 disabled={isSubmitting}
-                onPress={() => handleCopyOrderSnapshot(orderPreviewSnapshot, 'Salin Pesanan')}
+                onPress={handlePrintProductionWorkOrder}
               >
-                <Text style={[styles.popupButtonText, styles.popupButtonTextSecondary]}>Salin Pesanan</Text>
+                <Text style={[styles.popupButtonText, styles.popupButtonTextSecondary]}>Cetak Nota SPK</Text>
               </Pressable>
               <Pressable
-                style={[styles.popupButton, styles.processOrderActionButton]}
+                style={[styles.popupButton, styles.processOrderActionButtonCompact]}
                 disabled={isSubmitting}
-                onPress={handleCopyPreviewInvoice}
+                onPress={handleOpenPaymentMethodModalFromDetail}
               >
-                <Text style={styles.popupButtonText}>Salin Invoice</Text>
+                <Text style={styles.popupButtonText}>Lanjut Pilih Pembayaran</Text>
               </Pressable>
-              <Pressable
-                style={[styles.popupButton, styles.processOrderActionButton]}
-                disabled={isSubmitting}
-                onPress={handlePrintPreviewReceipt}
-              >
-                <Text style={styles.popupButtonText}>Cetak</Text>
-              </Pressable>
-              <Pressable
-                style={[styles.popupButton, styles.popupButtonSecondary, styles.processOrderActionButton, isSubmitting ? styles.draftActionDisabled : null]}
-                disabled={isSubmitting}
-                onPress={handleSaveTransactionFromProcessModal}
-              >
-                <Text style={[styles.popupButtonText, styles.popupButtonTextSecondary]}>
-                  {isSubmitting ? 'Memproses...' : 'Simpan Draft'}
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      <Modal
+        visible={modalPilihPembayaran}
+        transparent
+        animationType="fade"
+        onRequestClose={() => {
+          if (!isSubmitting) {
+            setModalPilihPembayaran(false);
+          }
+        }}
+      >
+        <View style={styles.popupBackdrop}>
+          <View style={[styles.popupCard, styles.processOrderPaymentCard]}>
+            <Text style={styles.popupTitle}>Pilih Metode Pembayaran</Text>
+            <Text style={styles.processOrderHint}>
+              Pilih satu metode pembayaran yang benar sebelum transaksi diproses dan nota dicetak.
+            </Text>
+            <View style={styles.processOrderSummaryCard}>
+              <View style={styles.processOrderSummaryRow}>
+                <Text style={styles.processOrderSummaryLabel}>Pelanggan</Text>
+                <Text style={styles.processOrderSummaryValue}>{orderPreviewSnapshot.customerName}</Text>
+              </View>
+              <View style={[styles.processOrderSummaryRow, styles.processOrderSummaryRowStrong]}>
+                <Text style={styles.processOrderSummaryLabelStrong}>Total Akhir</Text>
+                <Text style={styles.processOrderSummaryValueStrong}>{formatRupiah(orderPreviewSnapshot.grandTotal)}</Text>
+              </View>
+            </View>
+            <View style={styles.receivablePaymentForm}>
+              <Text style={styles.reportInputLabel}>Metode Pembayaran</Text>
+              <View style={styles.methodQuickRowWrap}>
+                {checkoutPaymentMethodOptions.map((option) => {
+                  const active = String(option) === String(paymentMethod || '');
+                  const disabled = (
+                    !enabledCheckoutPaymentMethodOptions.includes(option)
+                    || (option === CUSTOMER_DEPOSIT_PAYMENT_LABEL && !selectedCustomerId)
+                  );
+                  return (
+                    <Pressable
+                      key={`process-method-${option}`}
+                      style={[
+                        styles.receivableMethodChip,
+                        active ? styles.receivableMethodChipActive : null,
+                        disabled ? styles.receivableMethodChipDisabled : null,
+                      ]}
+                      disabled={disabled || isSubmitting}
+                      onPress={() => {
+                        handleChangeCheckoutPaymentMethod(option).catch(() => {});
+                      }}
+                    >
+                      <Text
+                        style={[
+                          styles.receivableMethodChipText,
+                          active ? styles.receivableMethodChipTextActive : null,
+                          disabled ? styles.receivableMethodChipTextDisabled : null,
+                        ]}
+                      >
+                        {option}
+                      </Text>
+                    </Pressable>
+                  );
+                })}
+              </View>
+              <Text style={styles.receivableHelperText}>{paymentMethodHelperText}</Text>
+            </View>
+            <View
+              style={[
+                styles.processOrderSelectionCard,
+                !String(paymentMethod || '').trim()
+                  ? styles.processOrderSelectionCardWarning
+                  : processOrderNeedsAccountSelection
+                    ? styles.processOrderSelectionCardCaution
+                    : styles.processOrderSelectionCardReady,
+              ]}
+            >
+              <Text style={styles.processOrderSelectionTitle}>
+                {!String(paymentMethod || '').trim()
+                  ? 'Metode pembayaran belum dipilih'
+                  : 'Metode pembayaran terpilih'}
+              </Text>
+              <View style={styles.processOrderSelectionRow}>
+                <Text style={styles.processOrderSelectionLabel}>Metode</Text>
+                <Text style={styles.processOrderSelectionValue}>{processOrderSelectedMethodLabel}</Text>
+              </View>
+              <View style={styles.processOrderSelectionRow}>
+                <Text style={styles.processOrderSelectionLabel}>Tujuan</Text>
+                <Text style={styles.processOrderSelectionValue}>
+                  {processOrderSelectedAccountLabel || (
+                    isCustomerDepositPaymentMethod(paymentMethod)
+                      ? 'Saldo Customer'
+                      : 'Belum ada akun tujuan aktif'
+                  )}
                 </Text>
+              </View>
+              <View style={styles.processOrderSelectionRow}>
+                <Text style={styles.processOrderSelectionLabel}>Nominal</Text>
+                <Text style={styles.processOrderSelectionValue}>{formatRupiah(orderPreviewSnapshot.grandTotal)}</Text>
+              </View>
+              <Text style={styles.processOrderSelectionHint}>
+                {!String(paymentMethod || '').trim()
+                  ? 'Kasir wajib memilih metode pembayaran sebelum tombol proses dan cetak nota aktif.'
+                  : processOrderNeedsAccountSelection
+                    ? 'Metode sudah dipilih, tetapi backend belum menyediakan akun tujuan aktif untuk metode ini.'
+                    : paymentMethodHelperText}
+              </Text>
+            </View>
+            {isProcessOrderMethodMissing ? (
+              <View style={styles.reportWarningBox}>
+                <Text style={styles.reportWarningText}>
+                  Metode pembayaran wajib dipilih dulu sebelum transaksi bisa diproses.
+                </Text>
+              </View>
+            ) : null}
+            {processOrderNeedsAccountSelection ? (
+              <View style={styles.reportWarningBox}>
+                <Text style={styles.reportWarningText}>
+                  Metode ini belum punya akun pembayaran aktif di backend. Pilih metode lain atau lengkapi mapping payment account dulu.
+                </Text>
+              </View>
+            ) : null}
+
+            <View style={[styles.popupActions, styles.processOrderActionsCompact]}>
+              <Pressable
+                style={[styles.popupButton, styles.popupButtonSecondary, styles.processOrderActionButtonCompact]}
+                disabled={isSubmitting}
+                onPress={() => setModalPilihPembayaran(false)}
+              >
+                <Text style={[styles.popupButtonText, styles.popupButtonTextSecondary]}>Batal</Text>
               </Pressable>
               <Pressable
-                style={[styles.popupButton, styles.processOrderActionButton, isSubmitting ? styles.draftActionDisabled : null]}
-                disabled={isSubmitting}
-                onPress={handleConfirmProcessOrder}
+                style={[
+                  styles.popupButton,
+                  styles.processOrderActionButtonCompact,
+                  (isSubmitting || isProcessOrderBlocked) ? styles.draftActionDisabled : null,
+                ]}
+                disabled={isSubmitting || isProcessOrderBlocked}
+                onPress={handleProcessAndPrintOrder}
               >
-                <Text style={styles.popupButtonText}>{isSubmitting ? 'Memproses...' : 'Proses Order'}</Text>
+                <Text style={styles.popupButtonText}>
+                  {isSubmitting ? 'Memproses...' : isProcessOrderMethodMissing ? 'Pilih Metode Dulu' : processOrderNeedsAccountSelection ? 'Lengkapi Akun Dulu' : 'Proses dan Cetak Nota'}
+                </Text>
               </Pressable>
             </View>
           </View>
@@ -11143,9 +11938,12 @@ const SalesScreen = ({ currentUser, onLogout }) => {
             <View style={styles.receivablePaymentForm}>
               <Text style={styles.reportInputLabel}>Metode Bayar</Text>
               <View style={styles.methodQuickRowWrap}>
-                {RECEIVABLE_PAYMENT_METHOD_LABELS.map((option) => {
+                {checkoutPaymentMethodOptions.map((option) => {
                   const active = String(option) === String(receivablePaymentModal.method || '');
-                  const disabled = option === CUSTOMER_DEPOSIT_PAYMENT_LABEL && !(Number(receivablePaymentModal.customerId || 0) > 0);
+                  const disabled = (
+                    !enabledCheckoutPaymentMethodOptions.includes(option)
+                    || (option === CUSTOMER_DEPOSIT_PAYMENT_LABEL && !(Number(receivablePaymentModal.customerId || 0) > 0))
+                  );
                   return (
                     <Pressable
                       key={`receivable-method-${option}`}
@@ -11204,7 +12002,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
               {!isCustomerDepositPaymentMethod(receivablePaymentModal.method) ? (
                 <>
                   <Text style={styles.reportInputLabel}>
-                    {mapPaymentMethodToBackend(receivablePaymentModal.method) === 'cash' ? 'Akun Kas' : 'Akun / Rekening Tujuan'}
+                    {normalizePaymentMethodType(findPaymentMethodConfig(paymentMethodConfigs, receivablePaymentModal.method)?.type || receivablePaymentModal.method) === 'cash' ? 'Akun Kas' : 'Akun / Rekening Tujuan'}
                   </Text>
                   {receivablePaymentModal.isLoadingAccounts ? (
                     <View style={styles.bankPickerLoadingWrap}>
@@ -11287,6 +12085,9 @@ const SalesScreen = ({ currentUser, onLogout }) => {
               <Text style={styles.popupMessage}>Item: {invoiceDetailModal.itemCount} | Total: {formatRupiah(invoiceDetailModal.total)}</Text>
               <Text style={styles.popupMessage}>Pengambilan: {invoiceDetailModal.pickedUpText}</Text>
               <Text style={styles.popupMessage}>Tanggal: {invoiceDetailModal.createdAt}</Text>
+              {String(invoiceDetailModal.cancellationText || '').trim() ? (
+                <Text style={styles.popupMessage}>Pembatalan: {invoiceDetailModal.cancellationText}</Text>
+              ) : null}
 
               {Array.isArray(invoiceDetailModal.items) && invoiceDetailModal.items.length > 0 ? (
                 invoiceDetailModal.items.map((item, index) => (
@@ -11300,10 +12101,33 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                     <Text style={styles.invoiceItemMeta}>
                       Qty: {item.qty}{item.showPages ? ` | Halaman: ${item.pages}` : ''}
                     </Text>
+                    {item.isGroupProduct ? (
+                      <Text style={styles.invoiceItemGroupBadge}>
+                        Paket Produk{item.groupSummary ? ` | ${item.groupSummary}` : ''}
+                      </Text>
+                    ) : null}
                     <Text style={styles.invoiceItemMeta}>Ukuran: {item.sizeText}</Text>
                     <Text style={styles.invoiceItemMeta}>Bahan: {item.materialText}</Text>
                     <Text style={styles.invoiceItemMeta}>Finishing: {item.finishingText}</Text>
                     <Text style={styles.invoiceItemMeta}>LB Max: {item.lbMaxText}</Text>
+                    {Array.isArray(item.bundleComponents) && item.bundleComponents.length > 0 ? (
+                      <View style={styles.invoiceBundleSection}>
+                        <Text style={styles.invoiceBundleTitle}>Komponen Paket</Text>
+                        {item.bundleComponents.map((component) => (
+                          <View key={component.key} style={styles.invoiceBundleRow}>
+                            <Text style={[styles.invoiceBundleName, component.isMainMaterial ? styles.invoiceBundleNamePrimary : null]}>
+                              {component.name}
+                            </Text>
+                            <Text style={[styles.invoiceBundleQty, component.isMainMaterial ? styles.invoiceBundleQtyPrimary : null]}>
+                              {component.qtyText}
+                            </Text>
+                            {component.detailText ? (
+                              <Text style={styles.invoiceBundleMeta}>{component.detailText}</Text>
+                            ) : null}
+                          </View>
+                        ))}
+                      </View>
+                    ) : null}
                     {item?.pricingSummary?.billingGroup ? (
                       <Text style={styles.invoiceItemMeta}>Rule Sticker: {item.pricingSummary.billingGroup}{item.pricingSummary.rollWidth > 0 ? ` | Lebar Roll: ${item.pricingSummary.rollWidth} m` : ''}</Text>
                     ) : null}
@@ -11356,10 +12180,19 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         onRequestClose={closeNotice}
       >
         <View style={styles.popupBackdrop}>
-          <View style={styles.popupCard}>
+          <View
+            style={[
+              styles.popupCard,
+              noticeModal.visual === 'success' ? styles.popupCardSuccess : null,
+            ]}
+          >
+            {noticeModal.visual === 'success' ? (
+              <SuccessAnimation size={176} />
+            ) : null}
             <Text
               style={[
                 styles.popupTitle,
+                noticeModal.visual === 'success' ? styles.popupTitleSuccess : null,
                 String(noticeModal.title || '').trim().toUpperCase() === 'SETOK HABIS'
                   ? styles.popupTitleDanger
                   : null,
@@ -11626,6 +12459,16 @@ const styles = StyleSheet.create({
   },
   payloadFlagError: {
     color: '#b42318',
+  },
+  syncStatusInlineCard: {
+    marginTop: 6,
+    alignSelf: 'flex-start',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  syncStatusInlineText: {
+    marginTop: 0,
   },
   healthBar: {
     borderWidth: 1,
@@ -12309,6 +13152,57 @@ const styles = StyleSheet.create({
   productionCurrentText: {
     fontWeight: '700',
   },
+  invoicePaymentBadgeRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 6,
+    marginTop: 5,
+    marginBottom: 2,
+  },
+  invoicePaymentBadge: {
+    borderWidth: 1,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+  },
+  invoicePaymentBadgeCash: {
+    borderColor: '#9ed1b1',
+    backgroundColor: '#ebf8f0',
+  },
+  invoicePaymentBadgeNonCash: {
+    borderColor: '#a8c6f0',
+    backgroundColor: '#eef4ff',
+  },
+  invoicePaymentBadgeDeposit: {
+    borderColor: '#b8dfc7',
+    backgroundColor: '#f3fbf6',
+  },
+  invoicePaymentBadgeText: {
+    fontSize: 10,
+    fontWeight: '800',
+    textTransform: 'uppercase',
+  },
+  invoicePaymentBadgeTextCash: {
+    color: '#1d6a3c',
+  },
+  invoicePaymentBadgeTextNonCash: {
+    color: '#1e4f99',
+  },
+  invoicePaymentBadgeTextDeposit: {
+    color: '#1d6a3c',
+  },
+  invoicePaymentTargetBadge: {
+    borderWidth: 1,
+    borderColor: '#d4d9e6',
+    backgroundColor: '#f7f9fc',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    maxWidth: '100%',
+  },
+  invoicePaymentTargetBadgeText: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: '#33425f',
+  },
   draftActionColumn: {
     gap: 6,
     minWidth: 104,
@@ -12353,29 +13247,41 @@ const styles = StyleSheet.create({
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
-    padding: 16,
-    backgroundColor: '#d9dadc',
+    paddingHorizontal: 28,
+    paddingVertical: 20,
+    backgroundColor: '#dbe3ef',
   },
   loadingCard: {
     width: '100%',
-    maxWidth: 420,
+    maxWidth: 960,
+    minHeight: 520,
     borderWidth: 1,
-    borderColor: '#a9a9a9',
-    backgroundColor: '#e3e3e3',
-    paddingHorizontal: 14,
-    paddingVertical: 16,
+    borderColor: '#c7d4ea',
+    backgroundColor: '#f7faff',
+    paddingHorizontal: 36,
+    paddingVertical: 32,
     alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: 18,
+    shadowColor: '#163a85',
+    shadowOpacity: 0.08,
+    shadowRadius: 22,
+    shadowOffset: { width: 0, height: 10 },
+    elevation: 5,
   },
   loadingTitle: {
-    marginTop: 8,
-    fontSize: 13,
+    marginTop: 18,
+    fontSize: 24,
     fontWeight: '800',
     color: '#11469f',
+    textAlign: 'center',
   },
   loadingMessage: {
-    marginTop: 6,
-    fontSize: 12,
-    color: '#2f2f2f',
+    marginTop: 14,
+    maxWidth: 680,
+    fontSize: 16,
+    lineHeight: 24,
+    color: '#31415f',
     textAlign: 'center',
   },
   popupCard: {
@@ -12387,6 +13293,13 @@ const styles = StyleSheet.create({
     padding: 12,
     alignItems: 'center',
   },
+  popupCardSuccess: {
+    maxWidth: 500,
+    borderColor: '#bdd9c6',
+    backgroundColor: '#f5fcf7',
+    paddingVertical: 20,
+    paddingHorizontal: 18,
+  },
   orderPreviewCard: {
     maxWidth: 416,
     alignSelf: 'center',
@@ -12395,6 +13308,10 @@ const styles = StyleSheet.create({
   processOrderCard: {
     maxWidth: 760,
     maxHeight: '86%',
+    alignItems: 'stretch',
+  },
+  processOrderPaymentCard: {
+    maxWidth: 620,
     alignItems: 'stretch',
   },
   orderPreviewContent: {
@@ -12451,6 +13368,58 @@ const styles = StyleSheet.create({
     fontSize: 11,
     color: '#2f2f2f',
     marginBottom: 2,
+  },
+  invoiceItemGroupBadge: {
+    alignSelf: 'flex-start',
+    marginBottom: 4,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderWidth: 1,
+    borderColor: '#9cc2ff',
+    backgroundColor: '#eef4ff',
+    color: '#1d4fa3',
+    fontSize: 10,
+    fontWeight: '800',
+  },
+  invoiceBundleSection: {
+    marginTop: 6,
+    marginBottom: 4,
+    padding: 8,
+    borderWidth: 1,
+    borderColor: '#d7e2f3',
+    backgroundColor: '#ffffff',
+  },
+  invoiceBundleTitle: {
+    fontSize: 11,
+    fontWeight: '800',
+    color: '#244784',
+    marginBottom: 6,
+  },
+  invoiceBundleRow: {
+    marginBottom: 6,
+  },
+  invoiceBundleName: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#253247',
+  },
+  invoiceBundleNamePrimary: {
+    color: '#11469f',
+  },
+  invoiceBundleQty: {
+    fontSize: 11,
+    color: '#2f2f2f',
+    marginTop: 1,
+  },
+  invoiceBundleQtyPrimary: {
+    color: '#0b3a8f',
+    fontWeight: '800',
+  },
+  invoiceBundleMeta: {
+    fontSize: 10,
+    color: '#5d687a',
+    marginTop: 1,
+    lineHeight: 15,
   },
   invoiceItemTotal: {
     marginTop: 2,
@@ -12695,11 +13664,78 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     color: '#33425f',
   },
+  processOrderSelectionCard: {
+    width: '100%',
+    marginTop: 2,
+    marginBottom: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    borderWidth: 1,
+    gap: 6,
+  },
+  processOrderSelectionCardReady: {
+    borderColor: '#cdddf7',
+    backgroundColor: '#f4f8ff',
+  },
+  processOrderSelectionCardCaution: {
+    borderColor: '#f1d29c',
+    backgroundColor: '#fff8eb',
+  },
+  processOrderSelectionCardWarning: {
+    borderColor: '#f3c2c2',
+    backgroundColor: '#fff3f3',
+  },
+  processOrderSelectionTitle: {
+    fontSize: 12,
+    fontWeight: '800',
+    color: '#1d3557',
+  },
+  processOrderSelectionRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    justifyContent: 'space-between',
+    gap: 12,
+  },
+  processOrderSelectionLabel: {
+    minWidth: 60,
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#627089',
+  },
+  processOrderSelectionValue: {
+    flex: 1,
+    fontSize: 12,
+    fontWeight: '800',
+    color: '#20324f',
+    textAlign: 'right',
+  },
+  processOrderSelectionHint: {
+    fontSize: 11,
+    lineHeight: 16,
+    color: '#395274',
+  },
+  processOrderHint: {
+    width: '100%',
+    marginBottom: 10,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    borderWidth: 1,
+    borderColor: '#d7e1f5',
+    backgroundColor: '#f3f7ff',
+    fontSize: 11,
+    lineHeight: 17,
+    color: '#35507a',
+  },
   popupTitle: {
     fontSize: 14,
     fontWeight: '800',
     color: '#11469f',
     marginBottom: 8,
+  },
+  popupTitleSuccess: {
+    marginTop: 4,
+    color: '#1f7a42',
+    textAlign: 'center',
   },
   popupTitleDanger: {
     color: '#c62828',
@@ -12724,6 +13760,13 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: 8,
   },
+  processOrderActionsCompact: {
+    width: '100%',
+    flexWrap: 'nowrap',
+    justifyContent: 'flex-end',
+    alignItems: 'stretch',
+    gap: 8,
+  },
   processOrderActionButton: {
     minWidth: 0,
     flexBasis: 0,
@@ -12731,6 +13774,58 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     paddingHorizontal: 8,
+  },
+  processOrderActionButtonCompact: {
+    minWidth: 180,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 10,
+  },
+  processOrderSummaryCard: {
+    width: '100%',
+    marginTop: 8,
+    marginBottom: 8,
+    borderWidth: 1,
+    borderColor: '#d6dfef',
+    backgroundColor: '#f7faff',
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    gap: 6,
+  },
+  processOrderSummaryRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'flex-start',
+    gap: 12,
+  },
+  processOrderSummaryRowStrong: {
+    marginTop: 4,
+    paddingTop: 8,
+    borderTopWidth: 1,
+    borderTopColor: '#d6dfef',
+  },
+  processOrderSummaryLabel: {
+    fontSize: 11,
+    color: '#56637c',
+    fontWeight: '700',
+  },
+  processOrderSummaryValue: {
+    flex: 1,
+    fontSize: 11,
+    color: '#20324f',
+    textAlign: 'right',
+  },
+  processOrderSummaryLabelStrong: {
+    fontSize: 12,
+    color: '#153b80',
+    fontWeight: '800',
+  },
+  processOrderSummaryValueStrong: {
+    flex: 1,
+    fontSize: 13,
+    color: '#11469f',
+    fontWeight: '800',
+    textAlign: 'right',
   },
   orderPreviewActions: {
     width: '100%',

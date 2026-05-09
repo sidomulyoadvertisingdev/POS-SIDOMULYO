@@ -25,6 +25,7 @@ const PaymentSummary = ({
   onProcessOrder,
   onCancelTransaction,
   isSubmitting,
+  deferPaymentMethodSelection = false,
 }) => {
   const toMoney = (value) => `Rp. ${Number(value || 0).toLocaleString('id-ID')}`;
   const [isPaymentMethodModalOpen, setIsPaymentMethodModalOpen] = useState(false);
@@ -35,11 +36,13 @@ const PaymentSummary = ({
     ? disabledPaymentMethodOptions.map((value) => String(value))
     : [];
   const normalizedMethod = String(paymentMethod || '').trim().toLowerCase();
-  const paymentFlowBadge = normalizedMethod === 'cash'
-    ? { label: 'Tunai Fisik', tone: 'cash' }
-    : normalizedMethod === 'saldo pelanggan'
-      ? { label: 'Settlement Saldo', tone: 'wallet' }
-      : { label: 'Masuk Rekening', tone: 'noncash' };
+  const paymentFlowBadge = !normalizedMethod
+    ? { label: 'Pilih Saat Proses', tone: 'noncash' }
+    : normalizedMethod === 'cash'
+      ? { label: 'Tunai Fisik', tone: 'cash' }
+      : normalizedMethod === 'saldo pelanggan'
+        ? { label: 'Settlement Saldo', tone: 'wallet' }
+        : { label: 'Masuk Rekening', tone: 'noncash' };
 
   return (
     <View style={styles.wrapper}>
@@ -81,37 +84,47 @@ const PaymentSummary = ({
           <View style={styles.row}>
             <Text style={styles.label}>Metode Bayar</Text>
             <View style={styles.paymentMethodField}>
-              <Pressable style={[styles.input, styles.selectInput]} onPress={() => setIsPaymentMethodModalOpen(true)}>
-                <Text style={styles.selectText}>{paymentMethod || 'Pilih metode bayar'}</Text>
-              </Pressable>
-              <View style={styles.methodQuickRow}>
-                {methodOptions.map((option) => {
-                  const active = String(option) === String(paymentMethod || '');
-                  const disabled = disabledOptions.includes(String(option));
-                  return (
-                    <Pressable
-                      key={`quick-${String(option)}`}
-                      style={[
-                        styles.methodQuickChip,
-                        active ? styles.methodQuickChipActive : null,
-                        disabled ? styles.methodQuickChipDisabled : null,
-                      ]}
-                      disabled={disabled}
-                      onPress={() => onChangePaymentMethod?.(String(option))}
-                    >
-                      <Text
-                        style={[
-                          styles.methodQuickChipText,
-                          active ? styles.methodQuickChipTextActive : null,
-                          disabled ? styles.methodQuickChipTextDisabled : null,
-                        ]}
-                      >
-                        {String(option)}
-                      </Text>
-                    </Pressable>
-                  );
-                })}
-              </View>
+              {deferPaymentMethodSelection ? (
+                <View style={[styles.input, styles.selectInput, styles.readonlySelectInput]}>
+                  <Text style={styles.selectText}>
+                    {paymentMethod || 'Pilih saat klik Proses Order'}
+                  </Text>
+                </View>
+              ) : (
+                <>
+                  <Pressable style={[styles.input, styles.selectInput]} onPress={() => setIsPaymentMethodModalOpen(true)}>
+                    <Text style={styles.selectText}>{paymentMethod || 'Pilih metode bayar'}</Text>
+                  </Pressable>
+                  <View style={styles.methodQuickRow}>
+                    {methodOptions.map((option) => {
+                      const active = String(option) === String(paymentMethod || '');
+                      const disabled = disabledOptions.includes(String(option));
+                      return (
+                        <Pressable
+                          key={`quick-${String(option)}`}
+                          style={[
+                            styles.methodQuickChip,
+                            active ? styles.methodQuickChipActive : null,
+                            disabled ? styles.methodQuickChipDisabled : null,
+                          ]}
+                          disabled={disabled}
+                          onPress={() => onChangePaymentMethod?.(String(option))}
+                        >
+                          <Text
+                            style={[
+                              styles.methodQuickChipText,
+                              active ? styles.methodQuickChipTextActive : null,
+                              disabled ? styles.methodQuickChipTextDisabled : null,
+                            ]}
+                          >
+                            {String(option)}
+                          </Text>
+                        </Pressable>
+                      );
+                    })}
+                  </View>
+                </>
+              )}
               <View style={styles.paymentFlowBadgeRow}>
                 <View
                   style={[
@@ -301,6 +314,9 @@ const styles = StyleSheet.create({
   selectInput: {
     justifyContent: 'center',
     textAlign: 'left',
+  },
+  readonlySelectInput: {
+    opacity: 0.85,
   },
   selectText: {
     fontSize: 12,

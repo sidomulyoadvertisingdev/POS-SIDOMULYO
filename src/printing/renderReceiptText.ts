@@ -137,6 +137,10 @@ export const renderReceiptText = (receipt: ReceiptData, printerProfile: PrinterP
   }
   if (showPaymentDetail && hasValue(receipt.payment?.method)) {
     lines.push(leftRight(`Pembayaran ${String(receipt.payment?.method || '').trim()}`, formatReceiptAmount(receipt.payment?.amount || receipt.summary.grandTotal), width));
+    if (hasValue(receipt.payment?.targetAccount)) {
+      lines.push('Akun Tujuan :');
+      pushWrapped(lines, String(receipt.payment?.targetAccount || '').trim(), width);
+    }
   }
   lines.push(leftRight('Total', formatReceiptAmount(receipt.summary.grandTotal), width));
   if (typeof receipt.summary.change === 'number' && receipt.summary.change > 0) {
