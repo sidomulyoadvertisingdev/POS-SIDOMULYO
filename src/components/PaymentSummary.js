@@ -153,7 +153,7 @@ const PaymentSummary = ({
             <TextInput
               value={paymentAmount}
               onChangeText={onChangePaymentAmount}
-              keyboardType="numeric"
+              keyboardType="decimal-pad"
               placeholder="0"
               style={[styles.input, !paymentAmountEditable ? styles.inputReadonly : null]}
               editable={paymentAmountEditable}

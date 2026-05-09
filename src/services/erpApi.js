@@ -4,9 +4,23 @@ const resolveDefaultApiBaseUrl = () => {
   return 'https://dashboard.sidomulyoproject.com/api';
 };
 
+const ONLINE_ERP_API_BASE_URL = 'https://dashboard.sidomulyoproject.com/api';
+
+const resolveRuntimeApiBaseUrl = (configuredUrl) => {
+  const normalizedConfiguredUrl = String(configuredUrl || '').trim();
+  const hostname = String(globalThis?.location?.hostname || '').trim().toLowerCase();
+  const isLocalRuntime = hostname === 'localhost' || hostname === '127.0.0.1';
+
+  if (isLocalRuntime && normalizedConfiguredUrl === ONLINE_ERP_API_BASE_URL) {
+    return resolveDefaultApiBaseUrl();
+  }
+
+  return normalizedConfiguredUrl || resolveDefaultApiBaseUrl();
+};
+
 const extra = Constants.expoConfig?.extra || {};
 
-const API_BASE_URL = String(extra.erpApiBaseUrl || '').trim() || resolveDefaultApiBaseUrl();
+const API_BASE_URL = resolveRuntimeApiBaseUrl(extra.erpApiBaseUrl);
 const API_EMAIL = String(extra.erpEmail || '').trim();
 const API_PASSWORD = String(extra.erpPassword || '');
 const API_TOKEN = String(extra.erpToken || '').trim();

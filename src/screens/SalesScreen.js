@@ -67,7 +67,17 @@ import {
   writeHtmlToPrintWindow,
 } from '../printing';
 const { buildProductPickerTree, hasA3Token } = require('../utils/productPickerTree');
+const { resolveQtyOnlyProductMode } = require('../utils/productModes');
 const { extractOrderDiscountAmount } = require('../utils/receiptSummary');
+
+const buildQtyOnlyModeHelpers = () => ({
+  toSourceProduct,
+  toSourceMeta,
+  parseBooleanLoose,
+  normalizeText,
+  resolveProductCalcType,
+  isGroupBundleProduct,
+});
 
 const formatDate = (date) => {
   return date.toLocaleDateString('id-ID', {
@@ -314,6 +324,55 @@ const parseCurrencyInput = (value) => {
   }
   const parsed = Number(digits);
   return Number.isFinite(parsed) && parsed > 0 ? roundMoney(parsed) : 0;
+};
+const normalizeMoneyAmountInput = (value) => {
+  const text = String(value || '').replace(/[^0-9.,]/g, '').trim();
+  if (!text) {
+    return '';
+  }
+
+  const lastCommaIndex = text.lastIndexOf(',');
+  const lastDotIndex = text.lastIndexOf('.');
+  const separatorIndex = Math.max(lastCommaIndex, lastDotIndex);
+
+  if (separatorIndex < 0) {
+    return text.replace(/[^0-9]/g, '');
+  }
+
+  const integerPartRaw = text.slice(0, separatorIndex);
+  const fractionalPartRaw = text.slice(separatorIndex + 1);
+  const integerDigits = integerPartRaw.replace(/[^0-9]/g, '');
+  const fractionalDigits = fractionalPartRaw.replace(/[^0-9]/g, '');
+
+  if (!fractionalDigits) {
+    return integerDigits;
+  }
+
+  // Currency inputs in this flow only need up to 2 decimal digits.
+  // If the last group has more than 2 digits, treat separators as thousands separators.
+  if (fractionalDigits.length > 2) {
+    return `${integerDigits}${fractionalDigits}`;
+  }
+
+  const normalizedInteger = integerDigits || '0';
+  return `${normalizedInteger}.${fractionalDigits}`;
+};
+const parseMoneyAmountInput = (value) => {
+  const normalized = normalizeMoneyAmountInput(value);
+  if (!normalized) {
+    return 0;
+  }
+
+  const parsed = Number(normalized);
+  return Number.isFinite(parsed) && parsed > 0 ? roundMoney(parsed) : 0;
+};
+const formatMoneyAmountInput = (value) => {
+  const amount = roundMoney(Number(value) || 0);
+  if (!(amount > 0)) {
+    return '0';
+  }
+
+  return amount.toFixed(2).replace(/\.?0+$/, '');
 };
 const resolveA3NegotiationConfig = (product, productDetail = null) => {
   const rows = [
@@ -624,6 +683,9 @@ const extractFinishingLabelsFromPayload = (rows, nameMapById) => {
   return Array.from(new Set(labels));
 };
 const buildMaterialDisplay = (backendItem, materialMapById) => {
+  const groupMaterialNames = collectMaterialNames(
+    ...toGroupMaterialNamesFromRows(toGroupComponentRows(backendItem)),
+  );
   const primaryId = Number(
     backendItem?.material_product_id ||
     backendItem?.material_id ||
@@ -652,6 +714,9 @@ const buildMaterialDisplay = (backendItem, materialMapById) => {
   const uniq = Array.from(new Set(nameCandidates.map((name) => String(name || '').trim()).filter(Boolean)));
   if (uniq.length > 0) {
     return uniq.join(', ');
+  }
+  if (groupMaterialNames.length > 0) {
+    return groupMaterialNames.join(', ');
   }
   return toLabel(
     backendItem?.material_name,
@@ -1565,6 +1630,29 @@ const resolveProductClassification = (row) => {
     extractFirstTextByKeyHints(sourceProduct, ['subcategory_name', 'sub_category_name', 'product_subcategory', 'subkategori', 'sub_kategori']),
   );
 
+  const normalizedCategoryName = String(categoryName || '').trim();
+  const normalizedSubCategoryName = String(subCategoryName || '').trim();
+  const stampelContext = normalizeText([
+    normalizedCategoryName,
+    row?.name,
+    row?.sku,
+    sourceProduct?.name,
+    sourceProduct?.sku,
+    sourceMeta?.template_scope,
+    sourceMeta?.product_family,
+    rowMeta?.template_scope,
+    rowMeta?.product_family,
+  ].filter(Boolean).join(' '));
+  const looksLikeStampel = stampelContext.includes('stampel') || stampelContext.includes('stempel');
+  const categoryIsStampelRoot = ['stampel', 'stempel'].includes(normalizeText(normalizedCategoryName));
+
+  if (looksLikeStampel && normalizedCategoryName && !normalizedSubCategoryName && !categoryIsStampelRoot) {
+    return {
+      categoryName: 'Stampel',
+      subCategoryName: normalizedCategoryName,
+    };
+  }
+
   return {
     categoryName: categoryName || 'Tanpa Kategori',
     subCategoryName: subCategoryName || 'Tanpa Sub Kategori',
@@ -1792,18 +1880,26 @@ const resolveProductCalcType = (product, productDetail = null) => {
 
   return '';
 };
+const isGroupBundleProduct = (product, productDetail = null) => {
+  const rows = [
+    product,
+    productDetail,
+    toSourceProduct(product),
+    toSourceProduct(productDetail),
+    toSourceMeta(product),
+    toSourceMeta(productDetail),
+  ].filter(Boolean);
+
+  return rows.some((row) => {
+    if (Boolean(row?.is_group_product)) {
+      return true;
+    }
+
+    return Number(row?.group_component_count || 0) > 0;
+  });
+};
 const isQtyOnlyServiceProduct = (product, productDetail = null) => {
-  const productType = String(
-    toSourceProduct(productDetail)?.product_type
-    || toSourceProduct(product)?.product_type
-    || productDetail?.product_type
-    || product?.product_type
-    || toSourceMeta(productDetail)?.product_type
-    || toSourceMeta(product)?.product_type
-    || '',
-  ).trim().toLowerCase();
-  const calcType = resolveProductCalcType(product, productDetail);
-  return productType === 'service' && calcType === 'unit';
+  return resolveQtyOnlyProductMode(product, productDetail, buildQtyOnlyModeHelpers()).enabled;
 };
 const formatFinishingOptionLabel = (row) => {
   const name = String(row?.name || '').trim();
@@ -2166,6 +2262,61 @@ const toMaterialNamesFromRows = (rows) => (
         row?.title ||
         row?.label,
     )
+    : []
+);
+const toGroupComponentRows = (payload) => {
+  const direct = Array.isArray(payload?.group_components_preview) ? payload.group_components_preview : null;
+  if (direct) {
+    return direct;
+  }
+  const inData = Array.isArray(payload?.data?.group_components_preview) ? payload.data.group_components_preview : null;
+  if (inData) {
+    return inData;
+  }
+  const inProduct = Array.isArray(payload?.product?.group_components_preview) ? payload.product.group_components_preview : null;
+  if (inProduct) {
+    return inProduct;
+  }
+  const inDataProduct = Array.isArray(payload?.data?.product?.group_components_preview)
+    ? payload.data.product.group_components_preview
+    : null;
+  if (inDataProduct) {
+    return inDataProduct;
+  }
+  return [];
+};
+const isRawMaterialGroupComponent = (row) => {
+  const componentKind = normalizeText(row?.component_kind);
+  const productType = normalizeText(row?.product_type);
+  return componentKind === 'raw_material' || productType === 'raw_material';
+};
+const toGroupMaterialIdsFromRows = (rows) => (
+  Array.isArray(rows)
+    ? rows
+      .filter((row) => row && isRawMaterialGroupComponent(row))
+      .map((row) => row?.product_id || row?.component_product_id || row?.id || row?.material_product_id)
+    : []
+);
+const toGroupMaterialNamesFromRows = (rows) => (
+  Array.isArray(rows)
+    ? rows
+      .filter((row) => row && isRawMaterialGroupComponent(row))
+      .map((row) => {
+        const name = String(
+          row?.name ||
+          row?.material_name ||
+          row?.material_product_name ||
+          row?.sku ||
+          row?.label ||
+          ''
+        ).trim();
+        const qty = Number(row?.qty_per_bundle || row?.qty || 0) || 0;
+        const unit = String(row?.unit || '').trim();
+        if (name && qty > 1) {
+          return `${name} x${qty}${unit ? ` ${unit}` : ''}`;
+        }
+        return name;
+      })
     : []
 );
 const toSourceMeta = (row) => {
@@ -4981,7 +5132,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
   }, [discountMode, calculatedDiscountFromPercent, discountAmount]);
 
   const grandTotal = useMemo(() => Math.max(subtotal - finalDiscount, 0), [subtotal, finalDiscount]);
-  const paidAmount = useMemo(() => Number(paymentAmount) || 0, [paymentAmount]);
+  const paidAmount = useMemo(() => parseMoneyAmountInput(paymentAmount), [paymentAmount]);
   const changeAmount = useMemo(() => Math.max(paidAmount - grandTotal, 0), [paidAmount, grandTotal]);
   const paymentStatus = useMemo(() => {
     if (isCustomerDepositPaymentMethod(paymentMethod)) return 'Lunas via Saldo';
@@ -4997,19 +5148,19 @@ const SalesScreen = ({ currentUser, onLogout }) => {
   }, [customerDepositBalance, grandTotal, paymentMethod]);
   useEffect(() => {
     if (isCustomerDepositPaymentMethod(paymentMethod)) {
-      const nextAmountText = String(Math.max(0, Math.round(grandTotal)));
-      if (sanitizeNumericInput(String(paymentAmount || '')) !== nextAmountText) {
+      const nextAmountText = formatMoneyAmountInput(grandTotal);
+      if (normalizeMoneyAmountInput(String(paymentAmount || '')) !== nextAmountText) {
         setPaymentAmount(nextAmountText);
       }
       previousGrandTotalRef.current = grandTotal;
       return;
     }
 
-    const currentAmountText = sanitizeNumericInput(String(paymentAmount || ''));
-    const currentGrandTotalText = String(Math.max(0, Math.round(grandTotal)));
+    const currentAmountText = normalizeMoneyAmountInput(String(paymentAmount || ''));
+    const currentGrandTotalText = formatMoneyAmountInput(grandTotal);
     const previousGrandTotal = previousGrandTotalRef.current;
     const previousGrandTotalText =
-      previousGrandTotal === null ? '' : String(Math.max(0, Math.round(previousGrandTotal)));
+      previousGrandTotal === null ? '' : formatMoneyAmountInput(previousGrandTotal);
 
     // Auto-fill nominal bayar hanya saat masih default (kosong atau masih mengikuti total sebelumnya).
     const shouldAutofill =
@@ -5087,9 +5238,13 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     () => resolveFixedSizeA3Mode(selectedProductRow, selectedProductDetail),
     [selectedProductRow, selectedProductDetail],
   );
-  const selectedProductQtyOnlyMode = useMemo(
-    () => isQtyOnlyServiceProduct(selectedProductRow, selectedProductDetail),
+  const selectedProductQtyOnlyConfig = useMemo(
+    () => resolveQtyOnlyProductMode(selectedProductRow, selectedProductDetail, buildQtyOnlyModeHelpers()),
     [selectedProductRow, selectedProductDetail],
+  );
+  const selectedProductQtyOnlyMode = useMemo(
+    () => selectedProductQtyOnlyConfig.enabled,
+    [selectedProductQtyOnlyConfig],
   );
   const selectedA3NegotiationConfig = useMemo(
     () => resolveA3NegotiationConfig(selectedProductRow, selectedProductDetail),
@@ -5586,6 +5741,9 @@ const SalesScreen = ({ currentUser, onLogout }) => {
   const resolveMaterialInfo = (product, productDetail = null) => {
     const productSourceMeta = toSourceMeta(product);
     const detailSourceMeta = toSourceMeta(productDetail);
+    const groupComponentRows = []
+      .concat(toGroupComponentRows(product))
+      .concat(toGroupComponentRows(productDetail));
 
     const ids = collectMaterialIds(
       product?.material_product_id,
@@ -5612,6 +5770,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       ...toMaterialIdsFromRows(productDetail?.allowed_materials),
       ...toMaterialIdsFromRows(product?.selectable_materials),
       ...toMaterialIdsFromRows(productDetail?.selectable_materials),
+      ...toGroupMaterialIdsFromRows(groupComponentRows),
     );
 
     const materialRows = ids
@@ -5643,6 +5802,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       ...toMaterialNamesFromRows(productDetail?.allowed_materials),
       ...toMaterialNamesFromRows(product?.selectable_materials),
       ...toMaterialNamesFromRows(productDetail?.selectable_materials),
+      ...toGroupMaterialNamesFromRows(groupComponentRows),
     );
 
     return {
@@ -6396,7 +6556,8 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     const qtyNumber = Math.max(Number(qty) || 0, 1);
     const productDetail = await resolveProductDetail(Number(product.id));
     const fixedSizeMode = resolveFixedSizeA3Mode(product, productDetail);
-    const qtyOnlyMode = isQtyOnlyServiceProduct(product, productDetail);
+    const qtyOnlyConfig = resolveQtyOnlyProductMode(product, productDetail, buildQtyOnlyModeHelpers());
+    const qtyOnlyMode = qtyOnlyConfig.enabled;
     const size = fixedSizeMode.enabled
       ? {
         widthMeter: 0,
@@ -6413,7 +6574,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
           widthMm: null,
           heightMm: null,
           areaM2: 0,
-          displayText: 'Qty Only',
+          displayText: qtyOnlyConfig.displayText || 'Qty Only',
         }
       : buildSizeFromMeters(sizeWidthMeter, sizeLengthMeter);
     const materialInfo = resolveMaterialInfo(product, productDetail);
@@ -6605,7 +6766,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
   };
 
   const handleChangePaymentAmount = (value) => {
-    setPaymentAmount(sanitizeNumericInput(value));
+    setPaymentAmount(normalizeMoneyAmountInput(value));
   };
 
   const handleValidateProduct = async () => {
@@ -6716,7 +6877,16 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       const materialCandidateIds = Array.isArray(usedMaterialInfo?.materialIds)
         ? usedMaterialInfo.materialIds.map((id) => Number(id)).filter((id) => id > 0)
         : [];
-      const materialText = String(usedMaterialInfo?.displayText || '-').trim() || '-';
+      const isGroupProduct = isGroupBundleProduct(product, productDetail);
+      const groupSummary = String(
+        productDetail?.group_summary
+        || product?.group_summary
+        || '',
+      ).trim();
+      const resolvedMaterialText = String(usedMaterialInfo?.displayText || '').trim();
+      const materialText = isGroupProduct
+        ? (resolvedMaterialText || groupSummary || 'Paket produk')
+        : (resolvedMaterialText || '-');
 
       const backendItem = {
         product_id: Number(product.id),
@@ -6861,6 +7031,8 @@ const SalesScreen = ({ currentUser, onLogout }) => {
           id: itemId,
           product: String(buildSelectedProductLabel(product) || product.name || ''),
           productBaseName: String(normalizeProductFamilyName(product) || product.name || '').trim(),
+          isGroupProduct,
+          groupSummary,
           qty: qtyNumber,
           size: size.displayText,
           finishing: selectedFinishingDisplay || '-',
@@ -6916,14 +7088,14 @@ const SalesScreen = ({ currentUser, onLogout }) => {
   };
 
   useEffect(() => {
-    if (!selectedProductFixedSizeMode.enabled) {
+    if (!selectedProductFixedSizeMode.enabled && !selectedProductQtyOnlyMode) {
       return;
     }
     if (sizeWidthMeter || sizeLengthMeter) {
       setSizeWidthMeter('');
       setSizeLengthMeter('');
     }
-  }, [selectedProductFixedSizeMode.enabled, sizeWidthMeter, sizeLengthMeter]);
+  }, [selectedProductFixedSizeMode.enabled, selectedProductQtyOnlyMode, sizeWidthMeter, sizeLengthMeter]);
 
   const handleCancelItem = () => {
     setProductName('');
@@ -7878,7 +8050,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     const usingDeposit = isCustomerDepositPaymentMethod(receivablePaymentModal.method);
     const amount = usingDeposit
       ? roundMoney(Number(receivablePaymentModal.dueTotal || 0))
-      : roundMoney(parseCurrencyInput(receivablePaymentModal.amount));
+      : roundMoney(parseMoneyAmountInput(receivablePaymentModal.amount));
     const dueTotal = roundMoney(Number(receivablePaymentModal.dueTotal || 0));
 
     if (!(invoiceId > 0)) {
@@ -9403,6 +9575,10 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                 sizeLengthMeter={sizeLengthMeter}
                 onChangeSizeLengthMeter={(value) => setSizeLengthMeter(sanitizeDecimalInput(value))}
                 isQtyOnlyProduct={selectedProductQtyOnlyMode}
+                qtyOnlyInputLabel={selectedProductQtyOnlyConfig.inputLabel}
+                qtyOnlyStatusLabel={selectedProductQtyOnlyConfig.statusLabel}
+                qtyOnlyMaterialFallbackLabel={selectedProductQtyOnlyConfig.materialFallbackLabel}
+                qtyOnlyHintText={selectedProductQtyOnlyConfig.helperText}
                 isFixedSizeProduct={selectedProductFixedSizeMode.enabled}
                 fixedSizeLabel={selectedProductFixedSizeMode.label}
                 fixedSizeHint={selectedProductFixedSizeMode.helperText}
@@ -11014,8 +11190,8 @@ const SalesScreen = ({ currentUser, onLogout }) => {
               <Text style={styles.reportInputLabel}>Nominal Bayar</Text>
               <TextInput
                 value={receivablePaymentModal.amount}
-                onChangeText={(value) => setReceivablePaymentModal((prev) => ({ ...prev, amount: sanitizeCurrencyInput(value) }))}
-                keyboardType="numeric"
+                onChangeText={(value) => setReceivablePaymentModal((prev) => ({ ...prev, amount: normalizeMoneyAmountInput(value) }))}
+                keyboardType="decimal-pad"
                 placeholder="0"
                 placeholderTextColor="#6c7485"
                 style={[

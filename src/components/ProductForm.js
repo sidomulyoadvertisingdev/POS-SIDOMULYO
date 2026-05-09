@@ -3,6 +3,14 @@ import { Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 
 import { formatRupiah } from '../utils/currency';
 
 const normalizeText = (value) => String(value || '').trim().toLowerCase();
+const isGroupProductRow = (row) => Boolean(
+  row?.is_group_product
+  || row?.sourceProduct?.is_group_product
+  || row?.source_product?.is_group_product
+  || Number(row?.group_component_count || 0) > 0
+  || Number(row?.sourceProduct?.group_component_count || 0) > 0
+  || Number(row?.source_product?.group_component_count || 0) > 0,
+);
 
 const ProductForm = ({
   productName,
@@ -17,6 +25,10 @@ const ProductForm = ({
   sizeLengthMeter,
   onChangeSizeLengthMeter,
   isQtyOnlyProduct,
+  qtyOnlyInputLabel,
+  qtyOnlyStatusLabel,
+  qtyOnlyMaterialFallbackLabel,
+  qtyOnlyHintText,
   isFixedSizeProduct,
   fixedSizeLabel,
   fixedSizeHint,
@@ -68,6 +80,10 @@ const ProductForm = ({
     all_sides: true,
     sambungan: true,
   });
+  const qtyOnlyInputText = String(qtyOnlyInputLabel || '').trim() || 'Qty Only';
+  const qtyOnlyStatusText = String(qtyOnlyStatusLabel || '').trim() || 'Tanpa Ukuran';
+  const qtyOnlyMaterialText = String(qtyOnlyMaterialFallbackLabel || '').trim() || 'Tanpa Material';
+  const qtyOnlyHelperText = String(qtyOnlyHintText || '').trim() || 'Produk qty-only memakai jumlah/satuan tanpa input ukuran.';
 
   const categories = useMemo(
     () => (Array.isArray(productPickerTree) ? productPickerTree : []),
@@ -104,17 +120,23 @@ const ProductForm = ({
     );
     const skuLabel = uniqueSkus.length === 1 ? uniqueSkus[0] : '';
     if (uniqueNames.length > 1) {
-      return skuLabel ? `${name} [${skuLabel}] (${uniqueNames.length} varian)` : `${name} (${uniqueNames.length} varian)`;
+      const baseLabel = skuLabel ? `${name} [${skuLabel}] (${uniqueNames.length} varian)` : `${name} (${uniqueNames.length} varian)`;
+      return isGroupProductRow(product) ? `${baseLabel} [Paket]` : baseLabel;
     }
-    return skuLabel ? `${name} [${skuLabel}]` : name;
+    const baseLabel = skuLabel ? `${name} [${skuLabel}]` : name;
+    return isGroupProductRow(product) ? `${baseLabel} [Paket]` : baseLabel;
   };
   const formatVariantOptionLabel = (variant) => {
     const name = String(variant?.name || '').trim() || 'Varian';
     const sku = String(variant?.row?.sku || variant?.sku || '').trim();
-    if (!selectedProduct || !selectedProductHasVariants) {
-      return sku ? `${name} [${sku}]` : name;
+    const baseLabel = sku ? `${name} [${sku}]` : name;
+    if (isGroupProductRow(variant?.row || variant)) {
+      return `${baseLabel} [Paket]`;
     }
-    return sku ? `${name} [${sku}]` : name;
+    if (!selectedProduct || !selectedProductHasVariants) {
+      return baseLabel;
+    }
+    return baseLabel;
   };
   const hasVariantOptions = (product) => {
     const variants = Array.isArray(product?.variants) ? product.variants : [];
@@ -401,7 +423,7 @@ const ProductForm = ({
             </View>
           ) : isQtyOnlyProduct ? (
             <View style={[styles.readOnlyBox, styles.fixedSizeBox]}>
-              <Text style={[styles.readOnlyText, styles.fixedSizeValueText]}>Qty Only</Text>
+              <Text style={[styles.readOnlyText, styles.fixedSizeValueText]}>{qtyOnlyInputText}</Text>
             </View>
           ) : (
             <TextInput
@@ -421,7 +443,7 @@ const ProductForm = ({
             </View>
           ) : isQtyOnlyProduct ? (
             <View style={[styles.readOnlyBox, styles.fixedSizeBox]}>
-              <Text style={[styles.readOnlyText, styles.fixedSizeMetaText]}>Tanpa Ukuran</Text>
+              <Text style={[styles.readOnlyText, styles.fixedSizeMetaText]}>{qtyOnlyStatusText}</Text>
             </View>
           ) : (
             <TextInput
@@ -514,7 +536,9 @@ const ProductForm = ({
 
         <View style={[styles.totalCol, hideFinishingField ? styles.totalColWide : null]}>
           <View style={styles.readOnlyBox}>
-            <Text style={styles.readOnlyText}>{isQtyOnlyProduct ? 'Tanpa Material' : (materialDisplay || '-')}</Text>
+            <Text style={styles.readOnlyText}>
+              {isQtyOnlyProduct ? (materialDisplay || qtyOnlyMaterialText) : (materialDisplay || '-')}
+            </Text>
           </View>
           {materialError ? (
             <View style={styles.materialErrorBadge}>
@@ -535,7 +559,7 @@ const ProductForm = ({
         </View>
       ) : isQtyOnlyProduct ? (
         <View style={styles.fixedSizeHintCard}>
-          <Text style={styles.fixedSizeHintText}>Produk jasa ini memakai qty saja. Total dihitung dari harga backend x qty.</Text>
+          <Text style={styles.fixedSizeHintText}>{qtyOnlyHelperText}</Text>
         </View>
       ) : null}
 

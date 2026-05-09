@@ -18,6 +18,11 @@ const CartRow = ({ item, index, onDeleteItem }) => {
             Rule {pricingSummary.billingGroup}{Number(pricingSummary.rollWidth || 0) > 0 ? ` | Roll ${pricingSummary.rollWidth} m` : ''}
           </Text>
         ) : null}
+        {item?.isGroupProduct ? (
+          <Text style={styles.bundleMetaText} numberOfLines={2}>
+            Paket{item?.groupSummary ? ` | ${item.groupSummary}` : ''}
+          </Text>
+        ) : null}
         {pricingSummary?.stickerNotice ? (
           <Text style={styles.warningText} numberOfLines={3}>
             {pricingSummary.stickerNotice}
@@ -174,6 +179,13 @@ const styles = StyleSheet.create({
     fontSize: 10,
     color: '#36506f',
     textAlign: 'left',
+  },
+  bundleMetaText: {
+    marginTop: 2,
+    fontSize: 10,
+    color: '#0b4f8a',
+    textAlign: 'left',
+    fontWeight: '700',
   },
   bundleDiscountText: {
     marginTop: 2,
