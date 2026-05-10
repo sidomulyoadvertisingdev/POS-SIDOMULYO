@@ -3101,6 +3101,66 @@ const humanizePaymentMethod = (value) => {
   const text = String(normalized || '').trim();
   return text || 'Lainnya';
 };
+const mapPaymentMethodTypeToClosingBucket = (value) => {
+  const normalizedType = normalizePaymentMethodType(value);
+  if (normalizedType === 'cash') return 'cash';
+  if (normalizedType === 'bank_transfer') return 'transfer';
+  if (normalizedType === 'qris') return 'qris';
+  if (normalizedType === 'card') return 'card';
+  return 'other';
+};
+const resolveBreakdownPaymentTargetLabel = (row, accountRows = []) => {
+  const resolvedBankAccountId = Number(
+    row?.bank_account_id
+    || row?.payment_account_id
+    || row?.accounting_account_id
+    || row?.account_id
+    || row?.target_account_id
+    || row?.rekening_id
+    || 0
+  ) || 0;
+  const resolvedPaymentTarget = (Array.isArray(accountRows) ? accountRows : []).find((accountRow) => (
+    Number(accountRow?.id || 0) === resolvedBankAccountId
+    || Number(accountRow?.accountingAccountId || 0) === resolvedBankAccountId
+  )) || null;
+  const fallbackPaymentTargetName = [
+    row?.bank_account_code,
+    row?.payment_account_code,
+    row?.account_code,
+    row?.target_account_code,
+    row?.rekening_code,
+    row?.bank_account_name,
+    row?.payment_account_name,
+    row?.account_name,
+    row?.target_account_name,
+    row?.rekening_name,
+    row?.bank_name,
+    row?.payment_label,
+    row?.target_account,
+    row?.account_label,
+    row?.label,
+  ]
+    .map((value) => String(value || '').trim())
+    .filter(Boolean);
+  const compactFallback = Array.from(new Set(fallbackPaymentTargetName));
+  return String(
+    resolvedPaymentTarget?.displayTitle
+    || resolvedPaymentTarget?.displayName
+    || compactFallback.join(' - ')
+    || ''
+  ).trim();
+};
+const formatClosingBreakdownLabel = (row, accountRows = []) => {
+  const methodLabel = humanizePaymentMethod(
+    row?.method
+    || row?.payment_method
+    || row?.payment_type
+    || row?.type
+    || ''
+  );
+  const targetLabel = resolveBreakdownPaymentTargetLabel(row, accountRows);
+  return targetLabel ? `${methodLabel} -> ${targetLabel}` : methodLabel;
+};
 const resolveOrderPaymentMethodLabel = (row) => humanizePaymentMethod(
   row?.payment?.method
   || row?.payment_method
@@ -9453,19 +9513,15 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       other: 0,
     };
     closingPaymentRows.forEach((row) => {
-      const method = String(row?.method || '').trim().toLowerCase();
       const amount = roundMoney(Number(row?.total_amount || 0));
-      if (method === 'cash') {
-        totals.cash += amount;
-      } else if (method === 'transfer') {
-        totals.transfer += amount;
-      } else if (method === 'qris') {
-        totals.qris += amount;
-      } else if (method === 'card') {
-        totals.card += amount;
-      } else {
-        totals.other += amount;
-      }
+      const bucket = mapPaymentMethodTypeToClosingBucket(
+        row?.method
+        || row?.payment_method
+        || row?.payment_type
+        || row?.type
+        || '',
+      );
+      totals[bucket] += amount;
     });
     return {
       cash: roundMoney(totals.cash),
@@ -9867,10 +9923,10 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     const financeRecipient = String(closingFinanceRecipient || '').trim() || '-';
     const shiftNote = String(closingShiftNote || '').trim() || '-';
     const paymentLines = closingPaymentRows.length > 0
-      ? closingPaymentRows.map((row) => `<div class="line"><span>${escapeHtml(humanizePaymentMethod(row?.method))}</span><strong>${escapeHtml(formatRupiah(row?.total_amount || 0))}</strong></div>`).join('')
+      ? closingPaymentRows.map((row) => `<div class="line"><span>${escapeHtml(formatClosingBreakdownLabel(row, bankAccounts))}</span><strong>${escapeHtml(formatRupiah(row?.total_amount || 0))}</strong></div>`).join('')
       : '<div class="muted">Belum ada pembayaran penjualan hari ini</div>';
     const receivableLines = closingReceivableBreakdownRows.length > 0
-      ? closingReceivableBreakdownRows.map((row) => `<div class="line"><span>${escapeHtml(humanizePaymentMethod(row?.method))}</span><strong>${escapeHtml(formatRupiah(row?.total_amount || 0))}</strong></div>`).join('')
+      ? closingReceivableBreakdownRows.map((row) => `<div class="line"><span>${escapeHtml(formatClosingBreakdownLabel(row, bankAccounts))}</span><strong>${escapeHtml(formatRupiah(row?.total_amount || 0))}</strong></div>`).join('')
       : '<div class="muted">Belum ada pelunasan piutang hari ini</div>';
     const externalLines = closingExternalRows.length > 0
       ? closingExternalRows.slice(0, 6).map((row) => `
@@ -9885,7 +9941,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       ? closingReceivableSettlementRows.slice(0, 5).map((row) => `
         <div class="mini-item">
           <div><strong>${escapeHtml(String(row?.invoice_no || '-'))}</strong></div>
-          <div class="muted">${escapeHtml(String(row?.customer_name || 'Pelanggan umum'))} | ${escapeHtml(humanizePaymentMethod(row?.method))}</div>
+          <div class="muted">${escapeHtml(String(row?.customer_name || 'Pelanggan umum'))} | ${escapeHtml(formatClosingBreakdownLabel(row, bankAccounts))}</div>
           <div><strong>${escapeHtml(formatRupiah(row?.amount || 0))}</strong></div>
         </div>
       `).join('')
@@ -11106,11 +11162,11 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                     </View>
                   </View>
 
-                  <View style={styles.reportSectionCard}>
-                    <Text style={styles.debugTitle}>Breakdown Pembayaran Omzet Hari Ini</Text>
+                    <View style={styles.reportSectionCard}>
+                      <Text style={styles.debugTitle}>Breakdown Pembayaran Omzet Hari Ini</Text>
                     {closingPaymentRows.length > 0 ? closingPaymentRows.map((row, index) => (
                       <View key={`payment-${index}-${row?.method || 'other'}`} style={styles.reportLineRow}>
-                        <Text style={styles.reportLineLabel}>{humanizePaymentMethod(row?.method)} ({row?.total_tx || 0} tx)</Text>
+                        <Text style={styles.reportLineLabel}>{formatClosingBreakdownLabel(row, bankAccounts)} ({row?.total_tx || 0} tx)</Text>
                         <Text style={styles.reportLineValue}>{formatRupiah(row?.total_amount || 0)}</Text>
                       </View>
                     )) : (
@@ -11157,8 +11213,8 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                     </View>
                   </View>
 
-                  <View style={styles.reportSectionCard}>
-                    <Text style={styles.debugTitle}>Pelunasan Piutang</Text>
+                    <View style={styles.reportSectionCard}>
+                      <Text style={styles.debugTitle}>Pelunasan Piutang</Text>
                     <Text style={styles.debugText}>
                       Uang masuk dari invoice lama yang dibayar hari ini. Nilai ini menambah arus kas, tetapi tidak menambah omzet hari ini.
                     </Text>
@@ -11176,7 +11232,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                     </View>
                     {closingReceivableBreakdownRows.length > 0 ? closingReceivableBreakdownRows.map((row, index) => (
                       <View key={`receivable-breakdown-${index}-${row?.method || 'other'}`} style={styles.reportLineRow}>
-                        <Text style={styles.reportLineLabel}>{humanizePaymentMethod(row?.method)} ({row?.total_tx || 0} tx)</Text>
+                        <Text style={styles.reportLineLabel}>{formatClosingBreakdownLabel(row, bankAccounts)} ({row?.total_tx || 0} tx)</Text>
                         <Text style={styles.reportLineValue}>{formatRupiah(row?.total_amount || 0)}</Text>
                       </View>
                     )) : null}
@@ -11188,7 +11244,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                               {String(row?.invoice_no || '-')} - {String(row?.customer_name || 'Pelanggan umum')}
                             </Text>
                             <Text style={styles.reportNestedMeta}>
-                              Invoice: {String(row?.invoice_date || '-')} | Bayar: {String(row?.paid_at || '-')} | {humanizePaymentMethod(row?.method)}
+                              Invoice: {String(row?.invoice_date || '-')} | Bayar: {String(row?.paid_at || '-')} | {formatClosingBreakdownLabel(row, bankAccounts)}
                             </Text>
                             <Text style={styles.reportNestedMeta}>{formatRupiah(row?.amount || 0)}</Text>
                           </View>
