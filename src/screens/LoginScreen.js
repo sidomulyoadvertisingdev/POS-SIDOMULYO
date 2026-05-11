@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
-import { ActivityIndicator, Image, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
+import { Image, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 import Svg, { Path, Circle } from 'react-native-svg';
+import AppLoadingAnimation from '../components/AppLoadingAnimation';
 import {
   fetchAuthMe,
   getDefaultLoginEmail,
@@ -187,7 +188,11 @@ const LoginScreen = ({ onLoginSuccess }) => {
               disabled={isSubmitting}
             >
               {isSubmitting ? (
-                <ActivityIndicator color="#ffffff" size="small" />
+                <AppLoadingAnimation
+                  size={22}
+                  fallbackColor="#ffffff"
+                  style={styles.buttonLoadingIndicator}
+                />
               ) : (
                 <Text style={styles.buttonText}>Masuk</Text>
               )}
@@ -340,6 +345,9 @@ const styles = StyleSheet.create({
     color: '#ffffff',
     fontSize: 13,
     fontWeight: '800',
+  },
+  buttonLoadingIndicator: {
+    marginVertical: -2,
   },
   metaWrap: {
     marginTop: 10,

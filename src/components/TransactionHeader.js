@@ -1,6 +1,5 @@
 import { useMemo, useState } from 'react';
 import {
-  ActivityIndicator,
   Modal,
   Pressable,
   ScrollView,
@@ -9,6 +8,7 @@ import {
   TextInput,
   View,
 } from 'react-native';
+import AppLoadingAnimation from './AppLoadingAnimation';
 
 const normalizeText = (value) => String(value || '').trim().toLowerCase();
 const isTruthyCustomerFlag = (value) => {
@@ -215,7 +215,7 @@ const TransactionHeader = ({
               <View style={styles.depositMetaRow}>
                 <View style={styles.depositBadge}>
                   {loadingDepositBalance ? (
-                    <ActivityIndicator size="small" color="#1d6a3c" />
+                    <AppLoadingAnimation size={20} fallbackColor="#1d6a3c" />
                   ) : (
                     <Text style={styles.depositBadgeText}>
                       Saldo Customer: Rp {Number(customerDepositBalance || 0).toLocaleString('id-ID')}
@@ -344,7 +344,11 @@ const TransactionHeader = ({
                 disabled={isSavingCustomer}
               >
                 {isSavingCustomer ? (
-                  <ActivityIndicator size="small" color="#ffffff" />
+                  <AppLoadingAnimation
+                    size={20}
+                    fallbackColor="#ffffff"
+                    style={styles.buttonLoadingIndicator}
+                  />
                 ) : (
                   <Text style={styles.primaryButtonText}>Simpan</Text>
                 )}
@@ -631,6 +635,9 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: '800',
     color: '#ffffff',
+  },
+  buttonLoadingIndicator: {
+    marginVertical: -2,
   },
   inputLabel: {
     fontSize: 12,

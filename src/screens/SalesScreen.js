@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { ActivityIndicator, Alert, AppState, Image, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, Vibration, View, useWindowDimensions } from 'react-native';
+import { Alert, AppState, Image, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, Vibration, View, useWindowDimensions } from 'react-native';
 import { Asset } from 'expo-asset';
 import CartList from '../components/CartList';
 import PaymentSummary from '../components/PaymentSummary';
@@ -10856,7 +10856,14 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                                 disabled={isDeleting}
                                 onPress={() => confirmDeleteDraft(row)}
                               >
-                                <Text style={styles.deleteDraftButtonText}>{isDeleting ? 'Memproses...' : 'Hapus'}</Text>
+                                {isDeleting ? (
+                                  <View style={styles.inlineLoadingButtonContent}>
+                                    <SyncLoadingAnimation size={20} />
+                                    <Text style={styles.deleteDraftButtonText}>Memproses...</Text>
+                                  </View>
+                                ) : (
+                                  <Text style={styles.deleteDraftButtonText}>Hapus</Text>
+                                )}
                               </Pressable>
                             </>
                           ) : (
@@ -11058,7 +11065,14 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                         disabled={isCashFlowSubmitting}
                         onPress={handleSubmitCashFlow}
                       >
-                        <Text style={styles.refreshButtonText}>{isCashFlowSubmitting ? 'Menyimpan...' : 'Simpan Kas Masuk / Keluar'}</Text>
+                        {isCashFlowSubmitting ? (
+                          <View style={styles.inlineLoadingButtonContent}>
+                            <SyncLoadingAnimation size={20} />
+                            <Text style={styles.refreshButtonText}>Menyimpan...</Text>
+                          </View>
+                        ) : (
+                          <Text style={styles.refreshButtonText}>Simpan Kas Masuk / Keluar</Text>
+                        )}
                       </Pressable>
                       <Pressable
                         style={[styles.printerSecondaryButton, isCashFlowRowsLoading ? styles.draftActionDisabled : null]}
@@ -11325,9 +11339,14 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                         disabled={isClosingSubmitLoading}
                         onPress={handleSubmitCloserOrder}
                       >
-                        <Text style={styles.refreshButtonText}>
-                          {isClosingSubmitLoading ? 'Mengirim...' : 'Kirim ke Finance'}
-                        </Text>
+                        {isClosingSubmitLoading ? (
+                          <View style={styles.inlineLoadingButtonContent}>
+                            <SyncLoadingAnimation size={20} />
+                            <Text style={styles.refreshButtonText}>Mengirim...</Text>
+                          </View>
+                        ) : (
+                          <Text style={styles.refreshButtonText}>Kirim ke Finance</Text>
+                        )}
                       </Pressable>
                       {closingRecord ? (
                         <Text style={styles.debugText}>
@@ -11913,9 +11932,16 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                 disabled={isSubmitting || isProcessOrderBlocked}
                 onPress={handleProcessAndPrintOrder}
               >
-                <Text style={styles.popupButtonText}>
-                  {isSubmitting ? 'Memproses...' : isProcessOrderMethodMissing ? 'Pilih Metode Dulu' : processOrderNeedsAccountSelection ? 'Lengkapi Akun Dulu' : 'Proses dan Cetak Nota'}
-                </Text>
+                {isSubmitting ? (
+                  <View style={styles.inlineLoadingButtonContent}>
+                    <SyncLoadingAnimation size={20} />
+                    <Text style={styles.popupButtonText}>Memproses...</Text>
+                  </View>
+                ) : (
+                  <Text style={styles.popupButtonText}>
+                    {isProcessOrderMethodMissing ? 'Pilih Metode Dulu' : processOrderNeedsAccountSelection ? 'Lengkapi Akun Dulu' : 'Proses dan Cetak Nota'}
+                  </Text>
+                )}
               </Pressable>
             </View>
           </View>
@@ -12050,7 +12076,14 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                 disabled={pickupModal.isSubmitting}
                 onPress={handleSubmitPickup}
               >
-                <Text style={styles.popupButtonText}>{pickupModal.isSubmitting ? 'Memproses...' : 'Simpan Pengambilan'}</Text>
+                {pickupModal.isSubmitting ? (
+                  <View style={styles.inlineLoadingButtonContent}>
+                    <SyncLoadingAnimation size={20} />
+                    <Text style={styles.popupButtonText}>Memproses...</Text>
+                  </View>
+                ) : (
+                  <Text style={styles.popupButtonText}>Simpan Pengambilan</Text>
+                )}
               </Pressable>
             </View>
           </View>
@@ -12129,7 +12162,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
               <Text style={styles.receivableHelperText}>{depositTopUpHelperText}</Text>
               {loadingDepositAccounts ? (
                 <View style={styles.bankPickerLoadingWrap}>
-                  <ActivityIndicator size="small" color="#2f64ef" />
+                  <SyncLoadingAnimation size={56} />
                   <Text style={styles.loadingMessage}>Memuat akun top up...</Text>
                 </View>
               ) : (
@@ -12202,9 +12235,14 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                 disabled={isDepositSubmitDisabled}
                 onPress={submitDepositTopUp}
               >
-                <Text style={styles.popupButtonText}>
-                  {submittingDepositTopUp ? 'Menyimpan...' : 'Simpan Top Up'}
-                </Text>
+                {submittingDepositTopUp ? (
+                  <View style={styles.inlineLoadingButtonContent}>
+                    <SyncLoadingAnimation size={20} />
+                    <Text style={styles.popupButtonText}>Menyimpan...</Text>
+                  </View>
+                ) : (
+                  <Text style={styles.popupButtonText}>Simpan Top Up</Text>
+                )}
               </Pressable>
             </View>
           </View>
@@ -12298,7 +12336,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                   </Text>
                   {receivablePaymentModal.isLoadingAccounts ? (
                     <View style={styles.bankPickerLoadingWrap}>
-                      <ActivityIndicator size="small" color="#2f64ef" />
+                      <SyncLoadingAnimation size={56} />
                       <Text style={styles.loadingMessage}>Memuat akun pembayaran...</Text>
                     </View>
                   ) : (
@@ -12347,9 +12385,14 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                 }
                 onPress={handleSubmitReceivablePayment}
               >
-                <Text style={styles.popupButtonText}>
-                  {receivablePaymentModal.isSubmitting ? 'Memproses...' : 'Bayar'}
-                </Text>
+                {receivablePaymentModal.isSubmitting ? (
+                  <View style={styles.inlineLoadingButtonContent}>
+                    <SyncLoadingAnimation size={20} />
+                    <Text style={styles.popupButtonText}>Memproses...</Text>
+                  </View>
+                ) : (
+                  <Text style={styles.popupButtonText}>Bayar</Text>
+                )}
               </Pressable>
             </View>
           </View>
@@ -14150,6 +14193,12 @@ const styles = StyleSheet.create({
     color: '#ffffff',
     fontSize: 12,
     fontWeight: '800',
+  },
+  inlineLoadingButtonContent: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
   },
   popupButtonTextSecondary: {
     color: '#2a2a2a',
