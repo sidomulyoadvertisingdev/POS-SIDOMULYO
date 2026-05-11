@@ -1,6 +1,6 @@
 {
   "name": "pos-kasir-expo",
-  "version": "1.6.9",
+  "version": "1.6.10",
   "description": "Aplikasi desktop POS Kasir untuk operasional penjualan dan closing harian.",
   "author": "Sidomulyo",
   "main": "index.js",
