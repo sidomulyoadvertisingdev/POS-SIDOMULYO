@@ -44,3 +44,7 @@ package-lock.before-regenerate.json
 # generated native folders
 /ios
 /android
+
+# local tooling created for Windows/Expo bootstrap
+.tools/
+.codex-run/

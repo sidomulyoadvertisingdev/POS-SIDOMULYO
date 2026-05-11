@@ -757,7 +757,89 @@ const extractFinishingLabelsFromPayload = (rows, nameMapById) => {
 
   return Array.from(new Set(labels));
 };
+const extractMaterialUsageRequirements = (plan) => {
+  const rows = Array.isArray(plan?.requirements) ? plan.requirements : [];
+  return rows.filter((row) => row && typeof row === 'object');
+};
+const resolveMaterialUsagePlanFromSource = (source) => {
+  const directPlan = parseJsonObject(source?.material_usage_plan);
+  if (directPlan) {
+    return directPlan;
+  }
+
+  const snapshot = parseJsonObject(source?.spec_snapshot) || {};
+  const snapshotPlan = parseJsonObject(snapshot?.material_usage_plan);
+  if (snapshotPlan) {
+    return snapshotPlan;
+  }
+
+  const cartRestore = parseJsonObject(snapshot?.cart_restore) || {};
+  return parseJsonObject(cartRestore?.material_usage_plan);
+};
+const resolveMaterialUsageMeta = (source = {}) => {
+  const snapshot = parseJsonObject(source?.spec_snapshot) || {};
+  const cartRestore = parseJsonObject(snapshot?.cart_restore) || {};
+  const plan = resolveMaterialUsagePlanFromSource(source);
+  const requirements = extractMaterialUsageRequirements(plan);
+  const mainRequirement = requirements.find((row) => {
+    const usageRole = String(row?.usage_role || '').trim().toLowerCase();
+    return usageRole === 'main' || Number(row?.material_id || 0) === Number(plan?.main_material_id || 0);
+  }) || requirements[0] || null;
+  const usageQty = firstPositiveNumber(
+    plan?.main_required_qty,
+    source?.material_usage_qty,
+    cartRestore?.material_usage_qty,
+    mainRequirement?.qty,
+  );
+  const usageUnit = toLabel(
+    plan?.main_usage_unit,
+    mainRequirement?.usage_unit,
+    cartRestore?.material_usage_unit,
+  );
+  const mainMaterialId = Number(
+    plan?.main_material_id
+    || source?.material_product_id
+    || source?.material_id
+    || source?.material?.id
+    || source?.material_product?.id
+    || mainRequirement?.material_id
+    || 0,
+  ) || 0;
+  const mainMaterialName = toLabel(
+    plan?.main_material_name,
+    mainRequirement?.material_name,
+    source?.material_name,
+    source?.material_product_name,
+    source?.material?.name,
+    source?.material_product?.name,
+  );
+
+  return {
+    plan,
+    requirements,
+    mainRequirement,
+    usageQty,
+    usageUnit,
+    mainMaterialId: mainMaterialId > 0 ? mainMaterialId : null,
+    mainMaterialName,
+    extraRequirementCount: Math.max(requirements.length - 1, 0),
+  };
+};
+const buildMaterialUsageSummaryText = (source = {}, options = {}) => {
+  const meta = source && typeof source === 'object' && Object.prototype.hasOwnProperty.call(source, 'usageQty')
+    ? source
+    : resolveMaterialUsageMeta(source);
+  const usageText = formatComponentQtyText(meta?.usageQty, meta?.usageUnit);
+  if (usageText === '-') {
+    return '';
+  }
+  if (options?.includeExtraCount && Number(meta?.extraRequirementCount || 0) > 0) {
+    return `${usageText} (+${meta.extraRequirementCount} bahan lain)`;
+  }
+  return usageText;
+};
 const buildMaterialDisplay = (backendItem, materialMapById) => {
+  const usageMeta = resolveMaterialUsageMeta(backendItem);
   const groupMaterialNames = collectMaterialNames(
     ...toGroupMaterialNamesFromRows(toGroupComponentRows(backendItem)),
   );
@@ -773,7 +855,7 @@ const buildMaterialDisplay = (backendItem, materialMapById) => {
     : Array.isArray(backendItem?.material_candidate_ids)
       ? backendItem.material_candidate_ids
       : [];
-  const nameCandidates = [];
+  const nameCandidates = collectMaterialNames(usageMeta.mainMaterialName);
   if (primaryId > 0 && materialMapById.get(primaryId)) {
     nameCandidates.push(materialMapById.get(primaryId));
   }
@@ -787,11 +869,18 @@ const buildMaterialDisplay = (backendItem, materialMapById) => {
       }
     });
   const uniq = Array.from(new Set(nameCandidates.map((name) => String(name || '').trim()).filter(Boolean)));
+  const usageSummary = buildMaterialUsageSummaryText(usageMeta, { includeExtraCount: true });
+  if (uniq.length > 0 && usageSummary) {
+    return `${uniq[0]} | ${usageSummary}`;
+  }
   if (uniq.length > 0) {
     return uniq.join(', ');
   }
   if (groupMaterialNames.length > 0) {
     return groupMaterialNames.join(', ');
+  }
+  if (usageSummary) {
+    return usageSummary;
   }
   return toLabel(
     backendItem?.material_name,
@@ -917,7 +1006,8 @@ const restoreDraftItemDisplay = (backendItem, materialMapById, finishingNameMapB
     fromBreakdown.lbMaxText,
     '-',
   );
-  const materialText = toLabel(
+  const materialUsageSummary = buildMaterialUsageSummaryText(backendItem, { includeExtraCount: true });
+  const rawMaterialText = toLabel(
     backendItem?.material_text,
     backendItem?.material_label,
     backendItem?.material,
@@ -931,6 +1021,13 @@ const restoreDraftItemDisplay = (backendItem, materialMapById, finishingNameMapB
     buildMaterialDisplay(backendItem, materialMapById),
     '-',
   );
+  const materialText = materialUsageSummary
+    ? (
+      rawMaterialText && rawMaterialText !== '-' && !normalizeText(rawMaterialText).includes(normalizeText(materialUsageSummary))
+        ? `${rawMaterialText} | ${materialUsageSummary}`
+        : (rawMaterialText === '-' ? materialUsageSummary : rawMaterialText)
+    )
+    : rawMaterialText;
   const pages = Math.max(
     Number(draftForm?.pages || specs?.pages || meta?.pages || backendItem?.pages || backendItem?.page || 1) || 1,
     1,
@@ -953,6 +1050,7 @@ const buildCartItemFromDraftSource = (sourceItem, itemKey, materialMapById, fini
     spec_snapshot: sourceItem?.spec_snapshot || cartRestore?.spec_snapshot || null,
   };
   const breakdown = Array.isArray(mergedSource?.finishing_breakdown) ? mergedSource.finishing_breakdown : [];
+  const materialUsageMeta = resolveMaterialUsageMeta(mergedSource);
   const restored = restoreDraftItemDisplay(mergedSource, materialMapById, finishingNameMapById);
   const draftForm = parseJsonObject(snapshot?.draft_form) || parseJsonObject(sourceItem?.draft_form) || {};
   const specs = parseJsonObject(snapshot?.specs) || parseJsonObject(sourceItem?.specs) || {};
@@ -1034,6 +1132,8 @@ const buildCartItemFromDraftSource = (sourceItem, itemKey, materialMapById, fini
         ?? mergedSource?.requires_design
         ?? true,
       ),
+      material_usage_qty: materialUsageMeta.usageQty > 0 ? materialUsageMeta.usageQty : null,
+      material_usage_plan: materialUsageMeta.plan || null,
       material_product_id: materialId > 0 ? materialId : null,
       material_product_ids: materialCandidates,
       finishings: Array.isArray(mergedSource?.finishings) ? mergedSource.finishings : [],
@@ -2475,7 +2575,7 @@ const resolveFixedSizeA3Mode = (product, productDetail = null) => {
   return {
     enabled: true,
     label: normalizedLabel,
-    helperText: 'Produk A3+ memakai ukuran tetap. Kasir cukup isi qty dan finishing.',
+    helperText: 'Produk A3+ memakai ukuran tetap. Kasir cukup isi qty.',
   };
 };
 const isStrictStickerSalesProduct = (product, productDetail = null) => {
@@ -2672,6 +2772,19 @@ const resolveUsedMaterialInfoFromPricing = (pricing, fallbackMaterialInfo, mater
   const explicitMaterialMinStockRaw =
     pricing?.rule?.selected_material_min_stock ??
     pricing?.note?.material_min_stock;
+  const materialUsageMeta = resolveMaterialUsageMeta({
+    material_usage_plan: pricing?.material_usage_plan,
+    material_usage_qty: pricing?.material_usage_qty,
+    material_product_id: pricing?.material_product_id,
+    material_id: pricing?.material_id,
+    material_name: pricing?.material_name,
+    material_product_name: pricing?.material_product_name,
+    material: pricing?.material,
+    material_product: pricing?.material_product,
+  });
+  const usageCandidateIds = Array.isArray(materialUsageMeta?.plan?.candidate_material_ids)
+    ? materialUsageMeta.plan.candidate_material_ids.map((id) => Number(id)).filter((id) => id > 0)
+    : [];
   const directIds = collectMaterialIds(
     pricing?.material_product_id,
     pricing?.material_id,
@@ -2705,7 +2818,15 @@ const resolveUsedMaterialInfoFromPricing = (pricing, fallbackMaterialInfo, mater
   );
   const resolvedIds = directIds.length > 0
     ? directIds
-    : (selectedRowIds.length > 0 ? selectedRowIds : (fallbackMaterialInfo?.materialIds || []));
+    : (
+      selectedRowIds.length > 0
+        ? selectedRowIds
+        : (
+          usageCandidateIds.length > 0
+            ? usageCandidateIds
+            : (fallbackMaterialInfo?.materialIds || [])
+        )
+    );
   const materialRows = resolvedIds
     .map((id) => materials.find((row) => Number(row.id) === Number(id)))
     .filter(Boolean);
@@ -2719,7 +2840,9 @@ const resolveUsedMaterialInfoFromPricing = (pricing, fallbackMaterialInfo, mater
     pricing?.material_product?.name,
     pricing?.material_used?.name,
     pricing?.selected_material?.name,
+    materialUsageMeta?.mainMaterialName,
     ...selectedRowNames,
+    ...materialUsageMeta.requirements.map((row) => row?.material_name),
     ...resolvedIds.map((id) => catalogMaterialNameMap?.[id]),
     ...materialRows.map((row) => row?.name),
   );
@@ -2732,7 +2855,8 @@ const resolveUsedMaterialInfoFromPricing = (pricing, fallbackMaterialInfo, mater
     ? ('Roll ' + selectedWidthM.toFixed(2) + ' m')
     : '';
   const materialName = String(names[0] || fallbackMaterialInfo?.displayText || '').trim();
-  const displayText = [materialName, widthText].filter(Boolean).join(' | ');
+  const usageText = buildMaterialUsageSummaryText(materialUsageMeta, { includeExtraCount: true });
+  const displayText = [materialName, widthText, usageText].filter(Boolean).join(' | ');
   const primaryRow = materialRows[0] || null;
   const materialStock = Number(
     pricing?.rule?.selected_material_stock ??
@@ -2753,9 +2877,12 @@ const resolveUsedMaterialInfoFromPricing = (pricing, fallbackMaterialInfo, mater
   ) || 0;
   return {
     materialIds: resolvedIds,
-    primaryMaterialId: resolvedIds[0] || fallbackMaterialInfo?.primaryMaterialId || null,
+    primaryMaterialId: materialUsageMeta?.mainMaterialId || resolvedIds[0] || fallbackMaterialInfo?.primaryMaterialId || null,
     displayText: displayText || '-',
     materialName: materialName || '-',
+    materialUsageQty: materialUsageMeta.usageQty || 0,
+    materialUsagePlan: materialUsageMeta.plan || null,
+    mainUsageUnit: materialUsageMeta.usageUnit || '',
     materialStock,
     materialMinStock,
     hasExplicitMaterialStock: explicitMaterialStockRaw !== undefined && explicitMaterialStockRaw !== null && explicitMaterialStockRaw !== '',
@@ -7474,6 +7601,13 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       const materialCandidateIds = Array.isArray(usedMaterialInfo?.materialIds)
         ? usedMaterialInfo.materialIds.map((id) => Number(id)).filter((id) => id > 0)
         : [];
+      const materialUsageMeta = resolveMaterialUsageMeta({
+        material_usage_plan: usedMaterialInfo?.materialUsagePlan ?? pricing?.material_usage_plan,
+        material_usage_qty: usedMaterialInfo?.materialUsageQty ?? pricing?.material_usage_qty,
+        material_product_id: materialId || null,
+        material_product_ids: materialCandidateIds,
+        material_name: usedMaterialInfo?.materialName,
+      });
       const isGroupProduct = isGroupBundleProduct(product, productDetail);
       const groupSummary = String(
         productDetail?.group_summary
@@ -7502,6 +7636,8 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         express_fee: 0,
         requires_production: Boolean(product.requires_production ?? true),
         requires_design: Boolean(product.requires_production ?? true),
+        material_usage_qty: materialUsageMeta.usageQty > 0 ? materialUsageMeta.usageQty : null,
+        material_usage_plan: materialUsageMeta.plan || null,
         material_product_id: materialId || null,
         material_product_ids: materialCandidateIds,
         size_text: size.displayText,
@@ -7514,6 +7650,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         finishing_breakdown: Array.isArray(pricing.finishing_breakdown) ? pricing.finishing_breakdown : [],
         spec_snapshot: {
           type: 'custom_order',
+          material_usage_plan: materialUsageMeta.plan || null,
           original_flow: {
             requires_production: Boolean(product.requires_production ?? true),
             requires_design: Boolean(product.requires_production ?? true),
@@ -7537,6 +7674,8 @@ const SalesScreen = ({ currentUser, onLogout }) => {
             finishing: selectedFinishingDisplay || '-',
             lb_max: selectedLbMaxSummary || '-',
             material: materialText,
+            material_usage_qty: materialUsageMeta.usageQty > 0 ? materialUsageMeta.usageQty : null,
+            material_usage_unit: materialUsageMeta.usageUnit || null,
           },
           draft_form: {
             product_name: String(buildSelectedProductLabel(product) || product.name || '').trim(),
@@ -7550,6 +7689,8 @@ const SalesScreen = ({ currentUser, onLogout }) => {
             lb_max_json: JSON.stringify(Array.isArray(pricingPayload?.lb_max) ? pricingPayload.lb_max : []),
             pages: pageNumber,
             material: materialText,
+            material_usage_qty: materialUsageMeta.usageQty > 0 ? materialUsageMeta.usageQty : null,
+            material_usage_unit: materialUsageMeta.usageUnit || null,
             note: '-',
             requires_production: Boolean(product.requires_production ?? true),
             requires_design: Boolean(product.requires_production ?? true),
@@ -7584,6 +7725,8 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         bottom_price_enabled: Boolean(backendItem.bottom_price_enabled),
         bottom_price: backendItem.bottom_price || null,
         bottom_price_min_qty: backendItem.bottom_price_min_qty || 0,
+        material_usage_qty: backendItem.material_usage_qty || null,
+        material_usage_plan: backendItem.material_usage_plan || null,
         material_product_id: backendItem.material_product_id,
         material_product_ids: backendItem.material_product_ids,
         finishings: Array.isArray(pricingPayload?.finishings) ? pricingPayload.finishings : [],
@@ -7893,6 +8036,11 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         const currentSpec = parseJsonObject(item?.backendItem?.spec_snapshot) || {};
         const currentDraftForm = parseJsonObject(currentSpec?.draft_form) || {};
         const currentSpecs = parseJsonObject(currentSpec?.specs) || {};
+        const currentMaterialUsageMeta = resolveMaterialUsageMeta({
+          ...item?.backendItem,
+          spec_snapshot: currentSpec,
+        });
+        const currentMaterialUsagePlan = currentMaterialUsageMeta.plan || parseJsonObject(currentSpec?.material_usage_plan) || null;
         const widthMeter = firstPositiveNumber(
           currentDraftForm?.width_meter,
           currentSpecs?.width_meter,
@@ -7995,6 +8143,8 @@ const SalesScreen = ({ currentUser, onLogout }) => {
           bottom_price_enabled: Boolean(item?.backendItem?.bottom_price_enabled),
           bottom_price: item?.backendItem?.bottom_price ?? null,
           bottom_price_min_qty: item?.backendItem?.bottom_price_min_qty ?? 0,
+          material_usage_qty: currentMaterialUsageMeta.usageQty > 0 ? currentMaterialUsageMeta.usageQty : null,
+          material_usage_plan: currentMaterialUsagePlan,
           material_product_id: item?.backendItem?.material_product_id ?? null,
           material_product_ids: Array.isArray(item?.backendItem?.material_product_ids) ? item.backendItem.material_product_ids : [],
           finishings: Array.isArray(item?.backendItem?.finishings) ? item.backendItem.finishings : [],
@@ -8019,6 +8169,9 @@ const SalesScreen = ({ currentUser, onLogout }) => {
             ?? true,
           ),
         };
+        if (currentMaterialUsagePlan) {
+          mergedSnapshot.material_usage_plan = currentMaterialUsagePlan;
+        }
         mergedSnapshot.cart_restore = mergedCartRestore;
 
         const originalRequiresProduction = Boolean(
