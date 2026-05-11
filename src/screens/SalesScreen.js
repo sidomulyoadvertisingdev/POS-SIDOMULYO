@@ -3271,6 +3271,31 @@ const formatBackendValidationError = (error) => {
   const firstMessage = String(errorBag[firstKey][0] || error?.message || 'Validasi gagal.');
   return `${firstKey}: ${firstMessage}`;
 };
+const formatReceivablePaymentError = (error) => {
+  const status = Number(error?.status || 0);
+  const validationMessage = String(formatBackendValidationError(error) || '').trim();
+  const errorBag = error?.body?.errors && typeof error.body.errors === 'object' && !Array.isArray(error.body.errors)
+    ? error.body.errors
+    : {};
+
+  if (status === 404) {
+    return 'Invoice tidak tersedia untuk user kasir ini atau sudah tidak bisa diakses.';
+  }
+
+  if (Array.isArray(errorBag?.payment_account_id) || validationMessage.toLowerCase().includes('payment_account_id')) {
+    return 'Akun pembayaran tidak cocok dengan metode yang dipilih. Pilih akun yang sesuai lalu coba lagi.';
+  }
+
+  if (Array.isArray(errorBag?.payment_method_id) || validationMessage.toLowerCase().includes('payment_method_id')) {
+    return 'Metode pembayaran POS tidak valid atau sudah tidak aktif. Muat ulang konfigurasi pembayaran lalu coba lagi.';
+  }
+
+  if (validationMessage.toLowerCase().includes('customer deposit hanya mendukung pelunasan penuh')) {
+    return 'Saldo pelanggan hanya bisa dipakai untuk pelunasan penuh invoice.';
+  }
+
+  return validationMessage || 'Pembayaran piutang gagal diproses.';
+};
 const extractOrderItemIndexFromError = (error) => {
   const text = [
     String(error?.message || ''),
@@ -8050,6 +8075,15 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         customer_id: customerId,
         ...(mode === 'draft' ? { status: 'draft' } : {}),
         due_at: null,
+        discount_type: discountMode === 'percent' ? 'percent' : 'amount',
+        discount_value: roundMoney(
+          discountMode === 'percent'
+            ? parsedDiscountPercent
+            : parsedDiscountAmount,
+        ),
+        discount_amount: roundMoney(discountToApply),
+        subtotal_before_discount: roundMoney(subtotal),
+        grand_total_preview: roundMoney(grandTotal),
         note: paymentNotes || null,
         notes: [
           selectedCustomer?.name ? `Customer: ${selectedCustomer.name}` : '',
@@ -8081,6 +8115,44 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       setLastPayloadPreview(payload);
 
       const created = await createPosOrder(payload);
+      if (String(created?.status || '').toLowerCase() === 'pending_approval') {
+        const approvalRequestId = Number(created?.approval_request_id || 0) || null;
+        const pendingApprovalMessage = String(
+          created?.message
+          || 'Customer masih punya piutang. Transaksi dikirim ke owner/admin untuk approval.'
+        ).trim();
+
+        setAuditLogs(
+          appendOrderAuditLog({
+            result: 'pending_approval',
+            total: grandTotal,
+            queue_count: loadOrderQueue().length,
+            approval_request_id: approvalRequestId,
+            payload_summary: {
+              items: payload.items.length,
+              payment_type: payload.payment.transaction_type,
+              payment_method: payload.payment.method,
+              bank_account_id: payload.payment.bank_account_id || null,
+            },
+          }),
+        );
+
+        openNotice(
+          'Menunggu Approval Piutang',
+          [
+            pendingApprovalMessage,
+            approvalRequestId ? `No. request approval: ${approvalRequestId}` : null,
+            'Order belum menjadi invoice final dan nota belum bisa dicetak sebelum approval disetujui.',
+          ].filter(Boolean).join('\n'),
+        );
+
+        return {
+          ok: false,
+          pendingApproval: true,
+          approvalRequestId,
+          message: pendingApprovalMessage,
+        };
+      }
       const backendOrderId = Number(created?.id || 0) || null;
       const createdInvoiceId = Number(created?.invoice?.id || 0) || 0;
       const invoiceNo = created?.invoice?.invoice_no || '-';
@@ -8797,7 +8869,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         ...prev,
         isSubmitting: false,
       }));
-      openNotice('Piutang Pelanggan', formatBackendValidationError(error));
+      openNotice('Piutang Pelanggan', formatReceivablePaymentError(error));
     }
   };
 
@@ -8891,6 +8963,12 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       setModalPilihPembayaran(false);
       setModalDetailPesanan(false);
       await printOrderPreview(orderPreviewSnapshot, result);
+      return;
+    }
+    if (result?.pendingApproval) {
+      setModalPilihPembayaran(false);
+      setModalDetailPesanan(false);
+      resetTransaction();
     }
   };
 
@@ -8986,6 +9064,11 @@ const SalesScreen = ({ currentUser, onLogout }) => {
           setActiveMenu('production');
           loadProductionItems();
         }
+      } else if (result?.pendingApproval) {
+        setIsOrderPreviewOpen(false);
+        setModalPilihPembayaran(false);
+        setModalDetailPesanan(false);
+        resetTransaction();
       }
     } finally {
       setIsOrderPreviewSubmitting(false);
