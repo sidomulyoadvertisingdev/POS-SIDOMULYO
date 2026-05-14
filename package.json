@@ -1,6 +1,6 @@
 {
   "name": "pos-kasir-expo",
-  "version": "1.6.11",
+  "version": "1.6.12",
   "description": "Aplikasi desktop POS Kasir untuk operasional penjualan dan closing harian.",
   "author": "Sidomulyo",
   "main": "index.js",
@@ -9,6 +9,7 @@
     "android": "set NODE_OPTIONS=--max-old-space-size=4096 && expo start --offline --android --max-workers 1",
     "ios": "set NODE_OPTIONS=--max-old-space-size=4096 && expo start --offline --ios --max-workers 1",
     "web": "set NODE_OPTIONS=--max-old-space-size=4096 && expo start --offline --web --max-workers 1",
+    "test:book-print-rule": "node --test src/utils/__tests__/bookPrintRule.test.cjs",
     "test:product-picker": "node --test src/utils/__tests__/productPickerTree.test.cjs",
     "test:receipt-summary": "node --test src/utils/__tests__/receiptSummary.test.cjs",
     "test:receipt-render": "npx tsc --noEmit src/printing/renderReceiptText.ts src/printing/receiptHelpers.ts src/printing/profiles.ts src/printing/types.ts src/printing/__tests__/renderReceiptText.test.ts",

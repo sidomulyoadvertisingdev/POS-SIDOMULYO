@@ -1,20 +1,40 @@
 import Constants from 'expo-constants';
 
+const DEFAULT_ERP_API_BASE_URL = 'https://dashboard.sidomulyoproject.com/api';
+
 const resolveDefaultApiBaseUrl = () => {
-  return 'https://dashboard.sidomulyoproject.com/api';
+  return DEFAULT_ERP_API_BASE_URL;
 };
 
-const ONLINE_ERP_API_BASE_URL = 'https://dashboard.sidomulyoproject.com/api';
-const LOCAL_ERP_API_BASE_URL = 'http://127.0.0.1:8000/api';
-const FORCE_LOCAL_ERP_API = false;
+const normalizeApiBaseUrl = (url) => String(url || '').trim().replace(/\/+$/, '');
 
-const resolveRuntimeApiBaseUrl = (configuredUrl) => {
-  if (FORCE_LOCAL_ERP_API) {
-    return LOCAL_ERP_API_BASE_URL;
+const isSupportedApiUrl = (url) => {
+  const normalizedUrl = normalizeApiBaseUrl(url);
+  if (!normalizedUrl) {
+    return false;
   }
 
-  const normalizedConfiguredUrl = String(configuredUrl || '').trim();
-  return normalizedConfiguredUrl || resolveDefaultApiBaseUrl();
+  try {
+    const parsedUrl = new URL(normalizedUrl);
+    return ['http:', 'https:'].includes(parsedUrl.protocol) && Boolean(String(parsedUrl.hostname || '').trim());
+  } catch (_error) {
+    return false;
+  }
+};
+
+const resolveRuntimeApiBaseUrl = (configuredUrl) => {
+  const normalizedConfiguredUrl = normalizeApiBaseUrl(configuredUrl);
+  if (!normalizedConfiguredUrl) {
+    return resolveDefaultApiBaseUrl();
+  }
+
+  if (isSupportedApiUrl(normalizedConfiguredUrl)) {
+    return normalizedConfiguredUrl;
+  }
+
+  throw new Error(
+    `Base URL backend tidak valid: ${normalizedConfiguredUrl}. Gunakan URL absolut seperti https://dashboard.sidomulyoproject.com/api`,
+  );
 };
 
 const extra = Constants.expoConfig?.extra || {};
@@ -29,6 +49,10 @@ let authToken = String(API_TOKEN || '').trim();
 let sessionEmail = '';
 let sessionPassword = '';
 let refreshInProgress = null;
+
+if (!isSupportedApiUrl(API_BASE_URL)) {
+  throw new Error(`Base URL backend tidak valid atau belum terisi. Nilai saat ini: ${API_BASE_URL}`);
+}
 
 const createTimeoutError = (url) => {
   const error = new Error(`Request timeout setelah ${Math.round(REQUEST_TIMEOUT_MS / 1000)} detik. Cek koneksi ke backend: ${url}`);
@@ -194,6 +218,26 @@ const toDataList = (payload) => {
   return [];
 };
 
+const toPaginatedDataList = (payload) => {
+  const data = toDataList(payload);
+  const currentPage = Number(payload?.current_page || 1) || 1;
+  const lastPage = Number(payload?.last_page || currentPage) || currentPage;
+  const perPage = Number(payload?.per_page || data.length || 0) || data.length;
+  const total = Number(payload?.total || data.length || 0) || data.length;
+
+  return {
+    data,
+    meta: {
+      currentPage,
+      lastPage,
+      perPage,
+      total,
+      hasMore: currentPage < lastPage,
+      nextPage: currentPage < lastPage ? currentPage + 1 : null,
+    },
+  };
+};
+
 const toDataItem = (payload) => {
   if (!payload || typeof payload !== 'object') {
     return payload;
@@ -315,17 +359,69 @@ export const fetchPosMaterials = async () => {
   return toDataList(payload);
 };
 
-export const fetchPosCustomers = async (search = '', options = {}) => {
+export const fetchPosCustomersPage = async (search = '', options = {}) => {
   await ensureAuthenticated();
   const requestedPerPage = Number(options?.perPage || 0);
   const perPage = Number.isFinite(requestedPerPage) && requestedPerPage > 0
     ? Math.min(Math.max(Math.trunc(requestedPerPage), 1), 500)
     : 500;
-  const query = search
-    ? `?per_page=${perPage}&search=${encodeURIComponent(search)}`
-    : `?per_page=${perPage}`;
-  const payload = await request(`/pos/customers${query}`);
-  return toDataList(payload);
+  const requestedPage = Number(options?.page || 0);
+  const page = Number.isFinite(requestedPage) && requestedPage > 0
+    ? Math.trunc(requestedPage)
+    : 1;
+  const query = new URLSearchParams();
+  query.set('per_page', String(perPage));
+  query.set('page', String(page));
+  if (search) {
+    query.set('search', String(search));
+  }
+  const suffix = `?${query.toString()}`;
+  const payload = await request(`/pos/customers${suffix}`);
+  return toPaginatedDataList(payload);
+};
+
+export const fetchPosCustomers = async (search = '', options = {}) => {
+  const payload = await fetchPosCustomersPage(search, options);
+  return payload.data;
+};
+
+export const fetchAllPosCustomers = async (search = '', options = {}) => {
+  const requestedPerPage = Number(options?.perPage || 0);
+  const perPage = Number.isFinite(requestedPerPage) && requestedPerPage > 0
+    ? Math.min(Math.max(Math.trunc(requestedPerPage), 1), 500)
+    : 500;
+  const requestedMaxPages = Number(options?.maxPages || 0);
+  const maxPages = Number.isFinite(requestedMaxPages) && requestedMaxPages > 0
+    ? Math.max(Math.trunc(requestedMaxPages), 1)
+    : 100;
+
+  const rowsById = new Map();
+  let page = 1;
+
+  while (page <= maxPages) {
+    const response = await fetchPosCustomersPage(search, { perPage, page });
+    response.data.forEach((row) => {
+      const key = Number(row?.id || 0);
+      if (key > 0) {
+        rowsById.set(key, row);
+        return;
+      }
+      rowsById.set(`${page}-${rowsById.size}`, row);
+    });
+
+    if (!response.meta?.hasMore) {
+      break;
+    }
+
+    page += 1;
+  }
+
+  return Array.from(rowsById.values());
+};
+
+export const getCustomerReceivableSummary = async (customerId) => {
+  await ensureAuthenticated();
+  return request(`/pos/customers/${customerId}/receivable-summary`);
 };
 
 export const fetchPosSettings = async () => {
@@ -533,6 +629,17 @@ export const fetchPosOrderTransactions = async (params = {}) => {
 export const fetchPosOrders = async () => {
   await ensureAuthenticated();
   return request('/pos/orders');
+};
+
+export const fetchPosReceivableApprovals = async (params = {}) => {
+  await ensureAuthenticated();
+  const query = new URLSearchParams();
+  if (params?.status) {
+    query.set('status', String(params.status));
+  }
+  const suffix = query.toString() ? `?${query.toString()}` : '';
+  const payload = await request(`/pos/receivable-approvals${suffix}`);
+  return toDataList(payload);
 };
 
 export const fetchPosClosingSummary = async (params = {}) => {
