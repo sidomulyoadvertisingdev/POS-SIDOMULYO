@@ -1,6 +1,11 @@
 import { useMemo, useState } from 'react';
-import { Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
-import { formatRupiah } from '../utils/currency';
+import { StyleSheet, View } from 'react-native';
+import ProductInputGrid from './product-form/ProductInputGrid';
+import ProductFinishingModal from './product-form/ProductFinishingModal';
+import ProductLbMaxModal from './product-form/ProductLbMaxModal';
+import ProductModePanel from './product-form/ProductModePanel';
+import ProductPickerModal from './product-form/ProductPickerModal';
+import ProductPricingPanel from './product-form/ProductPricingPanel';
 
 const normalizeText = (value) => String(value || '').trim().toLowerCase();
 const isGroupProductRow = (row) => Boolean(
@@ -48,11 +53,54 @@ const ProductForm = ({
   lbMaxOptions,
   onSaveSelectedLbMax,
   showPagesInput,
+  pagesLabel,
   pages,
   onChangePages,
   materialDisplay,
   materialError,
   materialWarning,
+  showBookPrintRuleSection,
+  bookProductLabel,
+  bookDisplayPrimary,
+  bookDisplaySecondary,
+  bookType,
+  bookTypeOptions,
+  bookWizardSteps,
+  onChangeBookType,
+  bookSegment,
+  bookCashierNote,
+  bookFinishedSize,
+  bookFinishedSizeOptions,
+  onChangeBookFinishedSize,
+  bookMaterialInsideProductId,
+  bookMaterialInsideOptions,
+  onChangeBookMaterialInside,
+  bookMaterialCoverProductId,
+  bookMaterialCoverOptions,
+  onChangeBookMaterialCover,
+  bookPrintModel,
+  bookPrintModelOptions,
+  onChangeBookPrintModel,
+  bookPrintSide,
+  bookPrintSideOptions,
+  onChangeBookPrintSide,
+  bookInsidePrint,
+  bookInsidePrintOptions,
+  onChangeBookInsidePrint,
+  bookCoverPrint,
+  bookCoverPrintOptions,
+  onChangeBookCoverPrint,
+  bookBindingType,
+  bookBindingTypeOptions,
+  onChangeBookBindingType,
+  bookExtraFinishingValues,
+  bookExtraFinishingOptions,
+  onToggleBookExtraFinishing,
+  bookPrintRulePreview,
+  bookPageValidation,
+  pages: bookPages,
+  onChangePages: onChangeBookPages,
+  bookPrintRulePrompt,
   mataAyamIssueBadge,
   onValidateProduct,
   onAddToCart,
@@ -84,6 +132,16 @@ const ProductForm = ({
   const qtyOnlyStatusText = String(qtyOnlyStatusLabel || '').trim() || 'Tanpa Ukuran';
   const qtyOnlyMaterialText = String(qtyOnlyMaterialFallbackLabel || '').trim() || 'Tanpa Material';
   const qtyOnlyHelperText = String(qtyOnlyHintText || '').trim() || 'Produk qty-only memakai jumlah/satuan tanpa input ukuran.';
+  const pageInputLabel = String(pagesLabel || '').trim() || 'Halaman';
+  const summaryColumnLabel = showBookPrintRuleSection
+    ? 'Ringkasan Book'
+    : (isQtyOnlyProduct ? 'Ringkasan' : 'Bahan / Material');
+  const primaryInputLabel = showBookPrintRuleSection
+    ? 'Ukuran Book'
+    : (isFixedSizeProduct ? 'Mode' : (isQtyOnlyProduct ? 'Input' : 'L Mater (m)'));
+  const secondaryInputLabel = showBookPrintRuleSection
+    ? 'Rule Book'
+    : (isFixedSizeProduct ? 'Ukuran' : (isQtyOnlyProduct ? 'Status' : 'P Mater (m)'));
 
   const categories = useMemo(
     () => (Array.isArray(productPickerTree) ? productPickerTree : []),
@@ -383,681 +441,335 @@ const ProductForm = ({
     setIsPickerOpen(false);
   };
 
+  const openFinishingPicker = () => {
+    setFinishingDraftIds(Array.isArray(selectedFinishingIds) ? selectedFinishingIds : []);
+    setFinishingDraftMataAyamQtyById(
+      selectedFinishingMataAyamQtyById && typeof selectedFinishingMataAyamQtyById === 'object'
+        ? selectedFinishingMataAyamQtyById
+        : {},
+    );
+    setCollapsedGroups({
+      right_left: false,
+      top_bottom: true,
+      all_sides: true,
+      sambungan: true,
+    });
+    setIsFinishingPickerOpen(true);
+  };
+
+  const openLbMaxPicker = () => {
+    setLbMaxDraftProductId(Number(selectedLbMaxProductId || 0) || null);
+    setIsLbMaxPickerOpen(true);
+  };
+
+  const handleChooseCategory = (item) => {
+    setSelectedCategoryKey(item.key);
+    setSelectedSubCategoryKey('');
+    setSelectedProductKey('');
+    setSelectedVariantKey('');
+    setPickerSearch('');
+    setSelectedVariantRow(null);
+  };
+
+  const handleChooseSubCategory = (item) => {
+    setSelectedSubCategoryKey(item.key);
+    setSelectedProductKey('');
+    setSelectedVariantKey('');
+    setPickerSearch('');
+    setSelectedVariantRow(null);
+  };
+
+  const handleChooseProduct = (item) => {
+    setSelectedProductKey(item.key);
+    setSelectedVariantKey('');
+    setPickerSearch('');
+    setSelectedVariantRow(
+      hasVariantOptions(item)
+        ? null
+        : (item?.variants?.[0]?.row || null),
+    );
+  };
+
+  const handleChooseVariant = (item) => {
+    setSelectedVariantKey(item.key);
+    setSelectedVariantRow(item.row);
+  };
+
+  const handleConfirmPickerSelection = () => {
+    if (!selectedVariantRow) {
+      return;
+    }
+    onSelectProductVariant?.(selectedVariantRow);
+    setIsPickerOpen(false);
+  };
+
+  const showPickerConfirmButton = pickerStep === 'variant' || (pickerStep === 'product' && selectedProduct && !selectedProductHasVariants);
+
+  const handleToggleLbMaxItem = (item) => {
+    const id = Number(item.id || 0);
+    const isSelected = Number(lbMaxDraftProductId || 0) === id;
+    const nextId = isSelected ? null : id;
+    setLbMaxDraftProductId(nextId);
+    onSaveSelectedLbMax?.(nextId);
+  };
+
+  const handleClearLbMax = () => {
+    onSaveSelectedLbMax?.(null);
+    setIsLbMaxPickerOpen(false);
+  };
+
+  const handleConfirmLbMax = () => {
+    onSaveSelectedLbMax?.(Number(lbMaxDraftProductId || 0) || null);
+    setIsLbMaxPickerOpen(false);
+  };
+
+  const handleToggleStickerFinishing = (item) => {
+    const id = Number(item.id || 0);
+    if (id <= 0) return;
+    setFinishingDraftIds((prev) => {
+      const currentIds = Array.isArray(prev) ? prev : [];
+      const isSelected = currentIds.some((rowId) => Number(rowId) === id);
+      if (isSelected) {
+        setFinishingDraftMataAyamQtyById((prevMap) => {
+          const nextMap = { ...(prevMap || {}) };
+          delete nextMap[id];
+          return nextMap;
+        });
+        return currentIds.filter((rowId) => Number(rowId) !== id);
+      }
+      if (item?.requires_mata_ayam === true) {
+        setFinishingDraftMataAyamQtyById((prevMap) => ({
+          ...(prevMap || {}),
+          [id]: String(prevMap?.[id] ?? '0'),
+        }));
+      }
+      return [...currentIds, id];
+    });
+  };
+
+  const handleToggleGroupCollapse = (groupKey) => {
+    setCollapsedGroups((prev) => ({ ...prev, [groupKey]: !prev[groupKey] }));
+  };
+
+  const handleChangeMataAyamQty = (id, value, shouldAutoApply) => {
+    const sanitized = String(value || '').replace(/[^0-9]/g, '');
+    const nextMap = {
+      ...(finishingDraftMataAyamQtyById || {}),
+      [id]: sanitized,
+    };
+    setFinishingDraftMataAyamQtyById(nextMap);
+    if (shouldAutoApply) {
+      commitFinishingSelection(finishingDraftIds, nextMap);
+    }
+  };
+
+  const handleClearFinishingSelection = () => {
+    onSaveSelectedFinishings?.([]);
+    onSaveSelectedFinishingMataAyamQtyById?.({});
+    setIsFinishingPickerOpen(false);
+  };
+
+  const handleConfirmFinishingSelection = () => {
+    const normalizedIds = Array.from(
+      new Set((Array.isArray(finishingDraftIds) ? finishingDraftIds : [])
+        .map((id) => Number(id))
+        .filter((id) => id > 0)),
+    );
+    const normalizedMataAyam = {};
+    normalizedIds.forEach((id) => {
+      const option = finishingById.get(Number(id));
+      if (!option || option.requires_mata_ayam !== true) {
+        return;
+      }
+      const raw = String(finishingDraftMataAyamQtyById?.[id] ?? '0').replace(/[^0-9]/g, '');
+      const parsed = Number.parseInt(raw || '0', 10);
+      normalizedMataAyam[id] = Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+    });
+    onSaveSelectedFinishings?.(normalizedIds);
+    onSaveSelectedFinishingMataAyamQtyById?.(normalizedMataAyam);
+    setIsFinishingPickerOpen(false);
+  };
+
   return (
     <View style={styles.panel}>
-      <View style={styles.labelsRow}>
-        <Text style={[styles.label, styles.codeCol, styles.leftLabel]}>Produk</Text>
-        <Text style={[styles.label, styles.stockCol]}>Qty</Text>
-        <Text style={[styles.label, styles.sizeCol]}>{isFixedSizeProduct ? 'Mode' : (isQtyOnlyProduct ? 'Input' : 'L Mater (m)')}</Text>
-        <Text style={[styles.label, styles.sizeCol]}>{isFixedSizeProduct ? 'Ukuran' : (isQtyOnlyProduct ? 'Status' : 'P Mater (m)')}</Text>
-        {!hideFinishingField ? <Text style={[styles.label, styles.priceCol]}>Finishing</Text> : null}
-        {showPagesInput ? <Text style={[styles.label, styles.qtyCol]}>Halaman</Text> : null}
-        <Text style={[styles.label, styles.totalCol, hideFinishingField ? styles.totalColWide : null]}>
-          {isQtyOnlyProduct ? 'Ringkasan' : 'Bahan / Material'}
-        </Text>
-      </View>
+      <ProductInputGrid
+        styles={styles}
+        productName={productName}
+        onOpenProductPicker={openPicker}
+        qty={qty}
+        onChangeQty={onChangeQty}
+        primaryInputLabel={primaryInputLabel}
+        secondaryInputLabel={secondaryInputLabel}
+        summaryColumnLabel={summaryColumnLabel}
+        hideFinishingField={hideFinishingField}
+        showPagesInput={showPagesInput}
+        pageInputLabel={pageInputLabel}
+        showBookPrintRuleSection={showBookPrintRuleSection}
+        bookDisplayPrimary={bookDisplayPrimary}
+        bookDisplaySecondary={bookDisplaySecondary}
+        isFixedSizeProduct={isFixedSizeProduct}
+        fixedSizeLabel={fixedSizeLabel}
+        isQtyOnlyProduct={isQtyOnlyProduct}
+        isStrictStickerFinishingMode={isStrictStickerFinishingMode}
+        qtyOnlyInputText={qtyOnlyInputText}
+        qtyOnlyStatusText={qtyOnlyStatusText}
+        sizeWidthMeter={sizeWidthMeter}
+        onChangeSizeWidthMeter={onChangeSizeWidthMeter}
+        sizeLengthMeter={sizeLengthMeter}
+        onChangeSizeLengthMeter={onChangeSizeLengthMeter}
+        onOpenFinishingPicker={openFinishingPicker}
+        finishingDisabled={finishings.length === 0}
+        finishingSummary={finishingSummary}
+        finishingFallbackText={finishings.length > 0 ? 'Pilih finishing...' : 'Finishing belum siap'}
+        finishingAvailabilityMessage={!finishingSummary && finishings.length === 0 ? finishingAvailabilityMessage : ''}
+        showMataAyamIssue={Boolean(mataAyamIssueBadge?.visible)}
+        mataAyamIssueMessage={mataAyamIssueBadge?.message}
+        isPrintingFinishingMode={isPrintingFinishingMode}
+        onOpenLbMaxPicker={openLbMaxPicker}
+        lbMaxDisabled={lbMaxFinishings.length === 0}
+        lbMaxSummary={lbMaxSummary}
+        lbMaxFallbackText={lbMaxFinishings.length > 0 ? 'Pilih LB Max...' : 'LB Max tidak tersedia'}
+        showClearLbMax={Boolean(selectedLbMaxProductId)}
+        onClearLbMax={() => onSaveSelectedLbMax?.(null)}
+        pages={pages}
+        onChangePages={onChangePages}
+        materialDisplay={materialDisplay}
+        qtyOnlyMaterialText={qtyOnlyMaterialText}
+        materialError={materialError}
+        materialWarning={materialWarning}
+      />
 
-      <View style={styles.inputsRow}>
-        <View style={styles.codeCol}>
-          <Pressable style={styles.selector} onPress={openPicker}>
-            <Text style={styles.selectorText} numberOfLines={1} ellipsizeMode="tail">
-              {productName || 'Pilih produk...'}
-            </Text>
-          </Pressable>
-        </View>
+      <ProductModePanel
+        styles={styles}
+        isFixedSizeProduct={isFixedSizeProduct}
+        fixedSizeHint={fixedSizeHint}
+        showBookPrintRuleSection={showBookPrintRuleSection}
+        bookProductLabel={bookProductLabel}
+        bookType={bookType}
+        bookTypeOptions={bookTypeOptions}
+        bookWizardSteps={bookWizardSteps}
+        onChangeBookType={onChangeBookType}
+        bookSegment={bookSegment}
+        bookCashierNote={bookCashierNote}
+        bookFinishedSize={bookFinishedSize}
+        bookFinishedSizeOptions={bookFinishedSizeOptions}
+        onChangeBookFinishedSize={onChangeBookFinishedSize}
+        bookMaterialInsideProductId={bookMaterialInsideProductId}
+        bookMaterialInsideOptions={bookMaterialInsideOptions}
+        onChangeBookMaterialInside={onChangeBookMaterialInside}
+        bookMaterialCoverProductId={bookMaterialCoverProductId}
+        bookMaterialCoverOptions={bookMaterialCoverOptions}
+        onChangeBookMaterialCover={onChangeBookMaterialCover}
+        bookPrintModel={bookPrintModel}
+        bookPrintModelOptions={bookPrintModelOptions}
+        onChangeBookPrintModel={onChangeBookPrintModel}
+        bookPrintSide={bookPrintSide}
+        bookPrintSideOptions={bookPrintSideOptions}
+        onChangeBookPrintSide={onChangeBookPrintSide}
+        bookInsidePrint={bookInsidePrint}
+        bookInsidePrintOptions={bookInsidePrintOptions}
+        onChangeBookInsidePrint={onChangeBookInsidePrint}
+        bookCoverPrint={bookCoverPrint}
+        bookCoverPrintOptions={bookCoverPrintOptions}
+        onChangeBookCoverPrint={onChangeBookCoverPrint}
+        bookBindingType={bookBindingType}
+        bookBindingTypeOptions={bookBindingTypeOptions}
+        onChangeBookBindingType={onChangeBookBindingType}
+        bookExtraFinishingValues={bookExtraFinishingValues}
+        bookExtraFinishingOptions={bookExtraFinishingOptions}
+        onToggleBookExtraFinishing={onToggleBookExtraFinishing}
+        bookPrintRulePreview={bookPrintRulePreview}
+        bookPageValidation={bookPageValidation}
+        pages={bookPages}
+        onChangePages={onChangeBookPages}
+        bookPrintRulePrompt={bookPrintRulePrompt}
+        isQtyOnlyProduct={isQtyOnlyProduct}
+        qtyOnlyHelperText={qtyOnlyHelperText}
+      />
 
-        <View style={styles.stockCol}>
-          <TextInput
-            value={qty}
-            onChangeText={onChangeQty}
-            placeholder="1"
-            keyboardType="numeric"
-            style={[styles.input, styles.alignCenter]}
-          />
-        </View>
+      <ProductPricingPanel
+        styles={styles}
+        negotiationNotice={negotiationNotice}
+        negotiatedPriceInput={negotiatedPriceInput}
+        onChangeNegotiatedPrice={onChangeNegotiatedPrice}
+        onValidateProduct={onValidateProduct}
+        onAddToCart={onAddToCart}
+        onCancelItem={onCancelItem}
+        onClearCart={onClearCart}
+        itemFinalPrice={itemFinalPrice}
+        pricingSummary={pricingSummary}
+      />
 
-        <View style={styles.sizeCol}>
-          {isFixedSizeProduct ? (
-            <View style={[styles.readOnlyBox, styles.fixedSizeBox]}>
-              <Text style={[styles.readOnlyText, styles.fixedSizeValueText]}>{fixedSizeLabel || 'A3+'}</Text>
-            </View>
-          ) : isQtyOnlyProduct ? (
-            <View style={[styles.readOnlyBox, styles.fixedSizeBox]}>
-              <Text style={[styles.readOnlyText, styles.fixedSizeValueText]}>{qtyOnlyInputText}</Text>
-            </View>
-          ) : (
-            <TextInput
-              value={sizeWidthMeter}
-              onChangeText={onChangeSizeWidthMeter}
-              placeholder="0.00"
-              keyboardType="decimal-pad"
-              style={[styles.input, styles.alignCenter]}
-            />
-          )}
-        </View>
-
-        <View style={styles.sizeCol}>
-          {isFixedSizeProduct ? (
-            <View style={[styles.readOnlyBox, styles.fixedSizeBox]}>
-              <Text style={[styles.readOnlyText, styles.fixedSizeMetaText]}>Ukuran Tetap</Text>
-            </View>
-          ) : isQtyOnlyProduct ? (
-            <View style={[styles.readOnlyBox, styles.fixedSizeBox]}>
-              <Text style={[styles.readOnlyText, styles.fixedSizeMetaText]}>{qtyOnlyStatusText}</Text>
-            </View>
-          ) : (
-            <TextInput
-              value={sizeLengthMeter}
-              onChangeText={onChangeSizeLengthMeter}
-              placeholder="0.00"
-              keyboardType="decimal-pad"
-              style={[styles.input, styles.alignCenter]}
-            />
-          )}
-        </View>
-
-        {!hideFinishingField ? (
-          <View style={styles.priceCol}>
-            <Pressable
-              style={styles.selector}
-              onPress={() => {
-                setFinishingDraftIds(Array.isArray(selectedFinishingIds) ? selectedFinishingIds : []);
-                setFinishingDraftMataAyamQtyById(
-                  selectedFinishingMataAyamQtyById && typeof selectedFinishingMataAyamQtyById === 'object'
-                    ? selectedFinishingMataAyamQtyById
-                    : {},
-                );
-                setCollapsedGroups({
-                  right_left: false,
-                  top_bottom: true,
-                  all_sides: true,
-                  sambungan: true,
-                });
-                setIsFinishingPickerOpen(true);
-              }}
-              disabled={finishings.length === 0}
-            >
-              <Text style={styles.selectorText} numberOfLines={1} ellipsizeMode="tail">
-                {finishingSummary || (finishings.length > 0 ? 'Pilih finishing...' : 'Finishing belum siap')}
-              </Text>
-            </Pressable>
-            {!finishingSummary && finishings.length === 0 && finishingAvailabilityMessage ? (
-              <View style={styles.finishingHelpBadge}>
-                <Text style={styles.finishingHelpBadgeText}>
-                  {String(finishingAvailabilityMessage)}
-                </Text>
-              </View>
-            ) : null}
-            {mataAyamIssueBadge?.visible ? (
-              <View style={styles.mataAyamBadge}>
-                <Text style={styles.mataAyamBadgeText}>
-                  {String(mataAyamIssueBadge?.message || 'Mata ayam bermasalah')}
-                </Text>
-              </View>
-            ) : null}
-            {isPrintingFinishingMode ? (
-              <View style={styles.lbMaxRow}>
-                <Pressable
-                  style={[styles.selector, styles.lbMaxSelector]}
-                  onPress={() => {
-                    setLbMaxDraftProductId(Number(selectedLbMaxProductId || 0) || null);
-                    setIsLbMaxPickerOpen(true);
-                  }}
-                  disabled={lbMaxFinishings.length === 0}
-                >
-                  <Text style={styles.selectorText} numberOfLines={1} ellipsizeMode="tail">
-                    {lbMaxSummary || (lbMaxFinishings.length > 0 ? 'Pilih LB Max...' : 'LB Max tidak tersedia')}
-                  </Text>
-                </Pressable>
-                {selectedLbMaxProductId ? (
-                  <Pressable
-                    style={styles.clearLbMaxButton}
-                    onPress={() => onSaveSelectedLbMax?.(null)}
-                  >
-                    <Text style={styles.clearLbMaxText}>Hapus LB</Text>
-                  </Pressable>
-                ) : null}
-              </View>
-            ) : null}
-          </View>
-        ) : null}
-
-        {showPagesInput ? (
-          <View style={styles.qtyCol}>
-            <TextInput
-              value={pages}
-              onChangeText={onChangePages}
-              placeholder="1"
-              keyboardType="numeric"
-              style={[styles.input, styles.alignCenter]}
-            />
-          </View>
-        ) : null}
-
-        <View style={[styles.totalCol, hideFinishingField ? styles.totalColWide : null]}>
-          <View style={styles.readOnlyBox}>
-            <Text style={styles.readOnlyText}>
-              {isQtyOnlyProduct ? (materialDisplay || qtyOnlyMaterialText) : (materialDisplay || '-')}
-            </Text>
-          </View>
-          {materialError ? (
-            <View style={styles.materialErrorBadge}>
-              <Text style={styles.materialErrorBadgeText}>{String(materialError)}</Text>
-            </View>
-          ) : null}
-          {!materialError && materialWarning ? (
-            <View style={styles.materialWarningBadge}>
-              <Text style={styles.materialWarningBadgeText}>{String(materialWarning)}</Text>
-            </View>
-          ) : null}
-        </View>
-      </View>
-
-      {isFixedSizeProduct && fixedSizeHint ? (
-        <View style={styles.fixedSizeHintCard}>
-          <Text style={styles.fixedSizeHintText}>{String(fixedSizeHint)}</Text>
-        </View>
-      ) : isQtyOnlyProduct ? (
-        <View style={styles.fixedSizeHintCard}>
-          <Text style={styles.fixedSizeHintText}>{qtyOnlyHelperText}</Text>
-        </View>
-      ) : null}
-
-      {negotiationNotice?.visible ? (
-        <View
-          style={[
-            styles.negotiationCard,
-            negotiationNotice?.tone === 'error' ? styles.negotiationCardError : null,
-            negotiationNotice?.tone === 'warning' ? styles.negotiationCardWarning : null,
-            negotiationNotice?.tone === 'success' ? styles.negotiationCardSuccess : null,
-          ]}
-        >
-          <Text style={styles.negotiationTitle}>Negosiasi A3+</Text>
-          <TextInput
-            value={String(negotiatedPriceInput || '')}
-            onChangeText={onChangeNegotiatedPrice}
-            placeholder="Isi harga negosiasi"
-            keyboardType="numeric"
-            style={styles.negotiationInput}
-          />
-          <Text style={styles.negotiationMessage}>{String(negotiationNotice?.message || '')}</Text>
-        </View>
-      ) : null}
-
-      <View style={styles.actionRow}>
-        <Pressable onPress={onValidateProduct} style={[styles.button, styles.searchButton]}>
-          <Text style={styles.buttonText}>Cek Produk</Text>
-        </Pressable>
-
-        <View style={styles.rightActions}>
-          <Pressable onPress={onAddToCart} style={[styles.button, styles.addButton]}>
-            <Text style={styles.buttonText}>Simpan Item</Text>
-          </Pressable>
-          <Pressable onPress={onCancelItem} style={[styles.button, styles.addButton]}>
-            <Text style={styles.buttonText}>Batal Item</Text>
-          </Pressable>
-          <Pressable onPress={onClearCart} style={[styles.button, styles.deleteButton]}>
-            <Text style={styles.buttonText}>Hapus Semua Item</Text>
-          </Pressable>
-        </View>
-      </View>
-
-      <Text style={styles.previewText}>Estimasi Total Item: {formatRupiah(itemFinalPrice)}</Text>
-      {pricingSummary ? (
-        <View style={styles.previewSummaryCard}>
-          <Text style={styles.previewSummaryLine}>Cetak: {formatRupiah(pricingSummary.subtotal || 0)}</Text>
-          {pricingSummary?.isNegotiated ? (
-            <Text style={styles.previewSummaryLine}>
-              Cetak Nego: {formatRupiah(pricingSummary.negotiatedSubtotal || 0)}
-            </Text>
-          ) : null}
-          {pricingSummary?.bundleActive ? (
-            <>
-              <Text style={styles.previewSummaryLine}>
-                Finishing: {formatRupiah(pricingSummary.finishingBeforeDiscount || 0)}
-              </Text>
-              <Text style={styles.previewSummaryLine}>
-                Diskon Bundle: {formatRupiah(pricingSummary.bundleDiscount || 0)}
-              </Text>
-              <Text style={styles.previewSummaryLine}>
-                Finishing Final: {formatRupiah(pricingSummary.finishingFinal || 0)}
-              </Text>
-              <Text style={styles.previewSummaryLine}>
-                Total Final: {formatRupiah(pricingSummary.printSubtotal || 0)} + {formatRupiah(pricingSummary.finishingBeforeDiscount || 0)} - {formatRupiah(pricingSummary.bundleDiscount || 0)} = {formatRupiah(pricingSummary.grandTotal || 0)}
-              </Text>
-            </>
-          ) : (
-            <Text style={styles.previewSummaryLine}>
-              Finishing Final: {formatRupiah(pricingSummary.finishingFinal || 0)}
-            </Text>
-          )}
-          {pricingSummary.billingGroup ? (
-            <Text style={styles.previewSummaryLine}>
-              Rule Sticker: {pricingSummary.billingGroup}
-              {Number(pricingSummary.rollWidth || 0) > 0 ? ` | Lebar Roll ${pricingSummary.rollWidth} m` : ''}
-            </Text>
-          ) : null}
-          {pricingSummary?.stickerNotice ? (
-            <Text style={styles.previewWarningLine}>{pricingSummary.stickerNotice}</Text>
-          ) : null}
-        </View>
-      ) : null}
-
-      <Modal
+      <ProductPickerModal
+        styles={styles}
         visible={isPickerOpen}
-        transparent
-        animationType="fade"
-        onRequestClose={() => setIsPickerOpen(false)}
-      >
-        <View style={styles.modalBackdrop}>
-          <View style={styles.modalCard}>
-            <Text style={styles.modalTitle}>{pickerTitle}</Text>
-            <Text style={styles.modalSubTitle}>{pickerSubtitle}</Text>
-            <View style={styles.searchSection}>
-              <Text style={styles.searchSectionLabel}>Pencarian</Text>
-              <View style={styles.searchRow}>
-                <TextInput
-                  value={pickerSearch}
-                  onChangeText={setPickerSearch}
-                  placeholder={pickerSearchPlaceholder}
-                  placeholderTextColor="#777777"
-                  style={[styles.modalInput, styles.searchInput]}
-                />
-                <Pressable
-                  style={[styles.searchClearButton, !pickerSearch.trim() ? styles.searchClearButtonDisabled : null]}
-                  onPress={() => setPickerSearch('')}
-                  disabled={!pickerSearch.trim()}
-                >
-                  <Text style={styles.searchClearButtonText}>Bersihkan</Text>
-                </Pressable>
-              </View>
-            </View>
-            <ScrollView style={styles.listWrap}>
-              {pickerStep === 'category' && filteredCategories.map((item) => (
-                <Pressable
-                  key={item.key}
-                  style={[styles.listItem, selectedCategoryKey === item.key ? styles.listItemActiveRed : null]}
-                  onPress={() => {
-                    setSelectedCategoryKey(item.key);
-                    setSelectedSubCategoryKey('');
-                    setSelectedProductKey('');
-                    setSelectedVariantKey('');
-                    setPickerSearch('');
-                    setSelectedVariantRow(null);
-                  }}
-                >
-                  <Text style={[styles.listItemText, selectedCategoryKey === item.key ? styles.listItemTextActiveRed : null]}>
-                    {item.name}
-                  </Text>
-                </Pressable>
-              ))}
+        onClose={() => setIsPickerOpen(false)}
+        title={pickerTitle}
+        subtitle={pickerSubtitle}
+        searchValue={pickerSearch}
+        onChangeSearch={setPickerSearch}
+        searchPlaceholder={pickerSearchPlaceholder}
+        onClearSearch={() => setPickerSearch('')}
+        pickerStep={pickerStep}
+        filteredCategories={filteredCategories}
+        filteredSubcategories={filteredSubcategories}
+        filteredProducts={filteredProducts}
+        filteredVariants={filteredVariants}
+        selectedCategoryKey={selectedCategoryKey}
+        selectedSubCategoryKey={selectedSubCategoryKey}
+        selectedProductKey={selectedProductKey}
+        selectedVariantKey={selectedVariantKey}
+        onChooseCategory={handleChooseCategory}
+        onChooseSubCategory={handleChooseSubCategory}
+        onChooseProduct={handleChooseProduct}
+        onChooseVariant={handleChooseVariant}
+        categories={categories}
+        onBack={goBack}
+        confirmVisible={showPickerConfirmButton}
+        confirmDisabled={!selectedVariantRow}
+        onConfirm={handleConfirmPickerSelection}
+        formatProductOptionLabel={formatProductOptionLabel}
+        formatVariantOptionLabel={formatVariantOptionLabel}
+      />
 
-              {pickerStep === 'subcategory' && filteredSubcategories.map((item) => (
-                <Pressable
-                  key={item.key}
-                  style={[styles.listItem, selectedSubCategoryKey === item.key ? styles.listItemActiveRed : null]}
-                  onPress={() => {
-                    setSelectedSubCategoryKey(item.key);
-                    setSelectedProductKey('');
-                    setSelectedVariantKey('');
-                    setPickerSearch('');
-                    setSelectedVariantRow(null);
-                  }}
-                >
-                  <Text style={[styles.listItemText, selectedSubCategoryKey === item.key ? styles.listItemTextActiveRed : null]}>
-                    {item.name}
-                  </Text>
-                </Pressable>
-              ))}
-
-              {pickerStep === 'product' && filteredProducts.map((item) => (
-                <Pressable
-                  key={item.key}
-                  style={[styles.listItem, selectedProductKey === item.key ? styles.listItemActiveRed : null]}
-                  onPress={() => {
-                    setSelectedProductKey(item.key);
-                    setSelectedVariantKey('');
-                    setPickerSearch('');
-                    setSelectedVariantRow(
-                      hasVariantOptions(item)
-                        ? null
-                        : (item?.variants?.[0]?.row || null),
-                    );
-                  }}
-                >
-                  <Text style={[styles.listItemText, selectedProductKey === item.key ? styles.listItemTextActiveRed : null]}>
-                    {formatProductOptionLabel(item)}
-                  </Text>
-                </Pressable>
-              ))}
-
-              {pickerStep === 'variant' && filteredVariants.map((item) => (
-                <Pressable
-                  key={item.key}
-                  style={[styles.listItem, selectedVariantKey === item.key ? styles.listItemActiveRed : null]}
-                  onPress={() => {
-                    setSelectedVariantKey(item.key);
-                    setSelectedVariantRow(item.row);
-                  }}
-                >
-                  <Text style={[styles.listItemText, selectedVariantKey === item.key ? styles.listItemTextActiveRed : null]}>
-                    {formatVariantOptionLabel(item)}
-                  </Text>
-                </Pressable>
-              ))}
-              {pickerStep === 'category' && filteredCategories.length === 0 ? (
-                <Text style={styles.emptyText}>Kategori tidak ditemukan.</Text>
-              ) : null}
-              {pickerStep === 'subcategory' && filteredSubcategories.length === 0 ? (
-                <Text style={styles.emptyText}>Sub kategori tidak ditemukan.</Text>
-              ) : null}
-              {pickerStep === 'product' && filteredProducts.length === 0 ? (
-                <Text style={styles.emptyText}>Produk tidak ditemukan.</Text>
-              ) : null}
-              {pickerStep === 'variant' && filteredVariants.length === 0 ? (
-                <Text style={styles.emptyText}>Varian tidak ditemukan.</Text>
-              ) : null}
-
-              {categories.length === 0 ? (
-                <Text style={styles.emptyText}>Data produk backend belum tersedia.</Text>
-              ) : null}
-            </ScrollView>
-
-            <View style={styles.modalActions}>
-              <Pressable style={styles.secondaryButton} onPress={goBack}>
-                <Text style={styles.secondaryButtonText}>
-                  {pickerStep === 'category' ? 'Tutup' : 'Kembali'}
-                </Text>
-              </Pressable>
-              {pickerStep === 'variant' ? (
-                <Pressable
-                  style={[styles.primaryButton, !selectedVariantRow ? styles.primaryButtonDisabled : null]}
-                  onPress={() => {
-                    if (!selectedVariantRow) {
-                      return;
-                    }
-                    onSelectProductVariant?.(selectedVariantRow);
-                    setIsPickerOpen(false);
-                  }}
-                  disabled={!selectedVariantRow}
-                >
-                  <Text style={styles.primaryButtonText}>Pilih Produk</Text>
-                </Pressable>
-              ) : (pickerStep === 'product' && selectedProduct && !selectedProductHasVariants) ? (
-                <Pressable
-                  style={[styles.primaryButton, !selectedVariantRow ? styles.primaryButtonDisabled : null]}
-                  onPress={() => {
-                    if (!selectedVariantRow) {
-                      return;
-                    }
-                    onSelectProductVariant?.(selectedVariantRow);
-                    setIsPickerOpen(false);
-                  }}
-                  disabled={!selectedVariantRow}
-                >
-                  <Text style={styles.primaryButtonText}>Pilih Produk</Text>
-                </Pressable>
-              ) : null}
-            </View>
-          </View>
-        </View>
-      </Modal>
-
-      <Modal
+      <ProductLbMaxModal
+        styles={styles}
         visible={isLbMaxPickerOpen}
-        transparent
-        animationType="fade"
-        onRequestClose={() => setIsLbMaxPickerOpen(false)}
-      >
-        <View style={styles.modalBackdrop}>
-          <View style={styles.modalCard}>
-            <Text style={styles.modalTitle}>Pilih LB Max</Text>
-            <Text style={styles.modalSubTitle}>LB Max hanya bisa dipilih 1 item per produk</Text>
-            <ScrollView style={styles.listWrap}>
-              {lbMaxFinishings.map((item) => {
-                const id = Number(item.id || 0);
-                const isSelected = Number(lbMaxDraftProductId || 0) === id;
-                const extraWidthCm = Math.max(0, Number(item.lb_max_width_cm || 0) || 0);
-                return (
-                  <Pressable
-                    key={String(id || item.name)}
-                    style={[styles.listItem, isSelected ? styles.listItemActiveRed : null]}
-                    onPress={() => {
-                      const nextId = isSelected ? null : id;
-                      setLbMaxDraftProductId(nextId);
-                      onSaveSelectedLbMax?.(nextId);
-                    }}
-                  >
-                    <Text style={[styles.listItemText, isSelected ? styles.listItemTextActiveRed : null]}>
-                      {`${item.name || 'LB Max'}${extraWidthCm > 0 ? ` (+${extraWidthCm} cm)` : ''}`}
-                    </Text>
-                  </Pressable>
-                );
-              })}
-              {lbMaxFinishings.length === 0 ? (
-                <Text style={styles.emptyText}>Tidak ada opsi LB Max untuk produk ini.</Text>
-              ) : null}
-            </ScrollView>
-            <View style={styles.modalActions}>
-              <Pressable
-                style={styles.secondaryButton}
-                onPress={() => {
-                  onSaveSelectedLbMax?.(null);
-                  setIsLbMaxPickerOpen(false);
-                }}
-              >
-                <Text style={styles.secondaryButtonText}>Tanpa LB Max</Text>
-              </Pressable>
-              <Pressable
-                style={styles.primaryButton}
-                onPress={() => {
-                  onSaveSelectedLbMax?.(Number(lbMaxDraftProductId || 0) || null);
-                  setIsLbMaxPickerOpen(false);
-                }}
-              >
-                <Text style={styles.primaryButtonText}>Pilih LB Max</Text>
-              </Pressable>
-              <Pressable style={styles.secondaryButton} onPress={() => setIsLbMaxPickerOpen(false)}>
-                <Text style={styles.secondaryButtonText}>Tutup</Text>
-              </Pressable>
-            </View>
-          </View>
-        </View>
-      </Modal>
+        onClose={() => setIsLbMaxPickerOpen(false)}
+        rows={lbMaxFinishings}
+        selectedId={lbMaxDraftProductId}
+        onToggleItem={handleToggleLbMaxItem}
+        onClear={handleClearLbMax}
+        onConfirm={handleConfirmLbMax}
+      />
 
-      <Modal
+      <ProductFinishingModal
+        styles={styles}
         visible={isFinishingPickerOpen}
-        transparent
-        animationType="fade"
-        onRequestClose={() => setIsFinishingPickerOpen(false)}
-      >
-        <View style={styles.modalBackdrop}>
-          <View style={[styles.modalCard, styles.finishingModalCard]}>
-            <Text style={styles.modalTitle}>Pilih Finishing</Text>
-            <Text style={styles.modalSubTitle}>
-              {isStrictStickerFinishingMode
-                ? 'Produk sticker bisa memilih beberapa finishing aktif sekaligus.'
-                : 'List finishing sesuai aturan backend produk terpilih'}
-            </Text>
-            <ScrollView style={styles.listWrap}>
-              {isStrictStickerFinishingMode ? (
-                <View style={styles.finishingGroupCard}>
-                  <View style={styles.finishingGroupHeader}>
-                    <Text style={styles.finishingGroupTitle}>Finishing Sticker Aktif</Text>
-                  </View>
-                  <View style={styles.finishingGroupBody}>
-                    <Text style={styles.finishingGroupNote}>
-                      Pilih satu atau beberapa finishing sticker yang aktif sesuai kebutuhan pelanggan.
-                    </Text>
-                    {stickerFinishingRows.map((item) => (
-                      <Pressable
-                        key={String(item.id || item.name)}
-                        style={styles.finishingItemRow}
-                        onPress={() => {
-                          const id = Number(item.id || 0);
-                          if (id <= 0) return;
-                          setFinishingDraftIds((prev) => {
-                            const currentIds = Array.isArray(prev) ? prev : [];
-                            const isSelected = currentIds.some((rowId) => Number(rowId) === id);
-                            if (isSelected) {
-                              setFinishingDraftMataAyamQtyById((prevMap) => {
-                                const nextMap = { ...(prevMap || {}) };
-                                delete nextMap[id];
-                                return nextMap;
-                              });
-                              return currentIds.filter((rowId) => Number(rowId) !== id);
-                            }
-                            if (item?.requires_mata_ayam === true) {
-                              setFinishingDraftMataAyamQtyById((prevMap) => ({
-                                ...(prevMap || {}),
-                                [id]: String(prevMap?.[id] ?? '0'),
-                              }));
-                            }
-                            return [...currentIds, id];
-                          });
-                        }}
-                      >
-                        <View style={styles.finishingItemLeft}>
-                          <Text style={styles.checkboxText}>
-                            {finishingDraftIds.some((rowId) => Number(rowId) === Number(item.id || 0)) ? '[x]' : '[ ]'}
-                          </Text>
-                          <Text style={styles.finishingItemText}>{formatFinishingLabel(item)}</Text>
-                        </View>
-                        <View style={styles.finishingItemRight}>
-                          <Text style={styles.finishingPriceText}>{getFinishingPrice(item)}</Text>
-                          <Text style={styles.finishingTagText}>/STICKER</Text>
-                        </View>
-                      </Pressable>
-                    ))}
-                  </View>
-                </View>
-              ) : groupOrder.map((groupKey) => {
-                const rows = groupedFinishings[groupKey] || [];
-                if (rows.length === 0) {
-                  return null;
-                }
-                const isCollapsed = Boolean(collapsedGroups[groupKey]);
-                return (
-                  <View key={groupKey} style={styles.finishingGroupCard}>
-                    <View style={styles.finishingGroupHeader}>
-                      <Text style={styles.finishingGroupTitle}>{groupTitleMap[groupKey]}</Text>
-                      <Pressable
-                        style={styles.toggleButton}
-                        onPress={() =>
-                          setCollapsedGroups((prev) => ({ ...prev, [groupKey]: !prev[groupKey] }))
-                        }
-                      >
-                        <Text style={styles.toggleButtonText}>{isCollapsed ? 'Buka' : 'Tutup'}</Text>
-                      </Pressable>
-                    </View>
-                    {!isCollapsed ? (
-                      <View style={styles.finishingGroupBody}>
-                        <Text style={styles.finishingGroupNote}>{groupNoteMap[groupKey]}</Text>
-                        {rows.map((item) => (
-                          <Pressable
-                            key={String(item.id || item.name)}
-                            style={styles.finishingItemRow}
-                            onPress={() => {
-                              togglePrintingFinishingSelection(item, groupKey);
-                            }}
-                          >
-                            <View style={styles.finishingItemLeft}>
-                              <Text style={styles.checkboxText}>
-                                {finishingDraftIds.some((rowId) => Number(rowId) === Number(item.id || 0)) ? '[x]' : '[ ]'}
-                              </Text>
-                              <Text style={styles.finishingItemText}>{formatFinishingLabel(item)}</Text>
-                            </View>
-                            <View style={styles.finishingItemRight}>
-                              <Text style={styles.finishingPriceText}>{getFinishingPrice(item)}</Text>
-                              <Text style={styles.finishingTagText}>/{String(groupTitleMap[groupKey] || '').toUpperCase()}</Text>
-                            </View>
-                          </Pressable>
-                        ))}
-                      </View>
-                    ) : null}
-                  </View>
-                );
-              })}
-              {finishings.length === 0 ? (
-                <Text style={styles.emptyText}>Belum ada finishing untuk produk ini.</Text>
-              ) : null}
-            </ScrollView>
-            {selectedMataAyamRows.length > 0 ? (
-              <View style={styles.addonSection}>
-                <Text style={styles.addonTitle}>Add-on Mata Ayam</Text>
-                <Text style={styles.addonNote}>Isi jumlah mata ayam untuk finishing yang mengaktifkan add-on ini.</Text>
-                {selectedMataAyamRows.map((item) => {
-                  const id = Number(item?.id || 0);
-                  return (
-                    <View key={`mata-ayam-${id}`} style={styles.addonRow}>
-                      <Text style={styles.addonLabel}>{String(item?.name || 'Finishing')}</Text>
-                      <TextInput
-                        value={String(finishingDraftMataAyamQtyById?.[id] ?? '0')}
-                        onChangeText={(value) => {
-                          const sanitized = String(value || '').replace(/[^0-9]/g, '');
-                          const nextMap = {
-                            ...(finishingDraftMataAyamQtyById || {}),
-                            [id]: sanitized,
-                          };
-                          setFinishingDraftMataAyamQtyById(nextMap);
-                          if (autoApplyFinishingSelection) {
-                            commitFinishingSelection(finishingDraftIds, nextMap);
-                          }
-                        }}
-                        keyboardType="numeric"
-                        placeholder="0"
-                        style={[styles.input, styles.addonInput]}
-                      />
-                    </View>
-                  );
-                })}
-              </View>
-            ) : null}
-            <View style={styles.modalActions}>
-              {Array.isArray(selectedFinishingIds) && selectedFinishingIds.length > 0 ? (
-                <Pressable
-                  style={styles.secondaryButton}
-                  onPress={() => {
-                    onSaveSelectedFinishings?.([]);
-                    onSaveSelectedFinishingMataAyamQtyById?.({});
-                    setIsFinishingPickerOpen(false);
-                  }}
-                >
-                  <Text style={styles.secondaryButtonText}>Tanpa Finishing</Text>
-                </Pressable>
-              ) : null}
-              <Pressable
-                style={styles.primaryButton}
-                onPress={() => {
-                  const normalizedIds = Array.from(
-                    new Set((Array.isArray(finishingDraftIds) ? finishingDraftIds : [])
-                      .map((id) => Number(id))
-                      .filter((id) => id > 0)),
-                  );
-                  const normalizedMataAyam = {};
-                  normalizedIds.forEach((id) => {
-                    const option = finishingById.get(Number(id));
-                    if (!option || option.requires_mata_ayam !== true) {
-                      return;
-                    }
-                    const raw = String(finishingDraftMataAyamQtyById?.[id] ?? '0').replace(/[^0-9]/g, '');
-                    const parsed = Number.parseInt(raw || '0', 10);
-                    normalizedMataAyam[id] = Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
-                  });
-                  onSaveSelectedFinishings?.(normalizedIds);
-                  onSaveSelectedFinishingMataAyamQtyById?.(normalizedMataAyam);
-                  setIsFinishingPickerOpen(false);
-                }}
-              >
-                <Text style={styles.primaryButtonText}>Pilih Finishing</Text>
-              </Pressable>
-              <Pressable style={styles.secondaryButton} onPress={() => setIsFinishingPickerOpen(false)}>
-                <Text style={styles.secondaryButtonText}>Tutup</Text>
-              </Pressable>
-            </View>
-          </View>
-        </View>
-      </Modal>
+        onClose={() => setIsFinishingPickerOpen(false)}
+        isStrictStickerFinishingMode={isStrictStickerFinishingMode}
+        stickerFinishingRows={stickerFinishingRows}
+        onToggleStickerFinishing={handleToggleStickerFinishing}
+        finishingDraftIds={finishingDraftIds}
+        setFinishingDraftMataAyamQtyById={setFinishingDraftMataAyamQtyById}
+        groupOrder={groupOrder}
+        groupedFinishings={groupedFinishings}
+        groupTitleMap={groupTitleMap}
+        groupNoteMap={groupNoteMap}
+        collapsedGroups={collapsedGroups}
+        onToggleGroupCollapse={handleToggleGroupCollapse}
+        onTogglePrintingFinishing={togglePrintingFinishingSelection}
+        finishings={finishings}
+        selectedMataAyamRows={selectedMataAyamRows}
+        finishingDraftMataAyamQtyById={finishingDraftMataAyamQtyById}
+        onChangeMataAyamQty={handleChangeMataAyamQty}
+        autoApplyFinishingSelection={autoApplyFinishingSelection}
+        onClearAll={handleClearFinishingSelection}
+        showClearAction={Array.isArray(selectedFinishingIds) && selectedFinishingIds.length > 0}
+        onConfirm={handleConfirmFinishingSelection}
+        formatFinishingLabel={formatFinishingLabel}
+        getFinishingPrice={getFinishingPrice}
+      />
     </View>
   );
 };
@@ -1278,6 +990,184 @@ const styles = StyleSheet.create({
     fontSize: 12,
     color: '#24507a',
     fontWeight: '500',
+  },
+  bookRuleCard: {
+    marginTop: 8,
+    borderWidth: 1,
+    borderColor: '#c8d8f2',
+    backgroundColor: '#f4f8ff',
+    paddingHorizontal: 10,
+    paddingVertical: 10,
+    gap: 8,
+  },
+  bookRuleTitle: {
+    fontSize: 12,
+    color: '#174a8c',
+    fontWeight: '800',
+  },
+  bookWizardStepRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'center',
+      flexWrap: 'wrap',
+      gap: 6,
+      marginBottom: 8,
+    },
+    bookWizardStepItem: {
+      alignItems: 'center',
+      gap: 3,
+      minWidth: 54,
+    },
+    bookWizardStepDot: {
+      width: 26,
+      height: 26,
+      borderRadius: 13,
+      borderWidth: 1,
+    borderColor: '#c1cce0',
+    backgroundColor: '#eef2f8',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  bookWizardStepDotActive: {
+    borderColor: '#2250c9',
+    backgroundColor: '#2f64ef',
+  },
+  bookWizardStepDotDone: {
+    borderColor: '#1e8a4f',
+    backgroundColor: '#22a35a',
+  },
+  bookWizardStepDotText: {
+    fontSize: 11,
+    color: '#51657f',
+    fontWeight: '800',
+  },
+    bookWizardStepDotTextActive: {
+      color: '#ffffff',
+    },
+    bookWizardStepLabel: {
+      fontSize: 10,
+      color: '#5e6f87',
+      fontWeight: '700',
+      textAlign: 'center',
+    },
+    bookWizardStepLabelActive: {
+      color: '#15418d',
+    },
+    bookWizardHeaderCard: {
+      borderWidth: 1,
+      borderColor: '#c8d8f2',
+      backgroundColor: '#f4f8ff',
+      paddingHorizontal: 10,
+      paddingVertical: 8,
+      gap: 6,
+      marginBottom: 8,
+    },
+    bookWizardHeaderTitle: {
+      fontSize: 12,
+      color: '#15418d',
+      fontWeight: '800',
+    },
+    bookWizardHeaderSubTitle: {
+      fontSize: 11,
+      color: '#4a607d',
+      fontWeight: '600',
+    },
+    bookWizardSummaryGrid: {
+      gap: 6,
+    },
+    bookReadOnlyRow: {
+      borderWidth: 1,
+      borderColor: '#d7e2f3',
+      backgroundColor: '#ffffff',
+      paddingHorizontal: 10,
+    paddingVertical: 8,
+    gap: 2,
+  },
+  bookReadOnlyLabel: {
+    fontSize: 11,
+    color: '#48607e',
+    fontWeight: '700',
+  },
+  bookReadOnlyValue: {
+    fontSize: 12,
+    color: '#183b63',
+    fontWeight: '700',
+  },
+  bookOptionGroup: {
+    gap: 5,
+  },
+  bookOptionLabel: {
+    fontSize: 11,
+    color: '#35516f',
+    fontWeight: '700',
+  },
+  bookOptionWrap: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 6,
+  },
+  bookOptionChip: {
+    borderWidth: 1,
+    borderColor: '#b9c8e6',
+    backgroundColor: '#ffffff',
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+  },
+  bookOptionChipBody: {
+    gap: 2,
+  },
+  bookOptionChipActive: {
+    borderColor: '#2250c9',
+    backgroundColor: '#2f64ef',
+  },
+  bookOptionChipText: {
+    fontSize: 11,
+    color: '#29405f',
+    fontWeight: '700',
+  },
+  bookOptionChipPrice: {
+    fontSize: 10,
+    color: '#5f7390',
+    fontWeight: '700',
+  },
+  bookOptionChipTextActive: {
+    color: '#ffffff',
+  },
+  bookRuleResultCard: {
+    borderWidth: 1,
+    borderColor: '#d6deea',
+    backgroundColor: '#ffffff',
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    gap: 4,
+  },
+  bookRuleResultLine: {
+    fontSize: 11,
+    color: '#29405f',
+    fontWeight: '700',
+  },
+  bookRuleMessage: {
+    fontSize: 11,
+    color: '#4a607d',
+    fontWeight: '600',
+  },
+  bookRuleHint: {
+    fontSize: 11,
+    color: '#4a607d',
+    fontWeight: '600',
+  },
+  bookWarningBadge: {
+    marginTop: 2,
+    borderWidth: 1,
+    borderColor: '#d45d5d',
+    backgroundColor: '#fff1f1',
+    paddingHorizontal: 8,
+    paddingVertical: 6,
+  },
+  bookWarningText: {
+    fontSize: 11,
+    color: '#8d2222',
+    fontWeight: '700',
   },
   negotiationCard: {
     marginTop: 8,

@@ -9,6 +9,7 @@ import {
   View,
 } from 'react-native';
 import AppLoadingAnimation from './AppLoadingAnimation';
+const { matchesCustomerSearch, normalizeIndonesianPhone } = require('../utils/customerPhone');
 
 const normalizeText = (value) => String(value || '').trim().toLowerCase();
 const isTruthyCustomerFlag = (value) => {
@@ -73,8 +74,7 @@ const TransactionHeader = ({
     if (!customerSearch.trim()) {
       return source;
     }
-    const keyword = normalizeText(customerSearch);
-    return source.filter((row) => normalizeText(row.name).includes(keyword));
+    return source.filter((row) => matchesCustomerSearch(row, customerSearch));
   }, [customers, customerSearch]);
 
   const filteredTypes = useMemo(
@@ -134,11 +134,13 @@ const TransactionHeader = ({
     }
 
     try {
+      const normalizedPhone = normalizeIndonesianPhone(formPhone, { allowEmpty: false });
       setIsSavingCustomer(true);
       setCreateError('');
+      setFormPhone(normalizedPhone);
       await onCreateCustomer?.({
         name: formName.trim(),
-        phone: formPhone.trim(),
+        phone: normalizedPhone,
         address: formAddress.trim(),
         customer_type_id: Number(formCustomerTypeId),
       });
@@ -247,7 +249,7 @@ const TransactionHeader = ({
             <TextInput
               value={customerSearch}
               onChangeText={setCustomerSearch}
-              placeholder="Cari nama customer..."
+              placeholder="Cari nama atau nomor HP..."
               placeholderTextColor="#777777"
               style={styles.modalInput}
             />

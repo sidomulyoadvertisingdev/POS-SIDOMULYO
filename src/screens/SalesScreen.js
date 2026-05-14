@@ -25,6 +25,7 @@ import {
   fetchPosCashFlows,
   fetchPosCashFlowTypes,
   fetchPosCloserOrder,
+  fetchAllPosCustomers,
   fetchPosCustomers,
   fetchPosCustomerTypes,
   fetchPosFinanceRecipients,
@@ -38,12 +39,14 @@ import {
   fetchPosProductionMaterials,
   fetchPosProductDetail,
   fetchPosProducts,
+  fetchPosReceivableApprovals,
   fetchPosSettings,
   fetchPosSyncChanges,
   fetchPosSyncStatus,
   pickupPosOrder,
   fetchAuthMe,
   getCustomerDepositBalance,
+  getCustomerReceivableSummary,
   getApiBaseUrl,
   previewPosPricing,
   submitPosCloserOrder,
@@ -71,6 +74,30 @@ import {
 const { buildProductPickerTree, hasA3Token } = require('../utils/productPickerTree');
 const { resolveQtyOnlyProductMode } = require('../utils/productModes');
 const { extractOrderDiscountAmount } = require('../utils/receiptSummary');
+const {
+  CUSTOMER_PHONE_CONFLICT_MESSAGE,
+  isCustomerPhoneConflictError,
+  normalizeIndonesianPhone,
+} = require('../utils/customerPhone');
+const {
+  buildBookDirectionSummary,
+  buildBookPrintRulePayload,
+  buildBookQuickSummary,
+  computeBookPageValidation,
+  filterBookFieldOptionsByFlowContext,
+  filterBookMaterialOptionsByFlowContext,
+  filterBookOptionsByRule,
+  getBookDirectionRule,
+  getBookPrintRuleConfig,
+  getBookWizardProductContext,
+  isBookSalesProduct,
+  normalizeBookMultiSelection,
+  normalizeBookSelection,
+  normalizePrintSideCode,
+  resolveBookPageMultiple,
+  resolveBookPrintRuleFromSource,
+  resolveBookWizardStepsForFlowContext,
+} = require('../utils/bookPrintRule');
 
 const buildQtyOnlyModeHelpers = () => ({
   toSourceProduct,
@@ -106,6 +133,170 @@ const diffDaysFromNow = (value) => {
   const start = new Date(parsed.getFullYear(), parsed.getMonth(), parsed.getDate()).getTime();
   const end = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
   return Math.max(0, Math.round((end - start) / 86400000));
+};
+const normalizeCustomerReceivableSummary = (payload) => {
+  const source = payload && typeof payload === 'object' && !Array.isArray(payload) ? payload : {};
+  const customer = source?.customer && typeof source.customer === 'object' ? source.customer : {};
+  const summary = source?.summary && typeof source.summary === 'object' ? source.summary : source;
+  const invoiceNumbers = Array.isArray(summary?.invoice_numbers)
+    ? summary.invoice_numbers.map((value) => String(value || '').trim()).filter(Boolean)
+    : [];
+  const primaryInvoiceNo = String(summary?.primary_invoice_no || invoiceNumbers[0] || '').trim();
+  const dueTotal = roundMoney(Number(summary?.due_total || 0));
+  const invoiceCount = Math.max(Number(summary?.invoice_count || 0) || 0, 0);
+
+  return {
+    customerId: Number(customer?.id || source?.customer_id || 0) || null,
+    customerName: String(customer?.name || source?.customer_name || '').trim(),
+    customerPhone: String(customer?.phone || source?.customer_phone || '').trim(),
+    hasOutstanding: Boolean(summary?.has_outstanding) || dueTotal > 0 || invoiceCount > 0,
+    dueTotal,
+    invoiceCount,
+    oldestUnpaidDays: Math.max(Number(summary?.oldest_unpaid_days || 0) || 0, 0),
+    latestDueDate: String(summary?.latest_due_date || '').trim(),
+    invoiceNumbers,
+    primaryInvoiceNo,
+  };
+};
+const buildCustomerReceivableNoticeMessage = (summary) => {
+  if (!summary || !summary.hasOutstanding) {
+    return '';
+  }
+
+  const invoicePreview = summary.primaryInvoiceNo
+    ? (
+      summary.invoiceNumbers.length > 1
+        ? `${summary.primaryInvoiceNo} +${summary.invoiceNumbers.length - 1} invoice lain`
+        : summary.primaryInvoiceNo
+    )
+    : '';
+
+  return [
+    summary.customerName ? `Pelanggan: ${summary.customerName}${summary.customerPhone ? ` | ${summary.customerPhone}` : ''}` : '',
+    `Piutang aktif: ${formatRupiah(summary.dueTotal || 0)}`,
+    invoicePreview ? `Invoice terkait: ${invoicePreview}` : null,
+    summary.oldestUnpaidDays > 0 ? `Piutang tertua: ${summary.oldestUnpaidDays} hari` : null,
+    'Status approval: Menunggu Approval',
+    'Pelanggan ini masih memiliki piutang. Mohon menunggu approval admin sebelum melanjutkan.',
+  ].filter(Boolean).join('\n');
+};
+const normalizeReceivableApprovalStatus = (value) => {
+  const text = normalizeText(value);
+  if (['approved', 'approve', 'accepted', 'disetujui'].includes(text)) return 'approved';
+  if (['rejected', 'reject', 'declined', 'ditolak'].includes(text)) return 'rejected';
+  return 'pending';
+};
+const formatReceivableApprovalStatusLabel = (value) => {
+  const status = normalizeReceivableApprovalStatus(value);
+  if (status === 'approved') return 'Approved';
+  if (status === 'rejected') return 'Ditolak';
+  return 'Menunggu Approval';
+};
+const buildReceivableApprovalRequestLabel = (approvalId) => {
+  const resolvedId = Number(approvalId || 0) || 0;
+  return resolvedId > 0 ? `APR-${resolvedId}` : '-';
+};
+const normalizeReceivableApprovalRow = (row) => {
+  const approvalId = Number(row?.id || row?.approval_request_id || row?.request_id || 0) || 0;
+  const status = normalizeReceivableApprovalStatus(row?.status);
+  const payload = row?.payload && typeof row.payload === 'object' && !Array.isArray(row.payload) ? row.payload : {};
+  const customer = row?.customer && typeof row.customer === 'object' ? row.customer : {};
+  const requester = row?.requester && typeof row.requester === 'object' ? row.requester : {};
+  const approver = row?.approver && typeof row.approver === 'object' ? row.approver : {};
+  const order = row?.order && typeof row.order === 'object' ? row.order : null;
+  const orderInvoice = order?.invoice && typeof order.invoice === 'object' ? order.invoice : null;
+  const queuedItems = Array.isArray(payload?.items) ? payload.items : [];
+  const total = roundMoney(Number(row?.requested_order_total || 0));
+  const paidTotal = roundMoney(Number(row?.requested_payment_amount || 0));
+  const requestLabel = buildReceivableApprovalRequestLabel(approvalId);
+
+  return {
+    id: `approval-${approvalId || Math.random().toString(36).slice(2, 8)}`,
+    status: status === 'pending' ? 'pending_approval' : (status === 'rejected' ? 'approval_rejected' : (order?.status || orderInvoice?.status || 'approved')),
+    created_at: String(row?.created_at || '').trim(),
+    updated_at: String(row?.updated_at || row?.decided_at || row?.created_at || '').trim(),
+    notes: String(payload?.notes || row?.decision_note || '').trim(),
+    customer: {
+      id: Number(customer?.id || payload?.customer_id || 0) || null,
+      name: String(customer?.name || payload?.customer_name || 'Pelanggan umum').trim() || 'Pelanggan umum',
+      phone: String(customer?.phone || payload?.customer_phone || '').trim(),
+    },
+    invoice: orderInvoice ? {
+      ...orderInvoice,
+      total: roundMoney(Number(orderInvoice?.total || total)),
+      paid_total: roundMoney(Number(orderInvoice?.paid_total || paidTotal)),
+      due_total: roundMoney(Math.max(0, Number(orderInvoice?.total || 0) - Number(orderInvoice?.paid_total || 0))),
+      can_pay: Boolean(orderInvoice?.id) && roundMoney(Math.max(0, Number(orderInvoice?.total || 0) - Number(orderInvoice?.paid_total || 0))) > 0,
+    } : {
+      id: null,
+      invoice_no: requestLabel,
+      status: status === 'pending' ? 'pending_approval' : 'approval_rejected',
+      total,
+      paid_total: paidTotal,
+      due_total: 0,
+      can_pay: false,
+      created_at: String(row?.created_at || '').trim(),
+      updated_at: String(row?.updated_at || row?.decided_at || row?.created_at || '').trim(),
+    },
+    items: queuedItems,
+    approval: {
+      id: approvalId,
+      requestLabel,
+      status,
+      statusLabel: formatReceivableApprovalStatusLabel(status),
+      source: String(row?.request_source || '').trim(),
+      createdAt: String(row?.created_at || '').trim(),
+      updatedAt: String(row?.updated_at || row?.decided_at || row?.created_at || '').trim(),
+      decidedAt: String(row?.decided_at || '').trim(),
+      decisionNote: String(row?.decision_note || '').trim(),
+      invoiceCount: Math.max(Number(row?.invoice_count_snapshot || 0) || 0, 0),
+      outstandingTotal: roundMoney(Number(row?.due_total_snapshot || 0)),
+      requestedOrderSubtotal: roundMoney(Number(row?.requested_order_subtotal || 0)),
+      requestedDiscountAmount: roundMoney(Number(row?.requested_discount_amount || 0)),
+      requestedOrderTotal: total,
+      requestedPaymentAmount: paidTotal,
+      requestedTransactionType: String(row?.requested_transaction_type || '').trim(),
+      oldestDays: Math.max(Number(row?.oldest_days_snapshot || 0) || 0, 0),
+      requester: {
+        id: Number(requester?.id || 0) || null,
+        name: String(requester?.name || '').trim(),
+      },
+      approver: {
+        id: Number(approver?.id || 0) || null,
+        name: String(approver?.name || '').trim(),
+      },
+      orderId: Number(order?.id || 0) || null,
+      orderStatus: String(order?.status || '').trim(),
+      orderInvoiceNo: String(orderInvoice?.invoice_no || '').trim(),
+    },
+    __source: 'receivable_approval',
+    __approval_request_id: approvalId || null,
+  };
+};
+const isReceivableApprovalInvoiceRow = (row) => String(row?.__source || '').trim().toLowerCase() === 'receivable_approval';
+const buildReceivableApprovalUpdateNotice = (row) => {
+  const approval = row?.approval && typeof row.approval === 'object' ? row.approval : {};
+  const customerName = String(row?.customer?.name || 'Pelanggan umum').trim() || 'Pelanggan umum';
+  const customerPhone = String(row?.customer?.phone || '').trim();
+  const invoiceNo = String(row?.invoice?.invoice_no || approval?.orderInvoiceNo || '').trim();
+  const status = normalizeReceivableApprovalStatus(approval?.status || row?.status);
+  const lines = [
+    `Pelanggan: ${customerName}${customerPhone ? ` | ${customerPhone}` : ''}`,
+    `Piutang sebelumnya: ${formatRupiah(approval?.outstandingTotal || 0)}`,
+    invoiceNo ? `Invoice: ${invoiceNo}` : `Request: ${approval?.requestLabel || '-'}`,
+    `Status approval: ${formatReceivableApprovalStatusLabel(status)}`,
+    approval?.approver?.name ? `Diproses oleh: ${approval.approver.name}` : null,
+    approval?.decisionNote ? `Catatan: ${approval.decisionNote}` : null,
+    status === 'approved'
+      ? 'Invoice pelanggan ini sudah di-approve dan bisa dilanjutkan/diproses.'
+      : 'Permintaan approval piutang ditolak. Tindak lanjuti dulu sebelum order dilanjutkan.',
+  ].filter(Boolean);
+
+  return {
+    title: status === 'approved' ? 'Approval Piutang Disetujui' : 'Approval Piutang Diperbarui',
+    message: lines.join('\n'),
+    visual: status === 'approved' ? 'success' : 'default',
+  };
 };
 const formatIsoDate = (date) => {
   const year = date.getFullYear();
@@ -239,6 +430,80 @@ const parseJsonArray = (value) => {
     }
   }
   return [];
+};
+const buildBookMaterialOptionLabel = (row) => {
+  const sku = String(row?.sku || row?.code || '').trim();
+  const name = String(row?.name || row?.material_name || row?.title || '').trim();
+  if (sku && name && normalizeText(sku) !== normalizeText(name)) {
+    return `${sku} - ${name}`;
+  }
+  return name || sku || '';
+};
+const mapBookMaterialRowToOption = (row) => {
+  const productId = Number(row?.id || row?.product_id || row?.material_id || 0);
+  if (productId <= 0) {
+    return null;
+  }
+  const label = buildBookMaterialOptionLabel(row);
+  if (!label) {
+    return null;
+  }
+  return {
+    value: String(productId),
+    label,
+    product_id: productId,
+    sku: String(row?.sku || row?.code || '').trim(),
+    name: String(row?.name || row?.material_name || row?.title || '').trim() || label,
+    default_price: Number(row?.default_price || 0) || 0,
+    unit_price: Number(row?.unit_price || row?.selling_price || row?.price || row?.default_price || 0) || 0,
+    selling_price: Number(row?.selling_price || row?.unit_price || row?.price || row?.default_price || 0) || 0,
+    book_print_side_code: String(row?.book_print_side_code || '').trim(),
+    book_print_side: String(row?.book_print_side || '').trim(),
+    book_color_mode: String(row?.book_color_mode || '').trim(),
+  };
+};
+const findBookMaterialOption = (options = [], { productId = null, text = '' } = {}) => {
+  const rows = Array.isArray(options) ? options : [];
+  const normalizedText = normalizeText(text);
+  const numericId = Number(productId || 0);
+
+  if (numericId > 0) {
+    const exactById = rows.find((row) => Number(row?.product_id || row?.id || row?.value || 0) === numericId);
+    if (exactById) {
+      return exactById;
+    }
+  }
+
+  if (normalizedText) {
+    const exactByText = rows.find((row) => (
+      normalizeText(row?.value) === normalizedText
+      || normalizeText(row?.label) === normalizedText
+      || normalizeText(row?.sku) === normalizedText
+      || normalizeText(row?.name) === normalizedText
+    ));
+    if (exactByText) {
+      return exactByText;
+    }
+
+    const partialByText = rows.find((row) => (
+      normalizeText(row?.label).includes(normalizedText)
+      || normalizeText(row?.name).includes(normalizedText)
+      || normalizeText(row?.sku).includes(normalizedText)
+    ));
+    if (partialByText) {
+      return partialByText;
+    }
+  }
+
+  return null;
+};
+const extractBookAddonValues = (value) => {
+  return parseJsonArray(value)
+    .map((row) => (row && typeof row === 'object' ? row : null))
+    .filter(Boolean)
+    .filter((row) => row?.enabled !== false)
+    .map((row) => String(row?.option_code || row?.code || row?.value || '').trim())
+    .filter(Boolean);
 };
 const extractFirstTextByKeyHints = (source, hints = []) => {
   const words = Array.isArray(hints) ? hints.map((hint) => String(hint || '').toLowerCase()).filter(Boolean) : [];
@@ -894,7 +1159,12 @@ const restoreDraftItemDisplay = (backendItem, materialMapById, finishingNameMapB
   const snapshot = parseJsonObject(backendItem?.spec_snapshot) || {};
   const draftForm = parseJsonObject(snapshot?.draft_form) || parseJsonObject(backendItem?.draft_form) || {};
   const specs = parseJsonObject(snapshot?.specs) || parseJsonObject(backendItem?.specs) || {};
+  const bookSpecs = parseJsonObject(snapshot?.book_specs) || {};
+  const bookPrintRule = resolveBookPrintRuleFromSource(backendItem);
   const meta = parseJsonObject(backendItem?.meta) || {};
+  const isBookItem = String(snapshot?.type || '').trim().toLowerCase() === 'book'
+    || Boolean(bookPrintRule)
+    || Object.keys(bookSpecs).length > 0;
   const unknownSizeText = toLabel(
     extractFirstTextByKeyHints(backendItem, ['size', 'ukuran', 'dimension']),
     extractFirstTextByKeyHints(snapshot, ['size', 'ukuran', 'dimension']),
@@ -950,7 +1220,29 @@ const restoreDraftItemDisplay = (backendItem, materialMapById, finishingNameMapB
   const sizeFromMeters = widthMeter > 0 && lengthMeter > 0
     ? `${formatMeterNumber(widthMeter)} x ${formatMeterNumber(lengthMeter)} m`
     : '';
-  const sizeText = toLabel(
+  const bookFinishedSize = toLabel(
+    backendItem?.finished_size,
+    draftForm?.finished_size,
+    specs?.finished_size,
+    bookSpecs?.finished_size,
+    bookPrintRule?.finished_size,
+  );
+  const bookPrintModel = toLabel(
+    backendItem?.print_model,
+    draftForm?.print_model,
+    specs?.print_model,
+    bookSpecs?.print_model,
+    bookPrintRule?.print_model,
+  );
+  const bookPrintSide = toLabel(
+    backendItem?.print_side,
+    draftForm?.print_side,
+    specs?.print_side,
+    bookSpecs?.print_side,
+    bookPrintRule?.print_side,
+  );
+  const bookSizeDisplay = [bookFinishedSize, bookPrintModel].filter(Boolean).join(' | ');
+  const baseSizeText = toLabel(
     backendItem?.size_text,
     draftForm?.size_text,
     specs?.size_text,
@@ -963,6 +1255,9 @@ const restoreDraftItemDisplay = (backendItem, materialMapById, finishingNameMapB
     sizeFromMeters,
     '-',
   );
+  const sizeText = isBookItem
+    ? toLabel(bookSizeDisplay, baseSizeText, '-')
+    : baseSizeText;
 
   const finishingFromPayload = extractFinishingLabelsFromPayload(
     parseJsonArray(backendItem?.finishings),
@@ -1021,15 +1316,27 @@ const restoreDraftItemDisplay = (backendItem, materialMapById, finishingNameMapB
     buildMaterialDisplay(backendItem, materialMapById),
     '-',
   );
-  const materialText = materialUsageSummary
+  const baseMaterialText = materialUsageSummary
     ? (
       rawMaterialText && rawMaterialText !== '-' && !normalizeText(rawMaterialText).includes(normalizeText(materialUsageSummary))
         ? `${rawMaterialText} | ${materialUsageSummary}`
         : (rawMaterialText === '-' ? materialUsageSummary : rawMaterialText)
     )
     : rawMaterialText;
+  const bookSummaryText = buildBookQuickSummary(bookPrintRule);
+  const materialText = isBookItem
+    ? toLabel(bookSummaryText, baseMaterialText, '-')
+    : baseMaterialText;
+  const customerPageCount = Math.max(Number(
+    backendItem?.customer_page_count
+    || draftForm?.customer_page_count
+    || specs?.customer_page_count
+    || bookSpecs?.customer_page_count
+    || bookPrintRule?.customer_page_count
+    || 0,
+  ) || 0, 0);
   const pages = Math.max(
-    Number(draftForm?.pages || specs?.pages || meta?.pages || backendItem?.pages || backendItem?.page || 1) || 1,
+    Number(customerPageCount || draftForm?.pages || specs?.pages || meta?.pages || backendItem?.pages || backendItem?.page || 1) || 1,
     1,
   );
 
@@ -1039,6 +1346,12 @@ const restoreDraftItemDisplay = (backendItem, materialMapById, finishingNameMapB
     lbMaxText,
     materialText,
     pages,
+    isBookItem,
+    bookPrintRule,
+    bookFinishedSize,
+    bookPrintModel,
+    bookPrintSide,
+    customerPageCount,
   };
 };
 const buildCartItemFromDraftSource = (sourceItem, itemKey, materialMapById, finishingNameMapById, productNameMapById) => {
@@ -1073,6 +1386,80 @@ const buildCartItemFromDraftSource = (sourceItem, itemKey, materialMapById, fini
   const expressFee = Number(mergedSource?.express_fee || 0);
   const lineTotal = roundMoney(subtotal + finishingTotal + expressFee);
   const materialText = restored.materialText || '-';
+  const bookPrintRule = restored.bookPrintRule || resolveBookPrintRuleFromSource(mergedSource);
+  const isBookItem = Boolean(restored.isBookItem);
+  const bookType = toLabel(
+    mergedSource?.book_type,
+    cartRestore?.book_type,
+    draftForm?.book_type,
+    specs?.book_type,
+    parseJsonObject(snapshot?.book_specs)?.book_type,
+  ) || null;
+  const insidePrint = toLabel(
+    mergedSource?.inside_print,
+    cartRestore?.inside_print,
+    draftForm?.inside_print,
+    specs?.inside_print,
+    parseJsonObject(snapshot?.book_specs)?.inside_print,
+  ) || null;
+  const coverPrint = toLabel(
+    mergedSource?.cover_print,
+    cartRestore?.cover_print,
+    draftForm?.cover_print,
+    specs?.cover_print,
+    parseJsonObject(snapshot?.book_specs)?.cover_print,
+  ) || null;
+  const bindingType = toLabel(
+    mergedSource?.binding_type,
+    cartRestore?.binding_type,
+    draftForm?.binding_type,
+    specs?.binding_type,
+    parseJsonObject(snapshot?.book_specs)?.binding_type,
+  ) || null;
+  const materialInside = toLabel(
+    mergedSource?.material_inside,
+    cartRestore?.material_inside,
+    draftForm?.material_inside,
+    specs?.material_inside,
+    parseJsonObject(snapshot?.book_specs)?.material_inside,
+  ) || null;
+  const materialCover = toLabel(
+    mergedSource?.material_cover,
+    cartRestore?.material_cover,
+    draftForm?.material_cover,
+    specs?.material_cover,
+    parseJsonObject(snapshot?.book_specs)?.material_cover,
+  ) || null;
+  const materialSourceMode = toLabel(
+    mergedSource?.material_source_mode,
+    cartRestore?.material_source_mode,
+    draftForm?.material_source_mode,
+    specs?.material_source_mode,
+  ) || null;
+  const materialInsideProductId = Number(
+    mergedSource?.material_inside_product_id
+    || cartRestore?.material_inside_product_id
+    || draftForm?.material_inside_product_id
+    || specs?.material_inside_product_id
+    || parseJsonObject(snapshot?.book_specs)?.material_inside_product_id
+    || 0,
+  ) || null;
+  const materialCoverProductId = Number(
+    mergedSource?.material_cover_product_id
+    || cartRestore?.material_cover_product_id
+    || draftForm?.material_cover_product_id
+    || specs?.material_cover_product_id
+    || parseJsonObject(snapshot?.book_specs)?.material_cover_product_id
+    || 0,
+  ) || null;
+  const bookAddonRows = parseJsonArray(
+    mergedSource?.book_addons
+    || mergedSource?.addons
+    || cartRestore?.book_addons
+    || cartRestore?.addons
+    || snapshot?.addons
+    || parseJsonObject(snapshot?.book_specs)?.addons,
+  ).filter((row) => row && typeof row === 'object');
 
   return {
     id: itemKey,
@@ -1136,6 +1523,32 @@ const buildCartItemFromDraftSource = (sourceItem, itemKey, materialMapById, fini
       material_usage_plan: materialUsageMeta.plan || null,
       material_product_id: materialId > 0 ? materialId : null,
       material_product_ids: materialCandidates,
+      finished_size: restored.bookFinishedSize || mergedSource?.finished_size || null,
+      print_model: restored.bookPrintModel || mergedSource?.print_model || null,
+      print_side: restored.bookPrintSide || mergedSource?.print_side || null,
+      book_type: bookType,
+      inside_print: insidePrint,
+      cover_print: coverPrint,
+      binding_type: bindingType,
+      material_inside: materialInside,
+      material_cover: materialCover,
+      material_source_mode: materialSourceMode,
+      material_inside_product_id: materialInsideProductId,
+      material_cover_product_id: materialCoverProductId,
+      addons: bookAddonRows,
+      print_mode: toLabel(
+        mergedSource?.print_mode,
+        draftForm?.print_mode,
+        specs?.print_mode,
+      ) || null,
+      customer_page_count: restored.customerPageCount || mergedSource?.customer_page_count || null,
+      required_page_multiple: bookPrintRule?.required_page_multiple ?? mergedSource?.required_page_multiple ?? null,
+      production_page_count: bookPrintRule?.production_page_count ?? mergedSource?.production_page_count ?? null,
+      blank_page_count: bookPrintRule?.blank_page_count ?? mergedSource?.blank_page_count ?? null,
+      estimated_a3_plus_sheets: bookPrintRule?.estimated_a3_plus_sheets ?? mergedSource?.estimated_a3_plus_sheets ?? null,
+      cashier_guidance: bookPrintRule?.cashier_guidance ?? mergedSource?.cashier_guidance ?? null,
+      production_note: bookPrintRule?.production_note ?? mergedSource?.production_note ?? null,
+      warning: bookPrintRule?.warning ?? mergedSource?.warning ?? null,
       finishings: Array.isArray(mergedSource?.finishings) ? mergedSource.finishings : [],
       finishing_breakdown: breakdown,
       lb_max: Array.isArray(mergedSource?.lb_max) ? mergedSource.lb_max : [],
@@ -1143,9 +1556,16 @@ const buildCartItemFromDraftSource = (sourceItem, itemKey, materialMapById, fini
       material_text: toLabel(mergedSource?.material_text, materialText, '-'),
       finishing_text: toLabel(mergedSource?.finishing_text, restored.finishingText, '-'),
       lb_max_text: toLabel(mergedSource?.lb_max_text, restored.lbMaxText, '-'),
-      pages: Math.max(Number(mergedSource?.pages || restored.pages || 1) || 1, 1),
+      pages: Math.max(Number(restored.customerPageCount || mergedSource?.pages || restored.pages || 1) || 1, 1),
       note: toLabel(mergedSource?.note, mergedSource?.notes, draftForm?.note, '-'),
-      spec_snapshot: mergedSource?.spec_snapshot || null,
+      spec_snapshot: isBookItem
+        ? {
+          ...(parseJsonObject(mergedSource?.spec_snapshot) || {}),
+          type: 'book',
+          ...(bookAddonRows.length > 0 ? { addons: bookAddonRows } : {}),
+          ...(bookPrintRule ? { book_print_rule: bookPrintRule } : {}),
+        }
+        : (mergedSource?.spec_snapshot || null),
     },
   };
 };
@@ -1495,6 +1915,7 @@ const resolveInvoiceStatusKey = (status) => {
   if (!text) return '';
   if (['queued_offline'].includes(text)) return 'queued_offline';
   if (['draft'].includes(text)) return 'draft';
+  if (['pending_approval', 'waiting_approval', 'menunggu_approval', 'menunggu approval'].includes(text)) return 'pending_approval';
   if (['pending', 'new', 'open'].includes(text)) return 'pending';
   if (['pending_payment', 'awaiting_payment', 'unpaid'].includes(text)) return 'pending_payment';
   if (['partially_paid', 'partial_paid', 'dp'].includes(text)) return 'partially_paid';
@@ -1506,6 +1927,7 @@ const resolveInvoiceStatusKey = (status) => {
   if (['picked_up'].includes(text)) return 'picked_up';
   if (['completed', 'done', 'finished'].includes(text)) return 'completed';
   if (['paid'].includes(text)) return 'paid';
+  if (['approval_rejected', 'rejected', 'approval ditolak', 'ditolak approval'].includes(text)) return 'approval_rejected';
   if (['cancelled', 'canceled', 'void', 'rejected_online'].includes(text)) return 'cancelled';
   return text;
 };
@@ -1514,6 +1936,7 @@ const formatDraftStatusLabel = (status) => {
   if (!key) return '-';
   if (key === 'queued_offline') return 'Invoice disimpan offline';
   if (key === 'draft') return 'Draft';
+  if (key === 'pending_approval') return 'Menunggu Approval';
   if (key === 'pending') return 'Menunggu Proses';
   if (key === 'pending_payment') return 'Menunggu Pembayaran';
   if (key === 'partially_paid') return 'Pembayaran Sebagian (DP)';
@@ -1525,16 +1948,19 @@ const formatDraftStatusLabel = (status) => {
   if (key === 'picked_up') return 'Sudah diambil';
   if (key === 'completed') return 'Selesai';
   if (key === 'paid') return 'Lunas';
+  if (key === 'approval_rejected') return 'Approval Ditolak';
   if (key === 'cancelled') return 'Dibatalkan';
   return humanizeStatusLabel(key);
 };
 const getInvoiceStatusTextColor = (status) => {
   const key = resolveInvoiceStatusKey(status);
+  if (key === 'pending_approval') return '#b42318';
   if (['pending', 'pending_payment', 'partially_paid'].includes(key)) return '#8a6b00';
   if (key === 'waiting_design') return '#b42318';
   if (key === 'waiting_production') return '#b54708';
   if (['processing', 'in_batch'].includes(key)) return '#1849a9';
   if (['completed', 'paid', 'picked_up'].includes(key)) return '#067647';
+  if (key === 'approval_rejected') return '#9f1239';
   if (key === 'cancelled') return '#9f1239';
   return '#3a3a3a';
 };
@@ -1561,7 +1987,7 @@ const isProcessingInvoiceRow = (row) => {
   if (!statusKey) {
     return false;
   }
-  if (['completed', 'paid', 'cancelled', 'picked_up'].includes(statusKey)) {
+  if (['completed', 'paid', 'cancelled', 'picked_up', 'approval_rejected'].includes(statusKey)) {
     return false;
   }
   return true;
@@ -1986,14 +2412,26 @@ const normalizeCustomerRow = (row) => ({
   ...row,
   id: Number(row?.id || 0),
   name: String(row?.name || '').trim(),
-  phone: String(
-    row?.phone ||
-    row?.phone_number ||
-    row?.mobile_phone ||
-    row?.mobile ||
-    row?.hp ||
-    '',
-  ).trim(),
+  phone: (() => {
+    const rawPhone = String(
+      row?.phone ||
+      row?.phone_number ||
+      row?.mobile_phone ||
+      row?.mobile ||
+      row?.hp ||
+      '',
+    ).trim();
+
+    if (!rawPhone) {
+      return '';
+    }
+
+    try {
+      return normalizeIndonesianPhone(rawPhone) || '';
+    } catch (_error) {
+      return rawPhone;
+    }
+  })(),
   address: String(row?.address || row?.alamat || '').trim(),
   customer_type_id: Number(row?.customer_type_id || row?.type_id || 0) || null,
   customer_type_code: resolveCustomerCategoryCode(row, DEFAULT_CUSTOMER_TYPES),
@@ -3771,6 +4209,17 @@ const SalesScreen = ({ currentUser, onLogout }) => {
   const [selectedFinishingMataAyamQtyById, setSelectedFinishingMataAyamQtyById] = useState({});
   const [selectedLbMaxProductId, setSelectedLbMaxProductId] = useState(null);
   const [pages, setPages] = useState('1');
+  const [bookType, setBookType] = useState('buku_umum');
+  const [bookFinishedSize, setBookFinishedSize] = useState('A5');
+  const [bookPrintModel, setBookPrintModel] = useState('Cetak Susun Buku / Lipat Buku');
+  const [bookPrintSide, setBookPrintSide] = useState('Cetak Bolak-Balik');
+  const [bookInsidePrint, setBookInsidePrint] = useState('bw');
+  const [bookCoverPrint, setBookCoverPrint] = useState('color');
+  const [bookBindingType, setBookBindingType] = useState('');
+  const [bookMaterialInsideProductId, setBookMaterialInsideProductId] = useState(null);
+  const [bookMaterialCoverProductId, setBookMaterialCoverProductId] = useState(null);
+  const [bookExtraFinishingValues, setBookExtraFinishingValues] = useState([]);
+  const [bookPrintRulePreview, setBookPrintRulePreview] = useState(null);
   const [cartItems, setCartItems] = useState([]);
   const [discountPercent, setDiscountPercent] = useState('0');
   const [discountAmount, setDiscountAmount] = useState('0');
@@ -3829,6 +4278,8 @@ const SalesScreen = ({ currentUser, onLogout }) => {
   const [catalogMaterialNameMap, setCatalogMaterialNameMap] = useState({});
   const [customers, setCustomers] = useState([]);
   const [customerTypes, setCustomerTypes] = useState([]);
+  const [selectedCustomerReceivableSummary, setSelectedCustomerReceivableSummary] = useState(null);
+  const [receivableApprovalRows, setReceivableApprovalRows] = useState([]);
   const [masterSyncStatus, setMasterSyncStatus] = useState({
     state: 'idle',
     label: 'Menunggu sinkronisasi data master',
@@ -3850,6 +4301,21 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     message: '',
   });
   const previewRequestRef = useRef(0);
+  const lastBookProductIdRef = useRef(null);
+  const resetBookConfiguratorState = () => {
+    setBookType('');
+    setBookFinishedSize('');
+    setBookPrintModel('');
+    setBookPrintSide('');
+    setBookInsidePrint('');
+    setBookCoverPrint('');
+    setBookBindingType('');
+    setBookMaterialInsideProductId(null);
+    setBookMaterialCoverProductId(null);
+    setBookExtraFinishingValues([]);
+    setPages('');
+    setBookPrintRulePreview(null);
+  };
   const [healthStatus, setHealthStatus] = useState({
     state: 'checking',
     label: 'Offline',
@@ -4112,6 +4578,11 @@ const SalesScreen = ({ currentUser, onLogout }) => {
   const productionSnapshotRef = useRef(new Map());
   const productionSnapshotReadyRef = useRef(false);
   const productionPollingRef = useRef(false);
+  const receivableApprovalSnapshotRef = useRef(new Map());
+  const receivableApprovalSnapshotReadyRef = useRef(false);
+  const receivableApprovalPollingRef = useRef(false);
+  const customerReceivableNoticeKeyRef = useRef('');
+  const customerReceivableSummaryRequestRef = useRef(0);
   const masterSyncInFlightRef = useRef(false);
   const masterSyncMetaRef = useRef(loadMasterSyncMeta());
   const appStateRef = useRef(AppState.currentState || 'active');
@@ -4471,7 +4942,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       fetchPosFinishings().catch(() => []),
       fetchPosMaterials().catch(() => []),
       fetchPosProductionMaterials().catch(() => []),
-      fetchPosCustomers('', { perPage: 100 }).catch(() => []),
+      fetchAllPosCustomers('', { perPage: 500 }).catch(() => []),
       fetchPosCustomerTypes().catch(() => []),
       paymentAccountsPromise,
       settingsResultPromise,
@@ -4544,17 +5015,41 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         : getDefaultPaymentMethodConfigs());
       setPaymentMethod((currentMethod) => {
         const preferredMethod = nextSnapshot.posSettings.defaultPaymentMethod || currentMethod || 'Cash';
+        const configuredMethods = Array.isArray(nextSnapshot.posSettings.paymentMethods)
+          ? nextSnapshot.posSettings.paymentMethods
+          : [];
         const available = getPaymentMethodLabels(
-          Array.isArray(nextSnapshot.posSettings.paymentMethods) ? nextSnapshot.posSettings.paymentMethods : [],
+          configuredMethods,
+          { includeUnavailable: false },
+        );
+        const allMethods = getPaymentMethodLabels(
+          configuredMethods,
           { includeUnavailable: true },
         );
         const normalizedCurrentMethod = normalizePaymentMethodLabel(currentMethod || '');
+        const normalizedPreferredMethod = normalizePaymentMethodLabel(preferredMethod || 'Cash');
 
         if (normalizedCurrentMethod && available.includes(normalizedCurrentMethod)) {
           return normalizedCurrentMethod;
         }
 
-        return '';
+        if (normalizedPreferredMethod && available.includes(normalizedPreferredMethod)) {
+          return normalizedPreferredMethod;
+        }
+
+        if (available.length > 0) {
+          return available[0];
+        }
+
+        if (normalizedCurrentMethod && allMethods.includes(normalizedCurrentMethod)) {
+          return normalizedCurrentMethod;
+        }
+
+        if (normalizedPreferredMethod && allMethods.includes(normalizedPreferredMethod)) {
+          return normalizedPreferredMethod;
+        }
+
+        return normalizedPreferredMethod || allMethods[0] || 'Cash';
       });
       if (nextSnapshot.posSettingsMeta?.source && nextSnapshot.posSettingsMeta.source !== 'settings') {
         setLastSyncInfo(`Metode bayar fallback: ${nextSnapshot.posSettingsMeta.source}`);
@@ -4778,6 +5273,100 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     if (typeof callback === 'function') {
       callback();
     }
+  };
+  const showOutstandingCustomerReceivableNotice = (summary, options = {}) => {
+    if (!summary?.hasOutstanding) {
+      customerReceivableNoticeKeyRef.current = '';
+      return;
+    }
+
+    const summaryKey = [
+      summary.customerId || 0,
+      roundMoney(Number(summary.dueTotal || 0)),
+      Number(summary.invoiceCount || 0) || 0,
+      String(summary.primaryInvoiceNo || '').trim(),
+    ].join('|');
+
+    if (!options?.force && summaryKey && customerReceivableNoticeKeyRef.current === summaryKey) {
+      return;
+    }
+
+    customerReceivableNoticeKeyRef.current = summaryKey;
+    openNotice(
+      'Peringatan Piutang Pelanggan',
+      buildCustomerReceivableNoticeMessage(summary),
+    );
+  };
+  const loadCustomerReceivableSummary = async (customerId, options = {}) => {
+    const resolvedCustomerId = Number(customerId || 0);
+    if (!(resolvedCustomerId > 0) || !backendReady) {
+      customerReceivableSummaryRequestRef.current += 1;
+      setSelectedCustomerReceivableSummary(null);
+      if (!(resolvedCustomerId > 0)) {
+        customerReceivableNoticeKeyRef.current = '';
+      }
+      return null;
+    }
+
+    const requestId = customerReceivableSummaryRequestRef.current + 1;
+    customerReceivableSummaryRequestRef.current = requestId;
+    const payload = await getCustomerReceivableSummary(resolvedCustomerId);
+    if (requestId !== customerReceivableSummaryRequestRef.current) {
+      return null;
+    }
+    const summary = normalizeCustomerReceivableSummary(payload);
+    setSelectedCustomerReceivableSummary(summary);
+    if (options?.showNotice !== false) {
+      showOutstandingCustomerReceivableNotice(summary, options);
+    }
+    return summary;
+  };
+  const fetchReceivableApprovalRows = async (options = {}) => {
+    if (!backendReady) {
+      return [];
+    }
+    const rows = await fetchPosReceivableApprovals({
+      status: options?.status || 'all',
+    });
+    return toDataRows(rows).map(normalizeReceivableApprovalRow);
+  };
+  const syncReceivableApprovalSnapshot = (rows = []) => {
+    const nextSnapshot = new Map();
+    const updates = [];
+
+    (Array.isArray(rows) ? rows : []).forEach((row) => {
+      const approvalId = Number(row?.approval?.id || row?.__approval_request_id || 0) || 0;
+      if (!(approvalId > 0)) {
+        return;
+      }
+      const currentStatus = normalizeReceivableApprovalStatus(row?.approval?.status || row?.status);
+      nextSnapshot.set(approvalId, {
+        status: currentStatus,
+        orderId: Number(row?.approval?.orderId || row?.order?.id || 0) || null,
+        invoiceNo: String(row?.approval?.orderInvoiceNo || row?.invoice?.invoice_no || '').trim(),
+        updatedAt: String(row?.updated_at || row?.approval?.updatedAt || '').trim(),
+      });
+
+      if (!receivableApprovalSnapshotReadyRef.current) {
+        return;
+      }
+
+      const previous = receivableApprovalSnapshotRef.current.get(approvalId);
+      if (!previous || previous.status === currentStatus) {
+        return;
+      }
+
+      if (['approved', 'rejected'].includes(currentStatus)) {
+        updates.push(buildReceivableApprovalUpdateNotice(row));
+      }
+    });
+
+    receivableApprovalSnapshotRef.current = nextSnapshot;
+    if (!receivableApprovalSnapshotReadyRef.current) {
+      receivableApprovalSnapshotReadyRef.current = true;
+    }
+
+    return updates;
   };
   const buildReprintSnapshotItems = (orderItems = []) => {
     const rows = Array.isArray(orderItems) ? orderItems : [];
@@ -5780,6 +6369,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         masterSyncRunnerRef.current?.({ reason: 'foreground', forceFull: true }).catch(() => {});
         if (backendReady) {
           flushQueuedOrders();
+          checkReceivableApprovalRealtimeUpdates().catch(() => {});
         }
       }
     };
@@ -5804,6 +6394,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       masterSyncRunnerRef.current?.({ reason: 'network_online', forceFull: false }).catch(() => {});
       if (backendReady) {
         flushQueuedOrders();
+        checkReceivableApprovalRealtimeUpdates().catch(() => {});
       }
     };
     const handleOffline = () => {
@@ -5945,6 +6536,35 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       cancelled = true;
     };
   }, [backendReady, selectedCustomerId]);
+  useEffect(() => {
+    const customerId = Number(selectedCustomerId || 0);
+    if (!(customerId > 0) || !backendReady) {
+      customerReceivableSummaryRequestRef.current += 1;
+      setSelectedCustomerReceivableSummary(null);
+      if (!(customerId > 0)) {
+        customerReceivableNoticeKeyRef.current = '';
+      }
+      return undefined;
+    }
+
+    let cancelled = false;
+    loadCustomerReceivableSummary(customerId)
+      .then(() => {
+        if (cancelled) {
+          return;
+        }
+      })
+      .catch(() => {
+        if (cancelled) {
+          return;
+        }
+        setSelectedCustomerReceivableSummary(null);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [backendReady, selectedCustomerId]);
   const selectedProductRow = useMemo(() => {
     if (selectedProductId) {
       const byId = products.find((row) => Number(row?.id) === Number(selectedProductId));
@@ -5958,6 +6578,259 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     const selectedId = Number(selectedProductId || selectedProductRow?.id || 0);
     return selectedId > 0 ? productDetails[selectedId] || null : null;
   }, [selectedProductId, selectedProductRow, productDetails]);
+  const selectedIsBookProduct = useMemo(
+    () => isBookSalesProduct(selectedProductRow, selectedProductDetail),
+    [selectedProductRow, selectedProductDetail],
+  );
+  const selectedBookPrintRuleConfig = useMemo(
+    () => getBookPrintRuleConfig(selectedProductRow, selectedProductDetail),
+    [selectedProductRow, selectedProductDetail],
+  );
+  const selectedBookRecommendation = useMemo(
+    () => selectedBookPrintRuleConfig?.product_recommendation || null,
+    [selectedBookPrintRuleConfig],
+  );
+  const selectedBookFieldOptions = useMemo(
+    () => (selectedBookPrintRuleConfig?.field_options && typeof selectedBookPrintRuleConfig.field_options === 'object'
+      ? selectedBookPrintRuleConfig.field_options
+      : {}),
+    [selectedBookPrintRuleConfig],
+  );
+  const selectedBookDefaults = useMemo(
+    () => (selectedBookPrintRuleConfig?.defaults && typeof selectedBookPrintRuleConfig.defaults === 'object'
+      ? selectedBookPrintRuleConfig.defaults
+      : {}),
+    [selectedBookPrintRuleConfig],
+  );
+  const selectedBookFlowContext = useMemo(
+    () => getBookWizardProductContext(selectedBookPrintRuleConfig),
+    [selectedBookPrintRuleConfig],
+  );
+  const selectedBookWizardSteps = useMemo(
+    () => resolveBookWizardStepsForFlowContext(
+      Array.isArray(selectedBookPrintRuleConfig?.wizard_steps)
+        ? selectedBookPrintRuleConfig.wizard_steps
+        : [],
+      selectedBookFlowContext,
+    ),
+    [selectedBookPrintRuleConfig, selectedBookFlowContext],
+  );
+  const selectedBookDirectionRule = useMemo(
+    () => getBookDirectionRule(bookType),
+    [bookType],
+  );
+  const selectedBookSegment = useMemo(
+    () => String(selectedBookDirectionRule?.segment || '').trim(),
+    [selectedBookDirectionRule],
+  );
+  const selectedBookCashierNote = useMemo(
+    () => String(selectedBookDirectionRule?.cashierNote || '').trim(),
+    [selectedBookDirectionRule],
+  );
+  const selectedBookFilteredFieldOptions = useMemo(
+    () => filterBookFieldOptionsByFlowContext(
+      filterBookOptionsByRule(selectedBookFieldOptions, selectedBookDirectionRule),
+      selectedBookFlowContext,
+    ),
+    [selectedBookFieldOptions, selectedBookDirectionRule, selectedBookFlowContext],
+  );
+  const selectedBookComponentFlowContext = useMemo(() => {
+    const sideCode = normalizePrintSideCode(
+      bookPrintSide
+      || selectedBookFlowContext?.forced_print_side_code
+      || selectedBookFlowContext?.forced_print_side
+      || selectedBookDefaults?.print_side
+      || ''
+    );
+
+    return sideCode
+      ? { forced_print_side_code: sideCode }
+      : {};
+  }, [bookPrintSide, selectedBookFlowContext, selectedBookDefaults]);
+  const selectedBookInsideMaterialOptions = useMemo(() => {
+    const configuredRows = Array.isArray(selectedBookPrintRuleConfig?.material_bindings?.inside_candidate_rows)
+      ? selectedBookPrintRuleConfig.material_bindings.inside_candidate_rows
+      : (
+        Array.isArray(selectedBookPrintRuleConfig?.material_bindings?.candidate_rows)
+          ? selectedBookPrintRuleConfig.material_bindings.candidate_rows
+          : []
+      );
+    const preferredRows = configuredRows
+      .map((row) => mapBookMaterialRowToOption(row))
+      .filter(Boolean);
+
+    if (preferredRows.length > 0) {
+      return filterBookMaterialOptionsByFlowContext(preferredRows, selectedBookComponentFlowContext);
+    }
+
+    const configuredIds = Array.isArray(selectedBookPrintRuleConfig?.material_bindings?.inside_candidate_ids)
+      ? selectedBookPrintRuleConfig.material_bindings.inside_candidate_ids.map((id) => Number(id)).filter((id) => id > 0)
+      : (
+        Array.isArray(selectedBookPrintRuleConfig?.material_bindings?.candidate_ids)
+          ? selectedBookPrintRuleConfig.material_bindings.candidate_ids.map((id) => Number(id)).filter((id) => id > 0)
+          : []
+      );
+    const candidateIds = configuredIds;
+    const candidateSet = new Set(candidateIds);
+    const preferredIdRows = candidateIds
+      .map((id) => materials.find((row) => Number(row?.id || 0) === id))
+      .filter(Boolean)
+      .map((row) => mapBookMaterialRowToOption(row))
+      .filter(Boolean);
+
+    if (preferredIdRows.length > 0) {
+      return filterBookMaterialOptionsByFlowContext(preferredIdRows, selectedBookComponentFlowContext);
+    }
+
+    const fallbackRows = (Array.isArray(materials) ? materials : [])
+      .filter((row) => {
+        if (candidateSet.size === 0) {
+          return true;
+        }
+        return candidateSet.has(Number(row?.id || 0));
+      })
+      .map((row) => mapBookMaterialRowToOption(row))
+      .filter(Boolean);
+
+    return filterBookMaterialOptionsByFlowContext(fallbackRows, selectedBookComponentFlowContext);
+  }, [selectedBookPrintRuleConfig, materials, selectedBookComponentFlowContext]);
+  const selectedBookCoverMaterialOptions = useMemo(() => {
+    const configuredRows = Array.isArray(selectedBookPrintRuleConfig?.material_bindings?.cover_candidate_rows)
+      ? selectedBookPrintRuleConfig.material_bindings.cover_candidate_rows
+      : (
+        Array.isArray(selectedBookPrintRuleConfig?.material_bindings?.candidate_rows)
+          ? selectedBookPrintRuleConfig.material_bindings.candidate_rows
+          : []
+      );
+    const preferredRows = configuredRows
+      .map((row) => mapBookMaterialRowToOption(row))
+      .filter(Boolean);
+
+    if (preferredRows.length > 0) {
+      return filterBookMaterialOptionsByFlowContext(preferredRows, selectedBookComponentFlowContext);
+    }
+
+    const configuredIds = Array.isArray(selectedBookPrintRuleConfig?.material_bindings?.cover_candidate_ids)
+      ? selectedBookPrintRuleConfig.material_bindings.cover_candidate_ids.map((id) => Number(id)).filter((id) => id > 0)
+      : (
+        Array.isArray(selectedBookPrintRuleConfig?.material_bindings?.candidate_ids)
+          ? selectedBookPrintRuleConfig.material_bindings.candidate_ids.map((id) => Number(id)).filter((id) => id > 0)
+          : []
+      );
+    const candidateIds = configuredIds;
+    const candidateSet = new Set(candidateIds);
+    const preferredIdRows = candidateIds
+      .map((id) => materials.find((row) => Number(row?.id || 0) === id))
+      .filter(Boolean)
+      .map((row) => mapBookMaterialRowToOption(row))
+      .filter(Boolean);
+
+    if (preferredIdRows.length > 0) {
+      return filterBookMaterialOptionsByFlowContext(preferredIdRows, selectedBookComponentFlowContext);
+    }
+
+    const fallbackRows = (Array.isArray(materials) ? materials : [])
+      .filter((row) => {
+        if (candidateSet.size === 0) {
+          return true;
+        }
+        return candidateSet.has(Number(row?.id || 0));
+      })
+      .map((row) => mapBookMaterialRowToOption(row))
+      .filter(Boolean);
+
+    return filterBookMaterialOptionsByFlowContext(fallbackRows, selectedBookComponentFlowContext);
+  }, [selectedBookPrintRuleConfig, materials, selectedBookComponentFlowContext]);
+  const selectedBookInsidePrintOptions = useMemo(
+    () => filterBookMaterialOptionsByFlowContext(
+      Array.isArray(selectedBookFieldOptions?.inside_print) ? selectedBookFieldOptions.inside_print : [],
+      selectedBookComponentFlowContext,
+    ),
+    [selectedBookFieldOptions, selectedBookComponentFlowContext],
+  );
+  const selectedBookCoverPrintOptions = useMemo(
+    () => filterBookMaterialOptionsByFlowContext(
+      Array.isArray(selectedBookFieldOptions?.cover_print) ? selectedBookFieldOptions.cover_print : [],
+      selectedBookComponentFlowContext,
+    ),
+    [selectedBookFieldOptions, selectedBookComponentFlowContext],
+  );
+  const selectedBookInsideMaterialRow = useMemo(
+    () => findBookMaterialOption(selectedBookInsideMaterialOptions, {
+      productId: bookMaterialInsideProductId || selectedBookDefaults?.material_inside_product_id || null,
+      text: bookMaterialInsideProductId
+        ? ''
+        : (
+          selectedBookDefaults?.material_inside
+          || selectedBookPrintRuleConfig?.material_bindings?.default_inside_sku
+          || ''
+        ),
+    }) || selectedBookInsideMaterialOptions[0] || null,
+    [bookMaterialInsideProductId, selectedBookDefaults, selectedBookInsideMaterialOptions, selectedBookPrintRuleConfig],
+  );
+  const selectedBookCoverMaterialRow = useMemo(
+    () => findBookMaterialOption(selectedBookCoverMaterialOptions, {
+      productId: bookMaterialCoverProductId || selectedBookDefaults?.material_cover_product_id || null,
+      text: bookMaterialCoverProductId
+        ? ''
+        : (
+          selectedBookDefaults?.material_cover
+          || selectedBookPrintRuleConfig?.material_bindings?.default_cover_sku
+          || ''
+        ),
+    }) || selectedBookCoverMaterialOptions[0] || null,
+    [bookMaterialCoverProductId, selectedBookDefaults, selectedBookCoverMaterialOptions, selectedBookPrintRuleConfig],
+  );
+  const selectedBookInsideMaterialLabel = useMemo(
+    () => String(selectedBookInsideMaterialRow?.label || '').trim(),
+    [selectedBookInsideMaterialRow],
+  );
+  const selectedBookCoverMaterialLabel = useMemo(
+    () => String(selectedBookCoverMaterialRow?.label || '').trim(),
+    [selectedBookCoverMaterialRow],
+  );
+  const selectedBookBindingLabel = useMemo(() => {
+    const options = Array.isArray(selectedBookFieldOptions?.binding_type) ? selectedBookFieldOptions.binding_type : [];
+    const active = options.find((row) => String(row?.value || '').trim() === String(bookBindingType || '').trim()) || null;
+    return String(active?.label || '').trim();
+  }, [selectedBookFieldOptions, bookBindingType]);
+  const selectedLockedBookPrintSideLabel = useMemo(() => {
+    if (!selectedBookFlowContext?.locked_print_side) {
+      return '';
+    }
+
+    return String(
+      selectedBookFlowContext?.forced_print_side
+      || selectedBookDefaults?.print_side
+      || ''
+    ).trim();
+  }, [selectedBookFlowContext, selectedBookDefaults]);
+  const selectedBookPageMultiple = useMemo(() => {
+    const localMultiple = resolveBookPageMultiple({
+      rule: selectedBookDirectionRule,
+      size: bookFinishedSize,
+      printModel: bookPrintModel,
+      printSide: bookPrintSide || selectedLockedBookPrintSideLabel,
+    });
+    if (localMultiple > 0) {
+      return localMultiple;
+    }
+
+    const previewMultiple = Number(bookPrintRulePreview?.required_page_multiple || 0);
+    return Number.isFinite(previewMultiple) && previewMultiple > 0 ? Math.floor(previewMultiple) : 0;
+  }, [selectedBookDirectionRule, bookFinishedSize, bookPrintModel, bookPrintSide, selectedLockedBookPrintSideLabel, bookPrintRulePreview]);
+  const selectedBookPageValidation = useMemo(() => {
+    const finishedSizeText = String(bookFinishedSize || '').trim().toUpperCase();
+    return computeBookPageValidation({
+      inputPages: pages,
+      multiple: selectedBookPageMultiple,
+      needsManualLayoutCheck: finishedSizeText === 'CUSTOM' || selectedBookPageMultiple < 1,
+    });
+  }, [pages, bookFinishedSize, selectedBookPageMultiple]);
+  const selectedBookDisplaySecondary = useMemo(
+    () => buildBookDirectionSummary({ validation: selectedBookPageValidation }) || buildBookQuickSummary(bookPrintRulePreview) || 'Atur di panel bawah',
+    [selectedBookPageValidation, bookPrintRulePreview],
+  );
   const selectedProductFixedSizeMode = useMemo(
     () => resolveFixedSizeA3Mode(selectedProductRow, selectedProductDetail),
     [selectedProductRow, selectedProductDetail],
@@ -5983,6 +6856,203 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     }),
     [selectedA3NegotiationConfig, qty, negotiatedPriceInput, previewFallbackBottomPrice],
   );
+  useEffect(() => {
+    if (!selectedIsBookProduct) {
+      lastBookProductIdRef.current = null;
+      resetBookConfiguratorState();
+      return;
+    }
+
+    const currentProductId = Number(selectedProductId || selectedProductRow?.id || 0);
+    if (currentProductId <= 0) {
+      return;
+    }
+
+    const finishedSizeOptions = Array.isArray(selectedBookFieldOptions?.finished_size)
+      ? selectedBookFieldOptions.finished_size
+      : [];
+    const printModelOptions = Array.isArray(selectedBookFieldOptions?.print_model)
+      ? selectedBookFieldOptions.print_model
+      : [];
+    const printSideOptions = Array.isArray(selectedBookFieldOptions?.print_side)
+      ? selectedBookFieldOptions.print_side
+      : [];
+    const bookTypeOptions = Array.isArray(selectedBookFieldOptions?.book_type)
+      ? selectedBookFieldOptions.book_type
+      : [];
+    const insidePrintOptions = Array.isArray(selectedBookFieldOptions?.inside_print)
+      ? selectedBookFieldOptions.inside_print
+      : [];
+    const coverPrintOptions = Array.isArray(selectedBookFieldOptions?.cover_print)
+      ? selectedBookFieldOptions.cover_print
+      : [];
+    const bindingTypeOptions = Array.isArray(selectedBookFieldOptions?.binding_type)
+      ? selectedBookFieldOptions.binding_type
+      : [];
+    const extraFinishingOptions = Array.isArray(selectedBookFieldOptions?.extra_finishings)
+      ? selectedBookFieldOptions.extra_finishings
+      : [];
+    const recommendation = selectedBookRecommendation && typeof selectedBookRecommendation === 'object'
+      ? selectedBookRecommendation
+      : {};
+    const defaults = selectedBookDefaults && typeof selectedBookDefaults === 'object'
+      ? selectedBookDefaults
+      : {};
+    const signature = [
+      currentProductId,
+      String(recommendation?.label || '').trim(),
+      String(defaults?.book_type || '').trim(),
+      finishedSizeOptions.map((row) => String(row?.value || '')).join(','),
+      printModelOptions.map((row) => String(row?.value || '')).join(','),
+      printSideOptions.map((row) => String(row?.value || '')).join(','),
+      selectedBookInsideMaterialOptions.map((row) => String(row?.value || '')).join(','),
+      selectedBookCoverMaterialOptions.map((row) => String(row?.value || '')).join(','),
+      String(selectedLockedBookPrintSideLabel || '').trim(),
+    ].join('|');
+
+    if (lastBookProductIdRef.current === signature) {
+      return;
+    }
+    lastBookProductIdRef.current = signature;
+
+    setBookType('');
+    setBookFinishedSize('');
+    setBookPrintModel('');
+    setBookPrintSide(selectedLockedBookPrintSideLabel || '');
+    setBookInsidePrint('');
+    setBookCoverPrint('');
+    setBookBindingType('');
+    setBookMaterialInsideProductId(null);
+    setBookMaterialCoverProductId(null);
+    setBookExtraFinishingValues([]);
+    setPages('');
+    setBookPrintRulePreview(null);
+  }, [
+    selectedIsBookProduct,
+    selectedProductId,
+    selectedProductRow,
+    selectedBookPrintRuleConfig,
+    selectedBookRecommendation,
+    selectedBookFieldOptions,
+    selectedBookDefaults,
+    selectedBookInsideMaterialOptions,
+    selectedBookCoverMaterialOptions,
+    selectedLockedBookPrintSideLabel,
+  ]);
+  useEffect(() => {
+    if (!selectedIsBookProduct) {
+      return;
+    }
+
+    const isValueAllowed = (value, rows) => {
+      const current = normalizeText(value);
+      if (!current) {
+        return true;
+      }
+      return (Array.isArray(rows) ? rows : []).some((row) => {
+        return normalizeText(row?.value) === current || normalizeText(row?.label) === current;
+      });
+    };
+
+    const finishedSizeOptions = Array.isArray(selectedBookFilteredFieldOptions?.finished_size)
+      ? selectedBookFilteredFieldOptions.finished_size
+      : [];
+    const printModelOptions = Array.isArray(selectedBookFilteredFieldOptions?.print_model)
+      ? selectedBookFilteredFieldOptions.print_model
+      : [];
+    const printSideOptions = Array.isArray(selectedBookFilteredFieldOptions?.print_side)
+      ? selectedBookFilteredFieldOptions.print_side
+      : [];
+
+    if (!isValueAllowed(bookFinishedSize, finishedSizeOptions)) {
+      setBookFinishedSize('');
+    }
+    if (!isValueAllowed(bookPrintModel, printModelOptions)) {
+      setBookPrintModel('');
+    }
+    if (!isValueAllowed(bookPrintSide, printSideOptions)) {
+      setBookPrintSide('');
+    }
+  }, [
+    selectedIsBookProduct,
+    selectedBookFilteredFieldOptions,
+    bookFinishedSize,
+    bookPrintModel,
+    bookPrintSide,
+  ]);
+  useEffect(() => {
+    if (!selectedIsBookProduct) {
+      return;
+    }
+    if (!selectedBookFlowContext?.locked_print_side) {
+      return;
+    }
+
+    const forcedLabel = String(selectedLockedBookPrintSideLabel || '').trim();
+    if (!forcedLabel) {
+      return;
+    }
+
+    if (normalizeText(bookPrintSide) !== normalizeText(forcedLabel)) {
+      setBookPrintSide(forcedLabel);
+    }
+  }, [
+    selectedIsBookProduct,
+    selectedBookFlowContext,
+    selectedLockedBookPrintSideLabel,
+    bookPrintSide,
+  ]);
+  const handleChangeBookType = (value) => {
+    const nextValue = String(value || '').trim();
+    setBookType(nextValue);
+    setBookFinishedSize('');
+    setBookPrintModel('');
+    setBookPrintSide(selectedLockedBookPrintSideLabel || '');
+    setBookInsidePrint('');
+    setBookCoverPrint('');
+    setBookBindingType('');
+    setBookMaterialInsideProductId(null);
+    setBookMaterialCoverProductId(null);
+    setBookExtraFinishingValues([]);
+    setPages('');
+    setBookPrintRulePreview(null);
+  };
+  const handleChangeBookFinishedSize = (value) => {
+    setBookFinishedSize(String(value || '').trim());
+    setBookPrintModel('');
+    setBookPrintSide(selectedLockedBookPrintSideLabel || '');
+    setBookInsidePrint('');
+    setBookCoverPrint('');
+    setBookBindingType('');
+    setBookMaterialInsideProductId(null);
+    setBookMaterialCoverProductId(null);
+    setBookExtraFinishingValues([]);
+    setPages('');
+    setBookPrintRulePreview(null);
+  };
+  const handleChangeBookPrintModel = (value) => {
+    setBookPrintModel(String(value || '').trim());
+    setBookPrintSide(selectedLockedBookPrintSideLabel || '');
+    setBookInsidePrint('');
+    setBookCoverPrint('');
+    setBookBindingType('');
+    setBookMaterialInsideProductId(null);
+    setBookMaterialCoverProductId(null);
+    setBookExtraFinishingValues([]);
+    setPages('');
+    setBookPrintRulePreview(null);
+  };
+  const handleChangeBookPrintSide = (value) => {
+    setBookPrintSide(String(value || '').trim());
+    setBookInsidePrint('');
+    setBookCoverPrint('');
+    setBookBindingType('');
+    setBookMaterialInsideProductId(null);
+    setBookMaterialCoverProductId(null);
+    setBookExtraFinishingValues([]);
+    setPages('');
+    setBookPrintRulePreview(null);
+  };
   const materialMapById = useMemo(() => {
     const map = new Map();
     materials.forEach((row) => {
@@ -6553,6 +7623,30 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       return previewText;
     }
 
+    if (selectedIsBookProduct) {
+      const bookSelectionSummary = [
+        selectedBookInsideMaterialLabel ? `Isi: ${selectedBookInsideMaterialLabel}` : '',
+        selectedBookCoverMaterialLabel ? `Cover: ${selectedBookCoverMaterialLabel}` : '',
+        selectedBookBindingLabel ? `Jilid: ${selectedBookBindingLabel}` : '',
+      ].filter(Boolean).join(' | ');
+      const bookSummaryText = buildBookQuickSummary(bookPrintRulePreview);
+      if (bookSelectionSummary && bookSummaryText) {
+        return `${bookSelectionSummary} | ${bookSummaryText}`;
+      }
+      if (bookSelectionSummary) {
+        return bookSelectionSummary;
+      }
+      if (bookSummaryText) {
+        return bookSummaryText;
+      }
+
+      if (isMaterialLoading) {
+        return 'Menyiapkan aturan produksi book...';
+      }
+
+      return 'Aturan produksi akan dihitung dari ukuran, model, sisi, dan halaman customer.';
+    }
+
     if (isMaterialLoading) {
       return 'Memuat material produk...';
     }
@@ -6563,7 +7657,16 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     }
 
     return 'Material akan dipilih otomatis sesuai hitung backend';
-  }, [previewMaterialDisplay, isMaterialLoading, selectedProductMaterialInfo]);
+  }, [
+    previewMaterialDisplay,
+    isMaterialLoading,
+    selectedProductMaterialInfo,
+    selectedIsBookProduct,
+    bookPrintRulePreview,
+    selectedBookInsideMaterialLabel,
+    selectedBookCoverMaterialLabel,
+    selectedBookBindingLabel,
+  ]);
 
   const resolveCustomerId = async () => {
     if (!selectedCustomerId) {
@@ -6573,6 +7676,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
   };
 
   const handleCreateCustomer = async (form) => {
+    const normalizedPhone = normalizeIndonesianPhone(form?.phone, { allowEmpty: false });
     const selectedType = customerTypes.find((row) => Number(row.id) === Number(form?.customer_type_id)) || null;
     const selectedTypeId = Number(selectedType?.id || 0);
     const selectedTypeName = String(selectedType?.name || '').trim();
@@ -6581,9 +7685,9 @@ const SalesScreen = ({ currentUser, onLogout }) => {
 
     const payload = {
       name: String(form?.name || '').trim(),
-      phone: String(form?.phone || '').trim(),
-      phone_number: String(form?.phone || '').trim(),
-      mobile_phone: String(form?.phone || '').trim(),
+      phone: normalizedPhone,
+      phone_number: normalizedPhone,
+      mobile_phone: normalizedPhone,
       label: selectedTypeCode || null,
       customer_type_id: selectedTypeId > 0 ? selectedTypeId : null,
       type_id: selectedTypeId > 0 ? selectedTypeId : null,
@@ -6597,11 +7701,29 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       alamat: String(form?.address || '').trim(),
     };
 
-    const created = await createPosCustomer(payload);
+    let created;
+    try {
+      created = await createPosCustomer(payload);
+    } catch (error) {
+      if (isCustomerPhoneConflictError(error)) {
+        const refreshedCustomers = await fetchAllPosCustomers('', { perPage: 500 }).catch(() => []);
+        if (refreshedCustomers.length > 0) {
+          setCustomers(refreshedCustomers.map(normalizeCustomerRow));
+        }
+        openNotice('Customer Sudah Terdaftar', CUSTOMER_PHONE_CONFLICT_MESSAGE);
+        const duplicateError = new Error(CUSTOMER_PHONE_CONFLICT_MESSAGE);
+        duplicateError.status = Number(error?.status || 409);
+        duplicateError.body = error?.body;
+        throw duplicateError;
+      }
+
+      throw error;
+    }
+
     let normalized = normalizeCustomerRow(created);
     if (!normalized.id) {
-      const refreshed = (await fetchPosCustomers(payload.name)).map(normalizeCustomerRow);
-      const exact = refreshed.find((row) => normalizeText(row.name) === normalizeText(payload.name));
+      const refreshed = (await fetchPosCustomers(normalizedPhone)).map(normalizeCustomerRow);
+      const exact = refreshed.find((row) => row.phone === normalizedPhone || normalizeText(row.name) === normalizeText(payload.name));
       if (refreshed.length > 0) {
         setCustomers((prev) => {
           const merge = [...prev];
@@ -6627,7 +7749,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     }
   };
 
-  const loadDraftInvoices = async () => {
+  const loadDraftInvoices = async (options = {}) => {
     const queueRows = loadOrderQueue()
       .filter((queued) => isDraftPayload(queued?.payload))
       .map((queued) => {
@@ -6646,6 +7768,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
           __queue_total: calculateDraftItemsTotal(queuedItems),
         };
       });
+    const approvalRowsInput = Array.isArray(options?.approvalRows) ? options.approvalRows : null;
 
     if (!backendReady) {
       setDraftInvoices(queueRows);
@@ -6659,7 +7782,15 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         const fallback = await fetchPosOrders();
         rows = toDataRows(fallback);
       }
-      setDraftInvoices([...queueRows, ...rows]);
+      const approvalRows = approvalRowsInput || await fetchReceivableApprovalRows().catch(() => []);
+      setReceivableApprovalRows(approvalRows);
+      syncReceivableApprovalSnapshot(approvalRows);
+      const approvalListRows = approvalRows.filter((row) => {
+        const approvalStatus = normalizeReceivableApprovalStatus(row?.approval?.status || row?.status);
+        const orderId = Number(row?.approval?.orderId || row?.order?.id || 0) || 0;
+        return !(approvalStatus === 'approved' && orderId > 0);
+      });
+      setDraftInvoices([...queueRows, ...approvalListRows, ...rows]);
     } catch (error) {
       setDraftInvoices(queueRows);
       if (queueRows.length === 0) {
@@ -6682,6 +7813,46 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     }, 60000);
     return () => clearInterval(timer);
   }, []);
+  const checkReceivableApprovalRealtimeUpdates = async () => {
+    if (!backendReady || receivableApprovalPollingRef.current) {
+      return;
+    }
+
+    receivableApprovalPollingRef.current = true;
+    try {
+      const rows = await fetchReceivableApprovalRows();
+      setReceivableApprovalRows(rows);
+      const updates = syncReceivableApprovalSnapshot(rows);
+      if (updates.length > 0) {
+        await loadDraftInvoices({ approvalRows: rows });
+        const primary = updates[0];
+        const moreMessage = updates.length > 1 ? `\n\n+ ${updates.length - 1} update approval lain.` : '';
+        openNoticeActions(
+          primary.title,
+          `${primary.message}${moreMessage}`,
+          [
+            { label: 'Tutup', role: 'secondary' },
+            {
+              label: 'Buka Invoice',
+              onPress: () => {
+                setActiveMenu('draft');
+                loadDraftInvoices({ approvalRows: rows }).catch(() => {});
+              },
+            },
+          ],
+          null,
+          {
+            showDefaultAction: false,
+            visual: primary.visual,
+          },
+        );
+      }
+    } catch (_error) {
+      // no-op: polling approval tidak boleh mengganggu proses kasir
+    } finally {
+      receivableApprovalPollingRef.current = false;
+    }
+  };
 
   const loadProductionItems = async (override = {}) => {
     if (!backendReady) {
@@ -6713,6 +7884,22 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       loadProductionItems();
     }
   }, [activeMenu, backendReady]);
+  useEffect(() => {
+    if (!backendReady) {
+      receivableApprovalSnapshotRef.current = new Map();
+      receivableApprovalSnapshotReadyRef.current = false;
+      receivableApprovalPollingRef.current = false;
+      setReceivableApprovalRows([]);
+      return undefined;
+    }
+
+    checkReceivableApprovalRealtimeUpdates();
+    const timer = setInterval(() => {
+      checkReceivableApprovalRealtimeUpdates();
+    }, 12000);
+
+    return () => clearInterval(timer);
+  }, [backendReady]);
 
   useEffect(() => {
     if (activeMenu === 'report') {
@@ -6836,6 +8023,9 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     if (activeMenu !== 'production') {
       return undefined;
     }
+    if (productionStatusFilter === 'all' && !productionSearch.trim()) {
+      return undefined;
+    }
     const timer = setInterval(() => {
       loadProductionItems();
     }, 9000);
@@ -6928,6 +8118,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       setMataAyamIssueBadge({ visible: false, message: '' });
       setSelectedLbMaxProductId(null);
       setPages('1');
+      resetBookConfiguratorState();
       setDiscountPercent('0');
       setDiscountAmount('0');
       setDiscountMode('percent');
@@ -7017,6 +8208,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       setMataAyamIssueBadge({ visible: false, message: '' });
       setSelectedLbMaxProductId(null);
       setPages('1');
+      resetBookConfiguratorState();
       setDiscountPercent('0');
       setDiscountAmount('0');
       setDiscountMode('percent');
@@ -7152,6 +8344,38 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     return selectedProductRow;
   };
 
+  const buildSelectedBookPayload = (product, productDetail = null, pageCountValue = pages) => {
+    if (!isBookSalesProduct(product, productDetail)) {
+      return {};
+    }
+
+    return buildBookPrintRulePayload({
+      bookType,
+      finishedSize: bookFinishedSize,
+      materialInside: selectedBookInsideMaterialRow?.sku || selectedBookInsideMaterialRow?.name || '',
+      materialCover: selectedBookCoverMaterialRow?.sku || selectedBookCoverMaterialRow?.name || '',
+      materialInsideProductId: bookMaterialInsideProductId || selectedBookInsideMaterialRow?.product_id || null,
+      materialCoverProductId: bookMaterialCoverProductId || selectedBookCoverMaterialRow?.product_id || null,
+      printModel: bookPrintModel,
+      printSide: bookPrintSide || selectedLockedBookPrintSideLabel || selectedBookDefaults?.print_side || '',
+      customerPageCount: pageCountValue,
+      insidePrint: bookInsidePrint,
+      coverPrint: bookCoverPrint,
+      bindingType: bookBindingType,
+      materialSourceMode: 'warehouse',
+      selectedExtraFinishings: bookExtraFinishingValues,
+      extraFinishingOptions: selectedBookFieldOptions?.extra_finishings || [],
+      productName: String(buildSelectedProductLabel(product) || product?.name || productName || '').trim(),
+      productType: String(
+        productDetail?.product_type
+        || toSourceProduct(productDetail)?.product_type
+        || product?.product_type
+        || toSourceProduct(product)?.product_type
+        || '',
+      ).trim(),
+    });
+  };
+
   const handleSaveSelectedFinishings = (ids) => {
     const normalizedIds = Array.from(
       new Set((Array.isArray(ids) ? ids : [])
@@ -7201,7 +8425,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
   };
 
   const buildFinishingsPayload = (productDetail, qtyNumber) => {
-    if (selectedProductFixedSizeMode.enabled) {
+    if (selectedProductFixedSizeMode.enabled || selectedIsBookProduct) {
       return [];
     }
     if (!Array.isArray(selectedFinishingIds) || selectedFinishingIds.length === 0) {
@@ -7262,7 +8486,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     return rows;
   };
   const buildLbMaxPayload = () => {
-    if (selectedProductFixedSizeMode.enabled) {
+    if (selectedProductFixedSizeMode.enabled || selectedIsBookProduct) {
       return [];
     }
     const selectedId = Number(selectedLbMaxProductId || 0);
@@ -7282,6 +8506,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     const fixedSizeMode = resolveFixedSizeA3Mode(product, productDetail);
     const qtyOnlyConfig = resolveQtyOnlyProductMode(product, productDetail, buildQtyOnlyModeHelpers());
     const qtyOnlyMode = qtyOnlyConfig.enabled;
+    const bookMode = isBookSalesProduct(product, productDetail);
     const size = fixedSizeMode.enabled
       ? {
         widthMeter: 0,
@@ -7293,19 +8518,29 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       }
       : qtyOnlyMode
         ? {
+        widthMeter: 0,
+        lengthMeter: 0,
+        widthMm: null,
+        heightMm: null,
+          areaM2: 0,
+          displayText: qtyOnlyConfig.displayText || 'Qty Only',
+        }
+      : bookMode
+        ? {
           widthMeter: 0,
           lengthMeter: 0,
           widthMm: null,
           heightMm: null,
           areaM2: 0,
-          displayText: qtyOnlyConfig.displayText || 'Qty Only',
+          displayText: String(bookFinishedSize || 'Book').trim() || 'Book',
         }
-      : buildSizeFromMeters(sizeWidthMeter, sizeLengthMeter);
+        : buildSizeFromMeters(sizeWidthMeter, sizeLengthMeter);
     const materialInfo = resolveMaterialInfo(product, productDetail);
     const sourceMeta = toSourceMeta(productDetail || product);
     const isStickerSchema = isStrictStickerSalesProduct(product, productDetail);
     const finishingsPayload = buildFinishingsPayload(productDetail, qtyNumber);
     const lbMaxPayload = buildLbMaxPayload();
+    const bookPayload = buildSelectedBookPayload(product, productDetail, pages);
 
     if (Array.isArray(selectedFinishingIds) && selectedFinishingIds.length > 0 && finishingsPayload === null) {
       throw new Error('Finishing tidak ditemukan pada produk backend yang dipilih.');
@@ -7318,12 +8553,15 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       qty: qtyNumber,
       width_mm: size.widthMm || null,
       height_mm: size.heightMm || null,
-      material_product_id: materialInfo.primaryMaterialId || null,
+      material_product_id: bookMode
+        ? (bookPayload.material_inside_product_id || materialInfo.primaryMaterialId || null)
+        : (materialInfo.primaryMaterialId || null),
       extra_margin_cm: 0,
       customer_id: customerId || null,
       express: false,
       finishings: finishingsPayload || [],
       lb_max: lbMaxPayload || [],
+      ...bookPayload,
     };
 
     const pricing = await previewPosPricing(Number(product.id), pricingPayload);
@@ -7350,8 +8588,18 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       materials,
       catalogMaterialNameMap,
     );
+    const bookPrintRule = resolveBookPrintRuleFromSource(pricing);
 
-    return { pricing, pricingPayload, productDetail, materialInfo, usedMaterialInfo, size, stickerOrderingNotice };
+    return {
+      pricing,
+      pricingPayload,
+      productDetail,
+      materialInfo,
+      usedMaterialInfo,
+      size,
+      stickerOrderingNotice,
+      bookPrintRule,
+    };
   };
 
   useEffect(() => {
@@ -7366,27 +8614,40 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       setPreviewMaterialError('');
       setPreviewMaterialWarning('');
       setPreviewPricingSummary(null);
+      setBookPrintRulePreview(null);
       return undefined;
     }
 
     const qtyNumber = Number(qty);
     const widthMeter = parseMeterValue(sizeWidthMeter);
     const lengthMeter = parseMeterValue(sizeLengthMeter);
-    const skipsDimensionInput = selectedProductFixedSizeMode.enabled || selectedProductQtyOnlyMode;
-    if (qtyNumber < 1 || (!skipsDimensionInput && (widthMeter <= 0 || lengthMeter <= 0))) {
+    const pageCountNumber = Math.max(Math.floor(Number(pages) || 0), 0);
+    const skipsDimensionInput = selectedProductFixedSizeMode.enabled || selectedProductQtyOnlyMode || selectedIsBookProduct;
+    if (
+      qtyNumber < 1
+      || (selectedIsBookProduct && pageCountNumber < 1)
+      || (!skipsDimensionInput && (widthMeter <= 0 || lengthMeter <= 0))
+    ) {
       setItemFinalPrice(0);
       setPreviewFallbackBottomPrice(0);
       setPreviewMaterialDisplay('');
       setPreviewMaterialError('');
       setPreviewMaterialWarning('');
       setPreviewPricingSummary(null);
+      setBookPrintRulePreview(null);
       return undefined;
     }
 
     const timer = setTimeout(async () => {
       try {
         const customerId = Number(selectedCustomerId || 0) || null;
-        const { pricing, usedMaterialInfo, productDetail, stickerOrderingNotice } = await computePricingFromBackend(selectedProductRow, customerId);
+        const {
+          pricing,
+          usedMaterialInfo,
+          productDetail,
+          stickerOrderingNotice,
+          bookPrintRule,
+        } = await computePricingFromBackend(selectedProductRow, customerId);
         const negotiationConfig = resolveA3NegotiationConfig(selectedProductRow, productDetail);
         const negotiationState = resolveA3NegotiationState({
           config: negotiationConfig,
@@ -7403,18 +8664,31 @@ const SalesScreen = ({ currentUser, onLogout }) => {
           : resolvePricingGrandTotal(pricing);
         if (!cancelled && previewRequestRef.current === requestId) {
           const targetProduct = String(buildSelectedProductLabel(selectedProductRow) || selectedProductRow?.name || '').trim();
+          const bookSummaryText = buildBookQuickSummary(bookPrintRule);
+          const bookMaterialPreview = [
+            selectedBookInsideMaterialLabel ? `Isi: ${selectedBookInsideMaterialLabel}` : '',
+            selectedBookCoverMaterialLabel ? `Cover: ${selectedBookCoverMaterialLabel}` : '',
+            selectedBookBindingLabel ? `Jilid: ${selectedBookBindingLabel}` : '',
+            bookSummaryText,
+          ].filter(Boolean).join(' | ');
           setItemFinalPrice(nextTotal);
           setPreviewFallbackBottomPrice(resolvePricingSubtotalPerUnit(pricing, qtyNumber));
-          setPreviewMaterialDisplay(String(usedMaterialInfo?.displayText || '').trim());
+          setPreviewMaterialDisplay(selectedIsBookProduct
+            ? bookMaterialPreview
+            : String(usedMaterialInfo?.displayText || '').trim());
           setPreviewMaterialError(negotiationState.tone === 'error' ? negotiationState.message : '');
           const combinedWarning = [
             resolveSelectedMaterialWarning(usedMaterialInfo, targetProduct),
             stickerOrderingNotice,
+            bookPrintRule?.warning,
           ].filter((text) => String(text || '').trim() !== '').join('\n');
           setPreviewMaterialWarning(combinedWarning);
+          setBookPrintRulePreview(bookPrintRule || null);
           setPreviewPricingSummary(buildPricingDisplaySummary({
             pricing,
-            materialText: String(usedMaterialInfo?.displayText || '').trim(),
+            materialText: selectedIsBookProduct
+              ? bookMaterialPreview
+              : String(usedMaterialInfo?.displayText || '').trim(),
             negotiation: negotiationState,
           }));
         }
@@ -7426,6 +8700,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
           setPreviewMaterialError(String(error?.message || 'Preview bahan gagal dihitung.'));
           setPreviewMaterialWarning('');
           setPreviewPricingSummary(null);
+          setBookPrintRulePreview(null);
         }
       }
     }, 350);
@@ -7447,6 +8722,17 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     selectedLbMaxProductId,
     selectedFinishingSummary,
     pages,
+    bookType,
+    bookFinishedSize,
+    bookPrintModel,
+    bookPrintSide,
+    bookInsidePrint,
+    bookCoverPrint,
+    bookBindingType,
+    bookMaterialInsideProductId,
+    bookMaterialCoverProductId,
+    bookExtraFinishingValues,
+    selectedIsBookProduct,
     selectedProductMaterialInfo,
     selectedProductType,
     effectiveFinishingOptions,
@@ -7455,6 +8741,11 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     productDetails,
     selectedProductFixedSizeMode.enabled,
     selectedProductQtyOnlyMode,
+    selectedBookInsideMaterialLabel,
+    selectedBookCoverMaterialLabel,
+    selectedBookBindingLabel,
+    selectedBookFieldOptions,
+    selectedLockedBookPrintSideLabel,
   ]);
 
   const resetTransaction = () => {
@@ -7476,6 +8767,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     setMataAyamIssueBadge({ visible: false, message: '' });
     setSelectedLbMaxProductId(null);
     setPages('1');
+    resetBookConfiguratorState();
     setCartItems([]);
     setDiscountPercent('0');
     setDiscountAmount('0');
@@ -7508,15 +8800,26 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       openNotice('Produk Tidak Ditemukan', `Produk "${productName}" belum ada di backend POS.`);
       return;
     }
+    if (selectedIsBookProduct && Math.max(Math.floor(Number(pages) || 0), 0) < 1) {
+      openNotice('Validasi', 'Jumlah halaman customer minimal 1 untuk produk Book.');
+      return;
+    }
 
     try {
       const customerId = await resolveCustomerId();
-      const { pricing, stickerOrderingNotice } = await computePricingFromBackend(product, customerId);
+      const { pricing, stickerOrderingNotice, bookPrintRule } = await computePricingFromBackend(product, customerId);
       setProductName(buildSelectedProductLabel(product));
       setSelectedProductId(Number(product.id || 0) || null);
+      const validationNotes = [
+        `${product.name} valid. Preview backend: ${formatRupiah(pricing.grand_total || 0)}`,
+        stickerOrderingNotice,
+        buildBookQuickSummary(bookPrintRule),
+        bookPrintRule?.blank_page_message,
+        bookPrintRule?.warning,
+      ].filter((text) => String(text || '').trim() !== '');
       openNotice(
         'Produk Valid',
-        `${product.name} valid. Preview backend: ${formatRupiah(pricing.grand_total || 0)}${stickerOrderingNotice ? `\n${stickerOrderingNotice}` : ''}`,
+        validationNotes.join('\n'),
       );
     } catch (error) {
       const targetProduct = String(buildSelectedProductLabel(product) || product?.name || productName || '').trim();
@@ -7553,10 +8856,14 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       openNotice('Validasi', 'Qty harus diisi dan minimal 1.');
       return;
     }
+    if (selectedIsBookProduct && Math.max(Math.floor(Number(pages) || 0), 0) < 1) {
+      openNotice('Validasi', 'Jumlah halaman customer minimal 1 untuk produk Book.');
+      return;
+    }
 
     const widthMeter = parseMeterValue(sizeWidthMeter);
     const lengthMeter = parseMeterValue(sizeLengthMeter);
-    if (!selectedProductFixedSizeMode.enabled && !selectedProductQtyOnlyMode && (widthMeter <= 0 || lengthMeter <= 0)) {
+    if (!selectedProductFixedSizeMode.enabled && !selectedProductQtyOnlyMode && !selectedIsBookProduct && (widthMeter <= 0 || lengthMeter <= 0)) {
       openNotice('Validasi', 'L Mater dan P Mater wajib diisi dan lebih dari 0.');
       return;
     }
@@ -7577,13 +8884,24 @@ const SalesScreen = ({ currentUser, onLogout }) => {
 
     try {
       const customerId = await resolveCustomerId();
-      const { pricing, pricingPayload, productDetail, materialInfo, usedMaterialInfo, size, stickerOrderingNotice } = await computePricingFromBackend(product, customerId);
+      const {
+        pricing,
+        pricingPayload,
+        productDetail,
+        materialInfo,
+        usedMaterialInfo,
+        size,
+        stickerOrderingNotice,
+        bookPrintRule,
+      } = await computePricingFromBackend(product, customerId);
       const targetProduct = String(buildSelectedProductLabel(product) || product?.name || productName || '').trim();
       const materialStockMessage = validateSelectedMaterialStock(usedMaterialInfo, targetProduct);
       if (materialStockMessage) {
         openNotice('Stok Material', materialStockMessage);
       }
       const sourceMeta = toSourceMeta(productDetail || product);
+      const bookMode = isBookSalesProduct(product, productDetail);
+      const bookPayload = buildSelectedBookPayload(product, productDetail, pages);
       const negotiationConfig = resolveA3NegotiationConfig(product, productDetail);
       const negotiationState = resolveA3NegotiationState({
         config: negotiationConfig,
@@ -7615,9 +8933,25 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         || '',
       ).trim();
       const resolvedMaterialText = String(usedMaterialInfo?.displayText || '').trim();
-      const materialText = isGroupProduct
+      const bookSummaryText = buildBookQuickSummary(bookPrintRule);
+      const baseMaterialText = isGroupProduct
         ? (resolvedMaterialText || groupSummary || 'Paket produk')
         : (resolvedMaterialText || '-');
+      const bookMaterialSummary = [
+        selectedBookInsideMaterialLabel ? `Isi: ${selectedBookInsideMaterialLabel}` : '',
+        selectedBookCoverMaterialLabel ? `Cover: ${selectedBookCoverMaterialLabel}` : '',
+        selectedBookBindingLabel ? `Jilid: ${selectedBookBindingLabel}` : '',
+        bookSummaryText,
+      ].filter(Boolean).join(' | ');
+      const sizeDisplayText = bookMode
+        ? [String(bookPayload.finished_size || '').trim(), String(bookPayload.print_model || '').trim()]
+          .filter(Boolean)
+          .join(' | ')
+        : size.displayText;
+      const materialText = bookMode
+        ? (bookMaterialSummary || baseMaterialText || 'Aturan produksi book')
+        : baseMaterialText;
+      const bookAddons = Array.isArray(bookPayload?.addons) ? bookPayload.addons : [];
 
       const backendItem = {
         product_id: Number(product.id),
@@ -7640,16 +8974,62 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         material_usage_plan: materialUsageMeta.plan || null,
         material_product_id: materialId || null,
         material_product_ids: materialCandidateIds,
-        size_text: size.displayText,
+        size_text: sizeDisplayText || size.displayText,
         material_text: materialText,
         finishing_text: selectedFinishingDisplay || '-',
         lb_max_text: selectedLbMaxSummary || '-',
         pages: pageNumber,
+        ...bookPayload,
+        ...(bookMode ? {
+          book_addons: bookAddons,
+          book_pricing: pricing?.book_pricing && typeof pricing.book_pricing === 'object'
+            ? pricing.book_pricing
+            : null,
+        } : {}),
+        ...(bookMode && bookPrintRule ? {
+          required_page_multiple: bookPrintRule.required_page_multiple ?? null,
+          production_page_count: bookPrintRule.production_page_count ?? null,
+          blank_page_count: bookPrintRule.blank_page_count ?? null,
+          estimated_a3_plus_sheets: bookPrintRule.estimated_a3_plus_sheets ?? null,
+          cashier_guidance: bookPrintRule.cashier_guidance ?? null,
+          production_note: bookPrintRule.production_note ?? null,
+          warning: bookPrintRule.warning ?? null,
+        } : {}),
         note: '-',
         lb_max: buildLbMaxPayload() || [],
         finishing_breakdown: Array.isArray(pricing.finishing_breakdown) ? pricing.finishing_breakdown : [],
         spec_snapshot: {
-          type: 'custom_order',
+          type: bookMode ? 'book' : 'custom_order',
+          ...(bookMode ? { addons: bookAddons } : {}),
+          ...(bookMode && bookPrintRule ? { book_print_rule: bookPrintRule } : {}),
+          ...(bookMode ? {
+            book_specs: {
+              book_type: bookPayload.book_type || null,
+              finished_size: bookPayload.finished_size || null,
+              print_model: bookPayload.print_model || null,
+              print_side: bookPayload.print_side || null,
+              print_mode: bookPayload.print_mode || null,
+              inside_print: bookPayload.inside_print || null,
+              cover_print: bookPayload.cover_print || null,
+              binding_type: bookPayload.binding_type || null,
+              material_inside: bookPayload.material_inside || null,
+              material_cover: bookPayload.material_cover || null,
+              material_source_mode: bookPayload.material_source_mode || null,
+              material_inside_product_id: bookPayload.material_inside_product_id || null,
+              material_cover_product_id: bookPayload.material_cover_product_id || null,
+              addons: bookAddons,
+              page_count: pageNumber,
+              customer_page_count: pageNumber,
+              required_page_multiple: bookPrintRule?.required_page_multiple ?? null,
+              production_page_count: bookPrintRule?.production_page_count ?? null,
+              blank_page_count: bookPrintRule?.blank_page_count ?? null,
+              estimated_a3_plus_sheets: bookPrintRule?.estimated_a3_plus_sheets ?? null,
+              cashier_guidance: bookPrintRule?.cashier_guidance ?? null,
+              production_note: bookPrintRule?.production_note ?? null,
+              warning: bookPrintRule?.warning ?? null,
+              material_source_text: baseMaterialText,
+            },
+          } : {}),
           material_usage_plan: materialUsageMeta.plan || null,
           original_flow: {
             requires_production: Boolean(product.requires_production ?? true),
@@ -7667,20 +9047,46 @@ const SalesScreen = ({ currentUser, onLogout }) => {
             }
             : null,
           specs: {
-            size_text: size.displayText,
+            size_text: sizeDisplayText || size.displayText,
             width_meter: size.widthMeter,
             length_meter: size.lengthMeter,
             pages: pageNumber,
+            customer_page_count: pageNumber,
+            page_count: pageNumber,
             finishing: selectedFinishingDisplay || '-',
             lb_max: selectedLbMaxSummary || '-',
             material: materialText,
             material_usage_qty: materialUsageMeta.usageQty > 0 ? materialUsageMeta.usageQty : null,
             material_usage_unit: materialUsageMeta.usageUnit || null,
+            ...(bookMode ? {
+              book_type: bookPayload.book_type || null,
+              finished_size: bookPayload.finished_size || null,
+              print_model: bookPayload.print_model || null,
+              print_side: bookPayload.print_side || null,
+              print_mode: bookPayload.print_mode || null,
+              inside_print: bookPayload.inside_print || null,
+              cover_print: bookPayload.cover_print || null,
+              binding_type: bookPayload.binding_type || null,
+              material_inside: bookPayload.material_inside || null,
+              material_cover: bookPayload.material_cover || null,
+              material_source_mode: bookPayload.material_source_mode || null,
+              material_inside_product_id: bookPayload.material_inside_product_id || null,
+              material_cover_product_id: bookPayload.material_cover_product_id || null,
+              addons: bookAddons,
+              required_page_multiple: bookPrintRule?.required_page_multiple ?? null,
+              production_page_count: bookPrintRule?.production_page_count ?? null,
+              blank_page_count: bookPrintRule?.blank_page_count ?? null,
+              estimated_a3_plus_sheets: bookPrintRule?.estimated_a3_plus_sheets ?? null,
+              cashier_guidance: bookPrintRule?.cashier_guidance ?? null,
+              production_note: bookPrintRule?.production_note ?? null,
+              warning: bookPrintRule?.warning ?? null,
+              material_source_text: baseMaterialText,
+            } : {}),
           },
           draft_form: {
             product_name: String(buildSelectedProductLabel(product) || product.name || '').trim(),
             qty: qtyNumber,
-            size_text: size.displayText,
+            size_text: sizeDisplayText || size.displayText,
             width_meter: size.widthMeter,
             length_meter: size.lengthMeter,
             finishing: selectedFinishingDisplay || '-',
@@ -7691,6 +9097,31 @@ const SalesScreen = ({ currentUser, onLogout }) => {
             material: materialText,
             material_usage_qty: materialUsageMeta.usageQty > 0 ? materialUsageMeta.usageQty : null,
             material_usage_unit: materialUsageMeta.usageUnit || null,
+            ...(bookMode ? {
+              book_type: bookPayload.book_type || null,
+              finished_size: bookPayload.finished_size || null,
+              print_model: bookPayload.print_model || null,
+              print_side: bookPayload.print_side || null,
+              print_mode: bookPayload.print_mode || null,
+              inside_print: bookPayload.inside_print || null,
+              cover_print: bookPayload.cover_print || null,
+              binding_type: bookPayload.binding_type || null,
+              material_inside: bookPayload.material_inside || null,
+              material_cover: bookPayload.material_cover || null,
+              material_source_mode: bookPayload.material_source_mode || null,
+              material_inside_product_id: bookPayload.material_inside_product_id || null,
+              material_cover_product_id: bookPayload.material_cover_product_id || null,
+              addons: bookAddons,
+              customer_page_count: pageNumber,
+              required_page_multiple: bookPrintRule?.required_page_multiple ?? null,
+              production_page_count: bookPrintRule?.production_page_count ?? null,
+              blank_page_count: bookPrintRule?.blank_page_count ?? null,
+              estimated_a3_plus_sheets: bookPrintRule?.estimated_a3_plus_sheets ?? null,
+              cashier_guidance: bookPrintRule?.cashier_guidance ?? null,
+              production_note: bookPrintRule?.production_note ?? null,
+              warning: bookPrintRule?.warning ?? null,
+              material_source_text: baseMaterialText,
+            } : {}),
             note: '-',
             requires_production: Boolean(product.requires_production ?? true),
             requires_design: Boolean(product.requires_production ?? true),
@@ -7737,6 +9168,20 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         finishing_text: backendItem.finishing_text,
         lb_max_text: backendItem.lb_max_text,
         pages: backendItem.pages,
+        ...bookPayload,
+        ...(bookMode ? {
+          book_addons: bookAddons,
+        } : {}),
+        ...(bookMode && bookPrintRule ? {
+          book_print_rule: bookPrintRule,
+          required_page_multiple: bookPrintRule.required_page_multiple ?? null,
+          production_page_count: bookPrintRule.production_page_count ?? null,
+          blank_page_count: bookPrintRule.blank_page_count ?? null,
+          estimated_a3_plus_sheets: bookPrintRule.estimated_a3_plus_sheets ?? null,
+          cashier_guidance: bookPrintRule.cashier_guidance ?? null,
+          production_note: bookPrintRule.production_note ?? null,
+          warning: bookPrintRule.warning ?? null,
+        } : {}),
         note: backendItem.note,
         requires_production: backendItem.requires_production,
         requires_design: backendItem.requires_design,
@@ -7758,7 +9203,13 @@ const SalesScreen = ({ currentUser, onLogout }) => {
           : null,
         negotiation: negotiationState,
       });
-      const warningNotes = [itemPricingSummary.stickerNotice, materialStockMessage, stickerOrderingNotice]
+      const warningNotes = [
+        itemPricingSummary.stickerNotice,
+        materialStockMessage,
+        stickerOrderingNotice,
+        bookPrintRule?.blank_page_message,
+        bookPrintRule?.warning,
+      ]
         .filter((text) => String(text || '').trim() !== '')
         .join('\n');
       if (warningNotes) {
@@ -7774,7 +9225,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
           isGroupProduct,
           groupSummary,
           qty: qtyNumber,
-          size: size.displayText,
+          size: sizeDisplayText || size.displayText,
           finishing: selectedFinishingDisplay || '-',
           lbMax: selectedLbMaxSummary || '-',
           pages: pageNumber,
@@ -7828,14 +9279,14 @@ const SalesScreen = ({ currentUser, onLogout }) => {
   };
 
   useEffect(() => {
-    if (!selectedProductFixedSizeMode.enabled && !selectedProductQtyOnlyMode) {
+    if (!selectedProductFixedSizeMode.enabled && !selectedProductQtyOnlyMode && !selectedIsBookProduct) {
       return;
     }
     if (sizeWidthMeter || sizeLengthMeter) {
       setSizeWidthMeter('');
       setSizeLengthMeter('');
     }
-  }, [selectedProductFixedSizeMode.enabled, selectedProductQtyOnlyMode, sizeWidthMeter, sizeLengthMeter]);
+  }, [selectedProductFixedSizeMode.enabled, selectedProductQtyOnlyMode, selectedIsBookProduct, sizeWidthMeter, sizeLengthMeter]);
 
   const handleCancelItem = () => {
     setProductName('');
@@ -7849,6 +9300,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     setMataAyamIssueBadge({ visible: false, message: '' });
     setSelectedLbMaxProductId(null);
     setPages('1');
+    resetBookConfiguratorState();
     setItemFinalPrice(0);
     setPreviewFallbackBottomPrice(0);
     setPreviewMaterialDisplay('');
@@ -8055,9 +9507,24 @@ const SalesScreen = ({ currentUser, onLogout }) => {
           toPositiveNumber(item?.backendItem?.height_mm) / 1000,
           toPositiveNumber(item?.backendItem?.internal_height_mm) / 1000,
         );
+        const currentBookRule = resolveBookPrintRuleFromSource({
+          ...item?.backendItem,
+          spec_snapshot: currentSpec,
+        });
+        const currentBookSpecs = parseJsonObject(currentSpec?.book_specs) || {};
+        const currentBookAddons = Array.isArray(item?.backendItem?.book_addons)
+          ? item.backendItem.book_addons
+          : Array.isArray(item?.backendItem?.addons)
+            ? item.backendItem.addons
+            : Array.isArray(currentSpec?.addons)
+              ? currentSpec.addons
+              : [];
+        const hasBookSnapshot = String(currentSpec?.type || '').trim().toLowerCase() === 'book'
+          || Boolean(currentBookRule)
+          || Object.keys(currentBookSpecs).length > 0;
         const mergedSnapshot = {
           ...currentSpec,
-          type: currentSpec?.type || 'custom_order',
+          type: hasBookSnapshot ? 'book' : (currentSpec?.type || 'custom_order'),
           draft_restore: {
             source_order_id: Number(currentDraftSourceId || 0) || null,
             pricing_locked: Boolean(
@@ -8089,6 +9556,18 @@ const SalesScreen = ({ currentUser, onLogout }) => {
             finishing: toLabel(currentSpecs?.finishing, item?.finishing, '-'),
             lb_max: toLabel(currentSpecs?.lb_max, item?.lbMax, '-'),
             material: toLabel(currentSpecs?.material, item?.material, '-'),
+            ...(hasBookSnapshot ? {
+              book_type: item?.backendItem?.book_type ?? currentSpecs?.book_type ?? currentBookSpecs?.book_type ?? null,
+              inside_print: item?.backendItem?.inside_print ?? currentSpecs?.inside_print ?? currentBookSpecs?.inside_print ?? null,
+              cover_print: item?.backendItem?.cover_print ?? currentSpecs?.cover_print ?? currentBookSpecs?.cover_print ?? null,
+              binding_type: item?.backendItem?.binding_type ?? currentSpecs?.binding_type ?? currentBookSpecs?.binding_type ?? null,
+              material_inside: item?.backendItem?.material_inside ?? currentSpecs?.material_inside ?? currentBookSpecs?.material_inside ?? null,
+              material_cover: item?.backendItem?.material_cover ?? currentSpecs?.material_cover ?? currentBookSpecs?.material_cover ?? null,
+              material_source_mode: item?.backendItem?.material_source_mode ?? currentSpecs?.material_source_mode ?? currentBookSpecs?.material_source_mode ?? null,
+              material_inside_product_id: item?.backendItem?.material_inside_product_id ?? currentSpecs?.material_inside_product_id ?? currentBookSpecs?.material_inside_product_id ?? null,
+              material_cover_product_id: item?.backendItem?.material_cover_product_id ?? currentSpecs?.material_cover_product_id ?? currentBookSpecs?.material_cover_product_id ?? null,
+              addons: currentBookAddons,
+            } : {}),
           },
           draft_form: {
             ...currentDraftForm,
@@ -8114,6 +9593,18 @@ const SalesScreen = ({ currentUser, onLogout }) => {
               ?? item?.backendItem?.requires_design
               ?? true,
             ),
+            ...(hasBookSnapshot ? {
+              book_type: item?.backendItem?.book_type ?? currentDraftForm?.book_type ?? currentBookSpecs?.book_type ?? null,
+              inside_print: item?.backendItem?.inside_print ?? currentDraftForm?.inside_print ?? currentBookSpecs?.inside_print ?? null,
+              cover_print: item?.backendItem?.cover_print ?? currentDraftForm?.cover_print ?? currentBookSpecs?.cover_print ?? null,
+              binding_type: item?.backendItem?.binding_type ?? currentDraftForm?.binding_type ?? currentBookSpecs?.binding_type ?? null,
+              material_inside: item?.backendItem?.material_inside ?? currentDraftForm?.material_inside ?? currentBookSpecs?.material_inside ?? null,
+              material_cover: item?.backendItem?.material_cover ?? currentDraftForm?.material_cover ?? currentBookSpecs?.material_cover ?? null,
+              material_source_mode: item?.backendItem?.material_source_mode ?? currentDraftForm?.material_source_mode ?? currentBookSpecs?.material_source_mode ?? null,
+              material_inside_product_id: item?.backendItem?.material_inside_product_id ?? currentDraftForm?.material_inside_product_id ?? currentBookSpecs?.material_inside_product_id ?? null,
+              material_cover_product_id: item?.backendItem?.material_cover_product_id ?? currentDraftForm?.material_cover_product_id ?? currentBookSpecs?.material_cover_product_id ?? null,
+              addons: currentBookAddons,
+            } : {}),
           },
         };
         const mergedCartRestore = {
@@ -8155,6 +9646,24 @@ const SalesScreen = ({ currentUser, onLogout }) => {
           finishing_text: toLabel(item?.backendItem?.finishing_text, item?.finishing, '-'),
           lb_max_text: toLabel(item?.backendItem?.lb_max_text, item?.lbMax, '-'),
           pages: Math.max(Number(item?.backendItem?.pages || item?.pages || 1) || 1, 1),
+          finished_size: item?.backendItem?.finished_size ?? null,
+          print_model: item?.backendItem?.print_model ?? null,
+          print_side: item?.backendItem?.print_side ?? null,
+          customer_page_count: item?.backendItem?.customer_page_count ?? null,
+          production_page_count: item?.backendItem?.production_page_count ?? null,
+          blank_page_count: item?.backendItem?.blank_page_count ?? null,
+          estimated_a3_plus_sheets: item?.backendItem?.estimated_a3_plus_sheets ?? null,
+          book_type: item?.backendItem?.book_type ?? null,
+          inside_print: item?.backendItem?.inside_print ?? null,
+          cover_print: item?.backendItem?.cover_print ?? null,
+          binding_type: item?.backendItem?.binding_type ?? null,
+          material_inside: item?.backendItem?.material_inside ?? null,
+          material_cover: item?.backendItem?.material_cover ?? null,
+          material_source_mode: item?.backendItem?.material_source_mode ?? null,
+          material_inside_product_id: item?.backendItem?.material_inside_product_id ?? null,
+          material_cover_product_id: item?.backendItem?.material_cover_product_id ?? null,
+          book_addons: currentBookAddons,
+          ...(currentBookRule ? { book_print_rule: currentBookRule } : {}),
           note: toLabel(item?.backendItem?.note, item?.note, item?.notes, '-'),
           requires_production: Boolean(
             currentSpec?.original_flow?.requires_production
@@ -8274,6 +9783,15 @@ const SalesScreen = ({ currentUser, onLogout }) => {
           created?.message
           || 'Customer masih punya piutang. Transaksi dikirim ke owner/admin untuk approval.'
         ).trim();
+        const currentReceivableSummary = (
+          selectedCustomerReceivableSummary
+          && Number(selectedCustomerReceivableSummary.customerId || 0) === Number(customerId || 0)
+        )
+          ? selectedCustomerReceivableSummary
+          : null;
+        if (backendReady) {
+          await loadDraftInvoices().catch(() => {});
+        }
 
         setAuditLogs(
           appendOrderAuditLog({
@@ -8290,13 +9808,37 @@ const SalesScreen = ({ currentUser, onLogout }) => {
           }),
         );
 
-        openNotice(
+        openNoticeActions(
           'Menunggu Approval Piutang',
           [
+            currentReceivableSummary?.customerName
+              ? `Pelanggan: ${currentReceivableSummary.customerName}${currentReceivableSummary.customerPhone ? ` | ${currentReceivableSummary.customerPhone}` : ''}`
+              : (selectedCustomer?.name ? `Pelanggan: ${selectedCustomer.name}` : null),
+            currentReceivableSummary?.dueTotal > 0
+              ? `Piutang aktif: ${formatRupiah(currentReceivableSummary.dueTotal)}`
+              : null,
+            currentReceivableSummary?.primaryInvoiceNo
+              ? `Invoice terkait: ${currentReceivableSummary.primaryInvoiceNo}`
+              : null,
+            approvalRequestId ? `No. request approval: ${buildReceivableApprovalRequestLabel(approvalRequestId)}` : null,
+            'Status approval: Menunggu Approval',
             pendingApprovalMessage,
-            approvalRequestId ? `No. request approval: ${approvalRequestId}` : null,
             'Order belum menjadi invoice final dan nota belum bisa dicetak sebelum approval disetujui.',
           ].filter(Boolean).join('\n'),
+          [
+            { label: 'Tutup', role: 'secondary' },
+            {
+              label: 'Buka Invoice',
+              onPress: () => {
+                setActiveMenu('draft');
+                loadDraftInvoices().catch(() => {});
+              },
+            },
+          ],
+          null,
+          {
+            showDefaultAction: false,
+          },
         );
 
         return {
@@ -8459,7 +10001,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                 ? 'unpaid'
                 : transactionType,
             method,
-            ...(!isDraftMode && !usingCustomerDeposit ? { bank_account_id: bankAccountId || null } : {}),
+            ...(!isDraftMode && !usingCustomerDeposit ? { bank_account_id: resolvedPaymentAccountId || null } : {}),
             amount: roundMoney(
               isDraftMode
                 ? 0
@@ -10521,7 +12063,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                 isFixedSizeProduct={selectedProductFixedSizeMode.enabled}
                 fixedSizeLabel={selectedProductFixedSizeMode.label}
                 fixedSizeHint={selectedProductFixedSizeMode.helperText}
-                hideFinishingField={selectedProductFixedSizeMode.enabled || selectedProductQtyOnlyMode}
+                hideFinishingField={selectedProductFixedSizeMode.enabled || selectedProductQtyOnlyMode || selectedIsBookProduct}
                 selectedFinishingIds={selectedFinishingIds}
                 selectedFinishingMataAyamQtyById={selectedFinishingMataAyamQtyById}
                 finishingSummary={selectedFinishingDisplay}
@@ -10536,9 +12078,66 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                 lbMaxSummary={selectedLbMaxSummary}
                 lbMaxOptions={lbMaxFinishingOptions}
                 onSaveSelectedLbMax={setSelectedLbMaxProductId}
-                showPagesInput={selectedProductType === 'book'}
+                showPagesInput={selectedIsBookProduct}
+                pagesLabel={selectedIsBookProduct ? 'Hal. Customer' : 'Pages'}
                 pages={pages}
                 onChangePages={(value) => setPages(sanitizeNumericInput(value))}
+                showBookPrintRuleSection={selectedIsBookProduct}
+                bookProductLabel={buildSelectedProductLabel(selectedProductRow) || productName || '-'}
+                bookDisplayPrimary={bookFinishedSize || 'Book'}
+                bookDisplaySecondary={selectedBookDisplaySecondary}
+                bookType={bookType}
+                bookTypeOptions={selectedBookFieldOptions?.book_type || []}
+                bookWizardSteps={selectedBookWizardSteps}
+                onChangeBookType={handleChangeBookType}
+                bookSegment={selectedBookSegment}
+                bookCashierNote={selectedBookCashierNote}
+                bookFinishedSize={bookFinishedSize}
+                bookFinishedSizeOptions={selectedBookFilteredFieldOptions?.finished_size || []}
+                onChangeBookFinishedSize={handleChangeBookFinishedSize}
+                bookMaterialInsideProductId={bookMaterialInsideProductId}
+                bookMaterialInsideOptions={selectedBookInsideMaterialOptions}
+                onChangeBookMaterialInside={(value) => setBookMaterialInsideProductId(Number(value || 0) || null)}
+                bookMaterialCoverProductId={bookMaterialCoverProductId}
+                bookMaterialCoverOptions={selectedBookCoverMaterialOptions}
+                onChangeBookMaterialCover={(value) => setBookMaterialCoverProductId(Number(value || 0) || null)}
+                bookPrintModel={bookPrintModel}
+                bookPrintModelOptions={selectedBookFilteredFieldOptions?.print_model || []}
+                onChangeBookPrintModel={handleChangeBookPrintModel}
+                bookPrintSide={bookPrintSide}
+                bookPrintSideOptions={selectedBookFilteredFieldOptions?.print_side || []}
+                onChangeBookPrintSide={handleChangeBookPrintSide}
+                bookInsidePrint={bookInsidePrint}
+                bookInsidePrintOptions={selectedBookInsidePrintOptions}
+                onChangeBookInsidePrint={setBookInsidePrint}
+                bookCoverPrint={bookCoverPrint}
+                bookCoverPrintOptions={selectedBookCoverPrintOptions}
+                onChangeBookCoverPrint={setBookCoverPrint}
+                bookBindingType={bookBindingType}
+                bookBindingTypeOptions={selectedBookFieldOptions?.binding_type || []}
+                onChangeBookBindingType={setBookBindingType}
+                bookExtraFinishingValues={bookExtraFinishingValues}
+                bookExtraFinishingOptions={selectedBookFieldOptions?.extra_finishings || []}
+                onToggleBookExtraFinishing={(value) => {
+                  setBookExtraFinishingValues((prev) => {
+                    const current = Array.isArray(prev) ? prev : [];
+                    return current.includes(value)
+                      ? current.filter((item) => item !== value)
+                      : [...current, value];
+                  });
+                }}
+                bookPrintRulePreview={bookPrintRulePreview}
+                bookPageValidation={selectedBookPageValidation}
+                pages={pages}
+                onChangePages={(value) => setPages(sanitizeNumericInput(value))}
+                bookPrintRulePrompt={
+                  String(bookFinishedSize || '').trim().toUpperCase() === 'CUSTOM'
+                    ? (
+                      selectedBookPrintRuleConfig?.messages?.custom_layout_check
+                      || 'Ukuran custom perlu dicek layout oleh desain/produksi sebelum sistem bisa menghitung halaman dan estimasi lembar A3+ secara final.'
+                    )
+                    : 'Pilih ukuran/model/sisi lalu isi jumlah halaman customer untuk melihat aturan produksi.'
+                }
                 materialDisplay={resolvedPreviewMaterialDisplay}
                 materialError={previewMaterialError}
                 materialWarning={previewMaterialWarning}
@@ -10727,8 +12326,25 @@ const SalesScreen = ({ currentUser, onLogout }) => {
               ) : (
                 <View style={styles.draftList}>
                   {filteredInvoices.map((row, index) => {
-                    const displayId = String(row?.id || '-');
-                    const invoiceNo = String(row?.invoice?.invoice_no || '-');
+                    const isApprovalRow = isReceivableApprovalInvoiceRow(row);
+                    const approvalInfo = isApprovalRow
+                      ? (row?.approval && typeof row.approval === 'object' ? row.approval : null)
+                      : (
+                        row?.receivable_override?.required
+                          ? {
+                            status: 'approved',
+                            statusLabel: 'Approved',
+                            outstandingTotal: roundMoney(Number(row?.receivable_override?.outstanding_total || 0)),
+                            decisionNote: String(row?.receivable_override?.reason || '').trim(),
+                            approver: row?.receivable_override?.approver || null,
+                            decidedAt: String(row?.receivable_override?.approved_at || '').trim(),
+                          }
+                          : null
+                      );
+                    const displayId = isApprovalRow
+                      ? String(approvalInfo?.requestLabel || buildReceivableApprovalRequestLabel(row?.__approval_request_id))
+                      : String(row?.id || '-');
+                    const invoiceNo = String(row?.invoice?.invoice_no || '').trim() || (isApprovalRow ? 'Belum ada invoice' : '-');
                     const customerName = String(row?.customer?.name || 'Pelanggan umum');
                     const queuedItems = Array.isArray(row?.items) ? row.items : [];
                     const total = Number(
@@ -10744,6 +12360,9 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                     const isDraftRow = isDraftInvoiceRow(row);
                     const draftExpiry = isDraftRow ? getDraftExpiryMeta(row?.created_at, draftTimeTick) : null;
                     const invoiceStatus = normalizeInvoiceOrderStatus(row);
+                    const approvalStatusText = approvalInfo
+                      ? formatReceivableApprovalStatusLabel(approvalInfo?.status || 'approved')
+                      : '';
                     const productionStage = getCurrentProductionStageForInvoice(row);
                     const productionLabel = isDraftRow ? 'Belum Masuk Produksi' : productionStage.label;
                     const productionColor = isDraftRow ? '#6b7280' : getProductionStatusTextColor(productionStage.key);
@@ -10774,6 +12393,26 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                               {formatDraftStatusLabel(invoiceStatus)}
                             </Text>
                           </View>
+                          {approvalInfo ? (
+                            <View style={styles.invoiceStatusRow}>
+                              <Text style={styles.draftMeta}>Approval Piutang: </Text>
+                              <Text
+                                style={[
+                                  styles.draftMeta,
+                                  styles.invoiceStatusText,
+                                  {
+                                    color: getInvoiceStatusTextColor(
+                                      isApprovalRow
+                                        ? invoiceStatus
+                                        : 'approved',
+                                    ),
+                                  },
+                                ]}
+                              >
+                                {approvalStatusText}
+                              </Text>
+                            </View>
+                          ) : null}
                           <View style={styles.productionCurrentRow}>
                             <Text style={styles.draftMeta}>Produksi: </Text>
                             <Text
@@ -10818,6 +12457,15 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                             ) : null}
                           </View>
                           <Text style={styles.draftMeta}>Item: {itemCount} | Total: {formatRupiah(total)}</Text>
+                          {approvalInfo?.outstandingTotal > 0 ? (
+                            <Text style={styles.receivableDueText}>
+                              Piutang sebelumnya: {formatRupiah(approvalInfo.outstandingTotal)}
+                              {approvalInfo?.approver?.name ? ` | Diproses oleh: ${approvalInfo.approver.name}` : ''}
+                            </Text>
+                          ) : null}
+                          {approvalInfo?.decisionNote ? (
+                            <Text style={styles.draftMeta}>Catatan approval: {approvalInfo.decisionNote}</Text>
+                          ) : null}
                           {Number(row?.invoice?.due_total || 0) > 0 ? (
                             <Text style={styles.receivableDueText}>
                               Piutang: {formatRupiah(row?.invoice?.due_total || 0)} | Terbayar: {formatRupiah(row?.invoice?.paid_total || 0)}
@@ -10871,7 +12519,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                               <Pressable style={styles.continueDraftButton} onPress={() => handleViewInvoiceDetail(row)}>
                                 <Text style={styles.continueDraftButtonText}>Detail</Text>
                               </Pressable>
-                              {Number(row?.invoice?.due_total || 0) > 0 ? (
+                              {!isApprovalRow && Number(row?.invoice?.due_total || 0) > 0 ? (
                                 <Pressable
                                   style={[
                                     styles.receivablePayButton,
@@ -10885,9 +12533,11 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                                   </Text>
                                 </Pressable>
                               ) : null}
-                              <Pressable style={styles.refreshButton} onPress={() => handleReprintInvoice(row)}>
-                                <Text style={styles.refreshButtonText}>Cetak Ulang</Text>
-                              </Pressable>
+                              {!isApprovalRow ? (
+                                <Pressable style={styles.refreshButton} onPress={() => handleReprintInvoice(row)}>
+                                  <Text style={styles.refreshButtonText}>Cetak Ulang</Text>
+                                </Pressable>
+                              ) : null}
                             </>
                           )}
                         </View>
