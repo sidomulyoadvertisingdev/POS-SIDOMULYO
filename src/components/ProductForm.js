@@ -6,6 +6,7 @@ import ProductLbMaxModal from './product-form/ProductLbMaxModal';
 import ProductModePanel from './product-form/ProductModePanel';
 import ProductPickerModal from './product-form/ProductPickerModal';
 import ProductPricingPanel from './product-form/ProductPricingPanel';
+import { formatRupiah } from '../utils/currency';
 
 const normalizeText = (value) => String(value || '').trim().toLowerCase();
 const isGroupProductRow = (row) => Boolean(
