@@ -1,6 +1,7 @@
 import Constants from 'expo-constants';
 
 const DEFAULT_ERP_API_BASE_URL = 'https://dashboard.sidomulyoproject.com/api';
+const LOCAL_ERP_HOSTNAMES = new Set(['localhost', '127.0.0.1', '0.0.0.0']);
 
 const resolveDefaultApiBaseUrl = () => {
   return DEFAULT_ERP_API_BASE_URL;
@@ -22,9 +23,27 @@ const isSupportedApiUrl = (url) => {
   }
 };
 
-const resolveRuntimeApiBaseUrl = (configuredUrl) => {
+const isLocalApiUrl = (url) => {
+  const normalizedUrl = normalizeApiBaseUrl(url);
+  if (!normalizedUrl || !isSupportedApiUrl(normalizedUrl)) {
+    return false;
+  }
+
+  try {
+    const parsedUrl = new URL(normalizedUrl);
+    return LOCAL_ERP_HOSTNAMES.has(String(parsedUrl.hostname || '').trim().toLowerCase());
+  } catch (_error) {
+    return false;
+  }
+};
+
+const resolveRuntimeApiBaseUrl = (configuredUrl, allowLocalApiUrl = false) => {
   const normalizedConfiguredUrl = normalizeApiBaseUrl(configuredUrl);
   if (!normalizedConfiguredUrl) {
+    return resolveDefaultApiBaseUrl();
+  }
+
+  if (!allowLocalApiUrl && isLocalApiUrl(normalizedConfiguredUrl)) {
     return resolveDefaultApiBaseUrl();
   }
 
@@ -38,8 +57,9 @@ const resolveRuntimeApiBaseUrl = (configuredUrl) => {
 };
 
 const extra = Constants.expoConfig?.extra || {};
+const allowLocalApiUrl = ['1', 'true', 'yes'].includes(String(extra.allowLocalErpApi || '').trim().toLowerCase());
 
-const API_BASE_URL = resolveRuntimeApiBaseUrl(extra.erpApiBaseUrl);
+const API_BASE_URL = resolveRuntimeApiBaseUrl(extra.erpApiBaseUrl, allowLocalApiUrl);
 const API_EMAIL = String(extra.erpEmail || '').trim();
 const API_PASSWORD = String(extra.erpPassword || '');
 const API_TOKEN = String(extra.erpToken || '').trim();

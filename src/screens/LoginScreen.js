@@ -201,6 +201,7 @@ const LoginScreen = ({ onLoginSuccess }) => {
             <View style={styles.metaWrap}>
               <Text style={styles.metaText}>©sidomulyoproject</Text>
               <Text style={styles.metaText}>Version {appEnv.appVersion || '-'}</Text>
+              <Text style={styles.metaText}>Server {appEnv.erpApiBaseUrl || '-'}</Text>
             </View>
           </View>
         </View>

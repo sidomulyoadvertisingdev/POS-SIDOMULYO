@@ -7,6 +7,7 @@ const trimString = (value) => String(value || '').trim();
 export const appEnv = {
   appVersion: trimString(extra.appVersion),
   erpApiBaseUrl: trimString(extra.erpApiBaseUrl),
+  allowLocalErpApi: trimString(extra.allowLocalErpApi),
   bankAccountCashId: trimString(extra.bankAccountCashId),
   bankAccountTransferId: trimString(extra.bankAccountTransferId),
   bankAccountQrisId: trimString(extra.bankAccountQrisId),
