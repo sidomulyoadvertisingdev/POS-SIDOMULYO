@@ -2,6 +2,9 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { Alert, AppState, Image, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, Vibration, View, useWindowDimensions } from 'react-native';
 import { Asset } from 'expo-asset';
 import CartList from '../components/CartList';
+import InvoiceWorkspaceContent from '../components/InvoiceWorkspaceContent';
+import InvoiceWorkspaceHeader from '../components/InvoiceWorkspaceHeader';
+import InvoiceWorkspaceRowCard from '../components/InvoiceWorkspaceRowCard';
 import PaymentSummary from '../components/PaymentSummary';
 import ProductForm from '../components/ProductForm';
 import ProductionPanel from '../components/ProductionPanel';
@@ -19,8 +22,12 @@ import {
   createPosCustomer,
   createPosCashFlow,
   createPosInvoicePayment,
+  createPosManualApproval,
   createPosOrder,
   deletePosOrder,
+  approvePosManualApproval,
+  rejectPosManualApproval,
+  resolvePosManualApproval,
   fetchPosBankAccounts,
   fetchPosCashFlows,
   fetchPosCashFlowTypes,
@@ -40,6 +47,7 @@ import {
   fetchPosProductDetail,
   fetchPosProducts,
   fetchPosReceivableApprovals,
+  fetchPosManualApprovals,
   fetchPosSettings,
   fetchPosSyncChanges,
   fetchPosSyncStatus,
@@ -74,6 +82,15 @@ import {
 const { buildProductPickerTree, hasA3Token } = require('../utils/productPickerTree');
 const { resolveQtyOnlyProductMode } = require('../utils/productModes');
 const { extractOrderDiscountAmount } = require('../utils/receiptSummary');
+const {
+  canUserAccessInvoiceRow,
+  canUserViewInvoiceRow,
+  filterInvoiceRowsForUser,
+  isApprovalInvoiceRow,
+  isDraftInvoiceRow: isDraftInvoiceRowVisible,
+  isReceivableInvoiceRow,
+  isSuccessfulInvoiceRow,
+} = require('../utils/invoiceVisibility');
 const {
   CUSTOMER_PHONE_CONFLICT_MESSAGE,
   isCustomerPhoneConflictError,
@@ -138,12 +155,24 @@ const normalizeCustomerReceivableSummary = (payload) => {
   const source = payload && typeof payload === 'object' && !Array.isArray(payload) ? payload : {};
   const customer = source?.customer && typeof source.customer === 'object' ? source.customer : {};
   const summary = source?.summary && typeof source.summary === 'object' ? source.summary : source;
+  const receivableLimit = summary?.receivable_limit && typeof summary.receivable_limit === 'object'
+    ? summary.receivable_limit
+    : {};
+  const applicationProfile = receivableLimit?.application_profile && typeof receivableLimit.application_profile === 'object'
+    ? receivableLimit.application_profile
+    : {};
+  const lastRequest = receivableLimit?.last_request && typeof receivableLimit.last_request === 'object'
+    ? receivableLimit.last_request
+    : {};
   const invoiceNumbers = Array.isArray(summary?.invoice_numbers)
     ? summary.invoice_numbers.map((value) => String(value || '').trim()).filter(Boolean)
     : [];
   const primaryInvoiceNo = String(summary?.primary_invoice_no || invoiceNumbers[0] || '').trim();
   const dueTotal = roundMoney(Number(summary?.due_total || 0));
   const invoiceCount = Math.max(Number(summary?.invoice_count || 0) || 0, 0);
+  const approvedAmount = roundMoney(Number(receivableLimit?.approved_amount || 0));
+  const usedAmount = roundMoney(Number(receivableLimit?.used_amount || dueTotal || 0));
+  const pendingAmount = roundMoney(Number(receivableLimit?.pending_amount || 0));
 
   return {
     customerId: Number(customer?.id || source?.customer_id || 0) || null,
@@ -156,6 +185,50 @@ const normalizeCustomerReceivableSummary = (payload) => {
     latestDueDate: String(summary?.latest_due_date || '').trim(),
     invoiceNumbers,
     primaryInvoiceNo,
+    receivableLimit: {
+      status: String(receivableLimit?.status || (pendingAmount > 0 ? 'pending' : (approvedAmount > 0 ? 'approved' : 'not_set'))).trim() || 'not_set',
+      approvedAmount,
+      usedAmount,
+      remainingAmount: roundMoney(Number(receivableLimit?.remaining_amount ?? Math.max(approvedAmount - usedAmount, 0))),
+      pendingAmount,
+      pendingRequestId: Number(receivableLimit?.pending_request_id || 0) || null,
+      approvedRequestId: Number(receivableLimit?.approved_request_id || 0) || null,
+      approvedAt: String(receivableLimit?.approved_at || '').trim(),
+      decisionNote: String(receivableLimit?.decision_note || '').trim(),
+      approver: receivableLimit?.approver && typeof receivableLimit.approver === 'object'
+        ? {
+          id: Number(receivableLimit.approver?.id || 0) || null,
+          name: String(receivableLimit.approver?.name || '').trim(),
+        }
+        : null,
+      profileCompleted: Boolean(receivableLimit?.profile_completed),
+      applicationProfile: {
+        applicantName: String(applicationProfile?.applicant_name || '').trim(),
+        address: String(applicationProfile?.address || '').trim(),
+        phone: String(applicationProfile?.phone || '').trim(),
+        businessName: String(applicationProfile?.business_name || '').trim(),
+        nikKtp: String(applicationProfile?.nik_ktp || '').trim(),
+        npwp: String(applicationProfile?.npwp || '').trim(),
+        emergencyContactPhone: String(applicationProfile?.emergency_contact_phone || '').trim(),
+        activeEmail: String(applicationProfile?.active_email || '').trim(),
+      },
+      lastRequest: Object.keys(lastRequest).length > 0
+        ? {
+          id: Number(lastRequest?.id || 0) || null,
+          status: normalizeReceivableApprovalStatus(lastRequest?.status),
+          amount: roundMoney(Number(lastRequest?.amount || 0)),
+          decisionNote: String(lastRequest?.decision_note || '').trim(),
+          createdAt: String(lastRequest?.created_at || '').trim(),
+          decidedAt: String(lastRequest?.decided_at || '').trim(),
+          approver: lastRequest?.approver && typeof lastRequest.approver === 'object'
+            ? {
+              id: Number(lastRequest.approver?.id || 0) || null,
+              name: String(lastRequest.approver?.name || '').trim(),
+            }
+            : null,
+        }
+        : null,
+    },
   };
 };
 const buildCustomerReceivableNoticeMessage = (summary) => {
@@ -170,26 +243,104 @@ const buildCustomerReceivableNoticeMessage = (summary) => {
         : summary.primaryInvoiceNo
     )
     : '';
+  const receivableLimit = summary?.receivableLimit && typeof summary.receivableLimit === 'object'
+    ? summary.receivableLimit
+    : {};
+  const approvedAmount = roundMoney(Number(receivableLimit?.approvedAmount || 0));
+  const remainingAmount = roundMoney(Number(receivableLimit?.remainingAmount || 0));
+  const pendingAmount = roundMoney(Number(receivableLimit?.pendingAmount || 0));
+  const hasPendingLimit = pendingAmount > 0 || String(receivableLimit?.status || '').trim().toLowerCase() === 'pending';
+  const lastRequest = receivableLimit?.lastRequest && typeof receivableLimit.lastRequest === 'object'
+    ? receivableLimit.lastRequest
+    : null;
+  const latestRejected = normalizeReceivableApprovalStatus(lastRequest?.status) === 'rejected';
 
   return [
     summary.customerName ? `Pelanggan: ${summary.customerName}${summary.customerPhone ? ` | ${summary.customerPhone}` : ''}` : '',
     `Piutang aktif: ${formatRupiah(summary.dueTotal || 0)}`,
+    hasPendingLimit
+      ? `Plafon piutang: Menunggu approval ${formatRupiah(pendingAmount || approvedAmount || 0)}`
+      : approvedAmount > 0
+        ? `Plafon piutang aktif: ${formatRupiah(approvedAmount)} | Sisa: ${formatRupiah(remainingAmount)}`
+        : 'Plafon piutang: Belum disetujui',
     invoicePreview ? `Invoice terkait: ${invoicePreview}` : null,
     summary.oldestUnpaidDays > 0 ? `Piutang tertua: ${summary.oldestUnpaidDays} hari` : null,
-    'Status approval: Menunggu Approval',
-    'Pelanggan ini masih memiliki piutang. Mohon menunggu approval admin sebelum melanjutkan.',
+    hasPendingLimit
+      ? 'Status plafon: Menunggu Approval'
+      : approvedAmount > 0
+        ? 'Status plafon: Aktif'
+        : latestRejected
+          ? 'Status plafon: Pengajuan Terakhir Ditolak'
+          : 'Status plafon: Belum Disetujui',
+    latestRejected && lastRequest?.amount > 0
+      ? `Pengajuan terakhir ditolak: ${formatRupiah(lastRequest.amount)}`
+      : null,
+    latestRejected && lastRequest?.decisionNote
+      ? `Catatan penolakan: ${lastRequest.decisionNote}`
+      : null,
+    hasPendingLimit
+      ? 'Pelanggan ini masih menunggu approval plafon piutang. Tahan transaksi piutang baru sampai approval selesai.'
+      : approvedAmount > 0
+        ? 'Pelanggan ini masih memiliki piutang aktif. Pastikan total piutang tetap berada di dalam plafon yang disetujui.'
+        : latestRejected
+          ? 'Pengajuan plafon terakhir ditolak. Revisi formulir plafon lalu ajukan ulang sebelum transaksi piutang berikutnya.'
+          : 'Pelanggan ini belum memiliki plafon piutang yang disetujui untuk transaksi kredit berikutnya.',
   ].filter(Boolean).join('\n');
 };
 const normalizeReceivableApprovalStatus = (value) => {
   const text = normalizeText(value);
+  if (['resolved', 'selesai', 'selesai_ditangani', 'selesai ditangani'].includes(text)) return 'resolved';
   if (['approved', 'approve', 'accepted', 'disetujui'].includes(text)) return 'approved';
   if (['rejected', 'reject', 'declined', 'ditolak'].includes(text)) return 'rejected';
+  if (['cancelled', 'canceled', 'dibatalkan'].includes(text)) return 'cancelled';
   return 'pending';
+};
+const normalizeApprovalType = (value) => {
+  const text = normalizeText(value);
+  if (['receivable_limit', 'credit_limit', 'plafon_piutang', 'plafon piutang', 'piutang_limit'].includes(text)) return 'receivable_limit';
+  if (['management_burden', 'management', 'beban_management', 'beban management'].includes(text)) return 'management_burden';
+  if (['production_mistake', 'production_issue', 'kesalahan_produksi', 'kesalahan produksi', 'karyawan'].includes(text)) return 'production_mistake';
+  return 'receivable';
+};
+const formatApprovalTypeLabel = (value) => {
+  const type = normalizeApprovalType(value);
+  if (type === 'receivable_limit') return 'Plafon Piutang Customer';
+  if (type === 'management_burden') return 'Beban Management';
+  if (type === 'production_mistake') return 'Kesalahan Produksi / Karyawan';
+  return 'Piutang Customer';
+};
+const resolveReceivableLimitRequestKind = (approvalAmount, currentApprovedLimitAmount) => {
+  const requestedAmount = roundMoney(Number(approvalAmount || 0));
+  const currentApproved = roundMoney(Number(currentApprovedLimitAmount || 0));
+  if (!(currentApproved > 0)) {
+    return {
+      key: 'new_limit',
+      label: 'Pengajuan Plafon Baru',
+    };
+  }
+  if (requestedAmount > currentApproved) {
+    return {
+      key: 'increase_limit',
+      label: 'Permintaan Kenaikan Plafon',
+    };
+  }
+  if (requestedAmount < currentApproved) {
+    return {
+      key: 'adjust_limit',
+      label: 'Permintaan Penyesuaian Plafon',
+    };
+  }
+  return {
+    key: 'review_limit',
+    label: 'Permintaan Review Plafon Aktif',
+  };
 };
 const formatReceivableApprovalStatusLabel = (value) => {
   const status = normalizeReceivableApprovalStatus(value);
-  if (status === 'approved') return 'Approved';
+  if (status === 'approved') return 'Disetujui';
   if (status === 'rejected') return 'Ditolak';
+  if (status === 'resolved') return 'Selesai Ditangani';
+  if (status === 'cancelled') return 'Dibatalkan';
   return 'Menunggu Approval';
 };
 const buildReceivableApprovalRequestLabel = (approvalId) => {
@@ -199,20 +350,40 @@ const buildReceivableApprovalRequestLabel = (approvalId) => {
 const normalizeReceivableApprovalRow = (row) => {
   const approvalId = Number(row?.id || row?.approval_request_id || row?.request_id || 0) || 0;
   const status = normalizeReceivableApprovalStatus(row?.status);
+  const approvalType = normalizeApprovalType(row?.approval_type);
+  const approvalAmount = roundMoney(Number(row?.approval_amount || row?.requested_order_total || 0));
   const payload = row?.payload && typeof row.payload === 'object' && !Array.isArray(row.payload) ? row.payload : {};
   const customer = row?.customer && typeof row.customer === 'object' ? row.customer : {};
   const requester = row?.requester && typeof row.requester === 'object' ? row.requester : {};
   const approver = row?.approver && typeof row.approver === 'object' ? row.approver : {};
+  const handledBy = row?.handled_by && typeof row.handled_by === 'object' ? row.handled_by : {};
   const order = row?.order && typeof row.order === 'object' ? row.order : null;
   const orderInvoice = order?.invoice && typeof order.invoice === 'object' ? order.invoice : null;
   const queuedItems = Array.isArray(payload?.items) ? payload.items : [];
-  const total = roundMoney(Number(row?.requested_order_total || 0));
+  const total = roundMoney(Number(row?.requested_order_total || row?.approval_amount || 0));
   const paidTotal = roundMoney(Number(row?.requested_payment_amount || 0));
   const requestLabel = buildReceivableApprovalRequestLabel(approvalId);
+  const applicationProfile = payload?.application_profile && typeof payload.application_profile === 'object'
+    ? payload.application_profile
+    : {};
+  const currentApprovedLimitAmount = roundMoney(Number(payload?.current_approved_limit_amount || 0));
+  const currentDueTotal = roundMoney(Number(payload?.current_due_total || 0));
+  const projectedOutstandingTotal = roundMoney(Number(payload?.projected_outstanding_total || row?.requested_order_total || 0));
+  const receivableLimitRequestKind = approvalType === 'receivable_limit'
+    ? resolveReceivableLimitRequestKind(approvalAmount, currentApprovedLimitAmount)
+    : null;
 
   return {
     id: `approval-${approvalId || Math.random().toString(36).slice(2, 8)}`,
-    status: status === 'pending' ? 'pending_approval' : (status === 'rejected' ? 'approval_rejected' : (order?.status || orderInvoice?.status || 'approved')),
+    status: status === 'pending'
+      ? 'pending_approval'
+      : (status === 'rejected'
+        ? 'approval_rejected'
+        : (status === 'resolved'
+          ? 'completed'
+          : (status === 'cancelled'
+            ? 'cancelled'
+            : (order?.status || orderInvoice?.status || 'approved')))),
     created_at: String(row?.created_at || '').trim(),
     updated_at: String(row?.updated_at || row?.decided_at || row?.created_at || '').trim(),
     notes: String(payload?.notes || row?.decision_note || '').trim(),
@@ -230,8 +401,8 @@ const normalizeReceivableApprovalRow = (row) => {
     } : {
       id: null,
       invoice_no: requestLabel,
-      status: status === 'pending' ? 'pending_approval' : 'approval_rejected',
-      total,
+      status: status === 'pending' ? 'pending_approval' : (status === 'resolved' ? 'completed' : (status === 'cancelled' ? 'cancelled' : (status === 'rejected' ? 'approval_rejected' : 'approved'))),
+      total: approvalAmount > 0 ? approvalAmount : total,
       paid_total: paidTotal,
       due_total: 0,
       can_pay: false,
@@ -242,12 +413,19 @@ const normalizeReceivableApprovalRow = (row) => {
     approval: {
       id: approvalId,
       requestLabel,
+      type: approvalType,
+      typeLabel: String(row?.approval_type_label || formatApprovalTypeLabel(approvalType)).trim(),
+      contextKey: String(receivableLimitRequestKind?.key || '').trim(),
+      contextLabel: String(receivableLimitRequestKind?.label || '').trim(),
+      amount: approvalAmount,
       status,
       statusLabel: formatReceivableApprovalStatusLabel(status),
       source: String(row?.request_source || '').trim(),
       createdAt: String(row?.created_at || '').trim(),
       updatedAt: String(row?.updated_at || row?.decided_at || row?.created_at || '').trim(),
       decidedAt: String(row?.decided_at || '').trim(),
+      handledAt: String(row?.handled_at || '').trim(),
+      resolvedAt: String(row?.resolved_at || '').trim(),
       decisionNote: String(row?.decision_note || '').trim(),
       invoiceCount: Math.max(Number(row?.invoice_count_snapshot || 0) || 0, 0),
       outstandingTotal: roundMoney(Number(row?.due_total_snapshot || 0)),
@@ -257,6 +435,9 @@ const normalizeReceivableApprovalRow = (row) => {
       requestedPaymentAmount: paidTotal,
       requestedTransactionType: String(row?.requested_transaction_type || '').trim(),
       oldestDays: Math.max(Number(row?.oldest_days_snapshot || 0) || 0, 0),
+      currentApprovedLimitAmount,
+      currentDueTotal,
+      projectedOutstandingTotal,
       requester: {
         id: Number(requester?.id || 0) || null,
         name: String(requester?.name || '').trim(),
@@ -265,15 +446,30 @@ const normalizeReceivableApprovalRow = (row) => {
         id: Number(approver?.id || 0) || null,
         name: String(approver?.name || '').trim(),
       },
+      handledBy: {
+        id: Number(handledBy?.id || 0) || null,
+        name: String(handledBy?.name || '').trim(),
+      },
+      canResolve: Boolean(row?.can_resolve),
       orderId: Number(order?.id || 0) || null,
       orderStatus: String(order?.status || '').trim(),
       orderInvoiceNo: String(orderInvoice?.invoice_no || '').trim(),
+      applicationProfile: {
+        applicantName: String(applicationProfile?.applicant_name || '').trim(),
+        address: String(applicationProfile?.address || '').trim(),
+        phone: String(applicationProfile?.phone || '').trim(),
+        businessName: String(applicationProfile?.business_name || '').trim(),
+        nikKtp: String(applicationProfile?.nik_ktp || '').trim(),
+        npwp: String(applicationProfile?.npwp || '').trim(),
+        emergencyContactPhone: String(applicationProfile?.emergency_contact_phone || '').trim(),
+        activeEmail: String(applicationProfile?.active_email || '').trim(),
+      },
     },
     __source: 'receivable_approval',
     __approval_request_id: approvalId || null,
   };
 };
-const isReceivableApprovalInvoiceRow = (row) => String(row?.__source || '').trim().toLowerCase() === 'receivable_approval';
+const isReceivableApprovalInvoiceRow = (row) => isApprovalInvoiceRow(row);
 const buildReceivableApprovalUpdateNotice = (row) => {
   const approval = row?.approval && typeof row.approval === 'object' ? row.approval : {};
   const customerName = String(row?.customer?.name || 'Pelanggan umum').trim() || 'Pelanggan umum';
@@ -282,60 +478,93 @@ const buildReceivableApprovalUpdateNotice = (row) => {
   const status = normalizeReceivableApprovalStatus(approval?.status || row?.status);
   const lines = [
     `Pelanggan: ${customerName}${customerPhone ? ` | ${customerPhone}` : ''}`,
-    `Piutang sebelumnya: ${formatRupiah(approval?.outstandingTotal || 0)}`,
+    approval?.typeLabel ? `Jenis approval: ${approval.typeLabel}` : null,
+    approval?.contextLabel ? `Konteks request: ${approval.contextLabel}` : null,
+    approval?.amount > 0 ? `Nominal approval: ${formatRupiah(approval.amount)}` : null,
+    normalizeApprovalType(approval?.type) === 'receivable_limit' && approval?.currentApprovedLimitAmount > 0
+      ? `Plafon aktif saat request: ${formatRupiah(approval.currentApprovedLimitAmount)}`
+      : null,
+    normalizeApprovalType(approval?.type) === 'receivable_limit' && approval?.projectedOutstandingTotal > 0
+      ? `Proyeksi piutang setelah order: ${formatRupiah(approval.projectedOutstandingTotal)}`
+      : null,
+    approval?.outstandingTotal > 0 ? `Piutang sebelumnya: ${formatRupiah(approval.outstandingTotal)}` : null,
     invoiceNo ? `Invoice: ${invoiceNo}` : `Request: ${approval?.requestLabel || '-'}`,
     `Status approval: ${formatReceivableApprovalStatusLabel(status)}`,
     approval?.approver?.name ? `Diproses oleh: ${approval.approver.name}` : null,
+    approval?.handledBy?.name ? `Handled by: ${approval.handledBy.name}` : null,
     approval?.decisionNote ? `Catatan: ${approval.decisionNote}` : null,
-    status === 'approved'
-      ? 'Invoice pelanggan ini sudah di-approve dan bisa dilanjutkan/diproses.'
-      : 'Permintaan approval piutang ditolak. Tindak lanjuti dulu sebelum order dilanjutkan.',
+    status === 'pending'
+      ? 'Approval sudah dicatat dan customer/nota tetap terkunci sampai proses ini selesai.'
+      : status === 'resolved'
+      ? 'Approval sudah selesai ditangani dan lock customer/nota dilepas.'
+      : status === 'approved'
+      ? (normalizeApprovalType(approval?.type) === 'receivable_limit'
+        ? 'Plafon piutang customer sudah disetujui. Order piutang berikutnya bisa diproses selama totalnya tetap dalam plafon.'
+        : 'Invoice pelanggan ini sudah di-approve dan bisa dilanjutkan/diproses.')
+      : 'Approval ditolak. Tindak lanjuti dulu sebelum proses berikutnya dilanjutkan.',
   ].filter(Boolean);
 
   return {
-    title: status === 'approved' ? 'Approval Piutang Disetujui' : 'Approval Piutang Diperbarui',
+    title: status === 'pending'
+      ? `Approval ${approval?.typeLabel || 'Customer'} Dibuat`
+      : status === 'resolved'
+      ? 'Approval Selesai Ditangani'
+      : (status === 'approved'
+        ? `Approval ${approval?.typeLabel || 'Customer'} Disetujui`
+        : `Approval ${approval?.typeLabel || 'Customer'} Diperbarui`),
     message: lines.join('\n'),
-    visual: status === 'approved' ? 'success' : 'default',
+    visual: ['approved', 'resolved'].includes(status) ? 'success' : 'default',
   };
 };
+const createManualApprovalModalState = () => ({
+  visible: false,
+  mode: 'create',
+  context: 'invoice_manual',
+  approvalId: 0,
+  orderId: 0,
+  invoiceId: 0,
+  customerId: 0,
+  customerName: 'Pelanggan umum',
+  customerPhone: '',
+  invoiceNo: '-',
+  requestLabel: '-',
+  approvalType: 'management_burden',
+  approvalAmount: '',
+  approvedLimitAmount: '',
+  currentApprovedLimitAmount: 0,
+  currentPendingLimitAmount: 0,
+  currentRemainingLimitAmount: 0,
+  applicantName: '',
+  address: '',
+  contactPhone: '',
+  businessName: '',
+  nikKtp: '',
+  npwp: '',
+  emergencyContactPhone: '',
+  activeEmail: '',
+  note: '',
+  status: 'pending',
+  isSubmitting: false,
+});
 const formatIsoDate = (date) => {
   const year = date.getFullYear();
   const month = String(date.getMonth() + 1).padStart(2, '0');
   const day = String(date.getDate()).padStart(2, '0');
   return `${year}-${month}-${day}`;
 };
-const DRAFT_AUTO_DELETE_HOURS = 24;
-const DRAFT_AUTO_DELETE_MS = DRAFT_AUTO_DELETE_HOURS * 60 * 60 * 1000;
-const getDraftExpiryMeta = (createdAt, nowTs = Date.now()) => {
-  const createdTs = new Date(createdAt || 0).getTime();
-  if (!Number.isFinite(createdTs) || createdTs <= 0) {
-    return {
-      isValid: false,
-      isExpired: false,
-      remainingMs: 0,
-      label: `Auto hapus ${DRAFT_AUTO_DELETE_HOURS} jam`,
-    };
-  }
-  const expiresAtTs = createdTs + DRAFT_AUTO_DELETE_MS;
-  const remainingMs = Math.max(0, expiresAtTs - nowTs);
-  const totalMinutes = Math.ceil(remainingMs / 60000);
-  const hours = Math.floor(totalMinutes / 60);
-  const minutes = totalMinutes % 60;
-  const compact =
-    hours > 0
-      ? `${hours}j${minutes > 0 ? ` ${minutes}m` : ''}`
-      : `${Math.max(1, minutes)}m`;
+const getDraftExpiryMeta = () => {
   return {
     isValid: true,
-    isExpired: remainingMs <= 0,
-    remainingMs,
-    label: remainingMs <= 0 ? 'Draft kadaluarsa' : `Auto hapus ${compact} lagi`,
+    isExpired: false,
+    remainingMs: null,
+    label: 'Draft aktif tersimpan',
   };
 };
 
 const sanitizeNumericInput = (value) => value.replace(/[^0-9]/g, '');
 const sanitizeDecimalInput = (value) => String(value || '').replace(/[^0-9.,]/g, '');
 const sanitizeCurrencyInput = (value) => sanitizeNumericInput(String(value || ''));
+const isValidEmailInput = (value) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(value || '').trim());
 const sanitizeQtyInput = (value) => {
   const digits = sanitizeNumericInput(String(value || ''));
   if (!digits) {
@@ -1919,14 +2148,17 @@ const resolveInvoiceStatusKey = (status) => {
   if (['pending', 'new', 'open'].includes(text)) return 'pending';
   if (['pending_payment', 'awaiting_payment', 'unpaid'].includes(text)) return 'pending_payment';
   if (['partially_paid', 'partial_paid', 'dp'].includes(text)) return 'partially_paid';
+  if (['piutang', 'receivable', 'credit', 'outstanding', 'belum_lunas', 'belum lunas'].includes(text)) return 'receivable';
   if (['pending_production', 'waiting_production', 'menunggu_produksi', 'menunggu produksi'].includes(text)) return 'waiting_production';
   if (['pending_design', 'waiting_design', 'menunggu_design', 'menunggu design'].includes(text)) return 'waiting_design';
   if (['processing', 'on_process', 'on_progress', 'production_process'].includes(text)) return 'processing';
   if (['in_batch', 'batch', 'proses_produksi', 'proses produksi'].includes(text)) return 'in_batch';
   if (['ready_pickup', 'ready_for_pickup', 'siap_ambil', 'siap ambil'].includes(text)) return 'ready_pickup';
   if (['picked_up'].includes(text)) return 'picked_up';
+  if (['approved', 'disetujui'].includes(text)) return 'approved';
+  if (['resolved', 'selesai_ditangani', 'selesai ditangani'].includes(text)) return 'resolved';
   if (['completed', 'done', 'finished'].includes(text)) return 'completed';
-  if (['paid'].includes(text)) return 'paid';
+  if (['paid', 'lunas', 'full'].includes(text)) return 'paid';
   if (['approval_rejected', 'rejected', 'approval ditolak', 'ditolak approval'].includes(text)) return 'approval_rejected';
   if (['cancelled', 'canceled', 'void', 'rejected_online'].includes(text)) return 'cancelled';
   return text;
@@ -1940,12 +2172,15 @@ const formatDraftStatusLabel = (status) => {
   if (key === 'pending') return 'Menunggu Proses';
   if (key === 'pending_payment') return 'Menunggu Pembayaran';
   if (key === 'partially_paid') return 'Pembayaran Sebagian (DP)';
+  if (key === 'receivable') return 'Piutang';
   if (key === 'waiting_design') return 'Menunggu Design';
   if (key === 'waiting_production') return 'Menunggu Produksi';
   if (key === 'processing') return 'Sedang Diproses';
   if (key === 'in_batch') return 'In Batch';
   if (key === 'ready_pickup') return 'Siap Diambil';
   if (key === 'picked_up') return 'Sudah diambil';
+  if (key === 'approved') return 'Disetujui';
+  if (key === 'resolved') return 'Selesai Ditangani';
   if (key === 'completed') return 'Selesai';
   if (key === 'paid') return 'Lunas';
   if (key === 'approval_rejected') return 'Approval Ditolak';
@@ -1955,11 +2190,11 @@ const formatDraftStatusLabel = (status) => {
 const getInvoiceStatusTextColor = (status) => {
   const key = resolveInvoiceStatusKey(status);
   if (key === 'pending_approval') return '#b42318';
-  if (['pending', 'pending_payment', 'partially_paid'].includes(key)) return '#8a6b00';
+  if (['pending', 'pending_payment', 'partially_paid', 'receivable'].includes(key)) return '#8a6b00';
   if (key === 'waiting_design') return '#b42318';
   if (key === 'waiting_production') return '#b54708';
   if (['processing', 'in_batch'].includes(key)) return '#1849a9';
-  if (['completed', 'paid', 'picked_up'].includes(key)) return '#067647';
+  if (['approved', 'resolved', 'completed', 'paid', 'picked_up'].includes(key)) return '#067647';
   if (key === 'approval_rejected') return '#9f1239';
   if (key === 'cancelled') return '#9f1239';
   return '#3a3a3a';
@@ -1974,10 +2209,7 @@ const normalizeInvoiceOrderStatus = (row) => {
   );
 };
 const isDraftInvoiceRow = (row) => {
-  if (String(row?.__source || '').toLowerCase() === 'queue') {
-    return true;
-  }
-  return isDraftCandidate(row);
+  return isDraftInvoiceRowVisible(row);
 };
 const isProcessingInvoiceRow = (row) => {
   if (isDraftInvoiceRow(row)) {
@@ -1992,12 +2224,54 @@ const isProcessingInvoiceRow = (row) => {
   }
   return true;
 };
+const isInvoiceSuccessRow = (row) => isSuccessfulInvoiceRow(row);
 const isCompletedInvoiceRow = (row) => {
   if (isDraftInvoiceRow(row) || isProcessingInvoiceRow(row)) {
     return false;
   }
   const statusKey = resolveInvoiceStatusKey(normalizeInvoiceOrderStatus(row));
   return ['completed', 'paid', 'picked_up'].includes(statusKey);
+};
+const resolveInvoicePaymentLifecycle = (row) => {
+  if (!row || isDraftInvoiceRow(row) || isReceivableApprovalInvoiceRow(row)) {
+    return { key: 'draft', label: '-', color: '#6b7280' };
+  }
+
+  const total = roundMoney(Number(
+    row?.invoice?.total
+    || row?.total
+    || row?.grand_total
+    || 0
+  ));
+  const paidTotal = roundMoney(Number(row?.invoice?.paid_total || row?.paid_total || 0));
+  const dueTotal = roundMoney(Math.max(0, Number(row?.invoice?.due_total || Math.max(total - paidTotal, 0))));
+
+  if (total > 0 && dueTotal <= 0) {
+    return { key: 'paid', label: 'Lunas', color: '#067647' };
+  }
+
+  return { key: 'unpaid', label: 'Belum Lunas', color: '#8a6b00' };
+};
+const resolveInvoiceProductionLifecycle = (row) => {
+  if (!row || isDraftInvoiceRow(row)) {
+    return { key: 'draft', label: 'Belum Masuk Produksi', color: '#6b7280' };
+  }
+
+  const counts = getProductionCountsForInvoice(row);
+  if (!counts) {
+    return { key: 'not_required', label: 'Tidak Perlu Produksi', color: '#475467' };
+  }
+
+  const unfinished = Number(counts.waiting_design || 0) + Number(counts.waiting_production || 0) + Number(counts.in_batch || 0);
+  if (unfinished > 0) {
+    return { key: 'started', label: 'Mulai Produksi', color: '#1849a9' };
+  }
+
+  if (Number(counts.printed || 0) > 0) {
+    return { key: 'finished', label: 'Selesai Produksi', color: '#067647' };
+  }
+
+  return { key: 'not_required', label: 'Tidak Perlu Produksi', color: '#475467' };
 };
 const getProductionCountsForInvoice = (row) => {
   const items = Array.isArray(row?.items) ? row.items : [];
@@ -2412,6 +2686,7 @@ const normalizeCustomerRow = (row) => ({
   ...row,
   id: Number(row?.id || 0),
   name: String(row?.name || '').trim(),
+  email: String(row?.email || '').trim(),
   phone: (() => {
     const rawPhone = String(
       row?.phone ||
@@ -2433,6 +2708,9 @@ const normalizeCustomerRow = (row) => ({
     }
   })(),
   address: String(row?.address || row?.alamat || '').trim(),
+  preferences: row?.preferences && typeof row.preferences === 'object' && !Array.isArray(row.preferences)
+    ? row.preferences
+    : {},
   customer_type_id: Number(row?.customer_type_id || row?.type_id || 0) || null,
   customer_type_code: resolveCustomerCategoryCode(row, DEFAULT_CUSTOMER_TYPES),
 });
@@ -3836,6 +4114,67 @@ const formatBackendValidationError = (error) => {
   const firstMessage = String(errorBag[firstKey][0] || error?.message || 'Validasi gagal.');
   return `${firstKey}: ${firstMessage}`;
 };
+const isCustomerProcessLockError = (error) => {
+  const lowerText = [
+    String(error?.message || ''),
+    String(error?.body?.message || ''),
+    JSON.stringify(error?.body?.errors || {}),
+  ].join(' | ').toLowerCase();
+
+  return [
+    'draft order atau approval yang belum diselesaikan',
+    'draft aktif #',
+    'approval aktif #',
+  ].some((keyword) => lowerText.includes(keyword));
+};
+const buildCustomerProcessLockNotice = (error, customerName = '') => {
+  const backendMessage = String(formatBackendValidationError(error) || '').trim()
+    .replace(/^customer_id:\s*/i, '')
+    .replace(/^source_order_id:\s*/i, '')
+    .replace(/^approval:\s*/i, '')
+    .trim();
+
+  return [
+    customerName ? `Pelanggan: ${customerName}` : null,
+    backendMessage || 'Customer/nota ini masih memiliki Draft Order atau Approval yang belum diselesaikan. Selesaikan proses sebelumnya terlebih dahulu sebelum membuat proses baru.',
+  ].filter(Boolean).join('\n');
+};
+const isReceivableLimitApplicationRequiredError = (error) => {
+  const lowerText = [
+    String(error?.message || ''),
+    String(error?.body?.message || ''),
+    JSON.stringify(error?.body?.errors || {}),
+  ].join(' | ').toLowerCase();
+
+  return lowerText.includes('receivable_limit_application')
+    || lowerText.includes('formulir plafon piutang yang lengkap')
+    || lowerText.includes('lengkapi form plafon');
+};
+const buildReceivableLimitApplicationRequiredNotice = (error, summary, customerName = '', customerPhone = '') => {
+  const receivableLimit = summary?.receivableLimit && typeof summary.receivableLimit === 'object'
+    ? summary.receivableLimit
+    : {};
+  const lastRequest = receivableLimit?.lastRequest && typeof receivableLimit.lastRequest === 'object'
+    ? receivableLimit.lastRequest
+    : null;
+  const approvedAmount = roundMoney(Number(receivableLimit?.approvedAmount || 0));
+  const backendMessage = String(formatBackendValidationError(error) || '').trim()
+    .replace(/^receivable_limit_application:\s*/i, '')
+    .trim();
+
+  return [
+    customerName ? `Pelanggan: ${customerName}${customerPhone ? ` | ${customerPhone}` : ''}` : null,
+    approvedAmount > 0 ? `Plafon aktif saat ini: ${formatRupiah(approvedAmount)}` : 'Plafon aktif saat ini: Belum disetujui',
+    lastRequest?.status === 'rejected' && lastRequest?.amount > 0
+      ? `Pengajuan terakhir ditolak: ${formatRupiah(lastRequest.amount)}`
+      : null,
+    lastRequest?.status === 'rejected' && lastRequest?.decisionNote
+      ? `Catatan penolakan: ${lastRequest.decisionNote}`
+      : null,
+    backendMessage || 'Lengkapi form plafon piutang customer dulu sebelum transaksi piutang diproses.',
+    'Buka tombol Plafon untuk mengisi formulir customer lengkap dan mengajukan nominal plafon ke admin.',
+  ].filter(Boolean).join('\n');
+};
 const formatReceivablePaymentError = (error) => {
   const status = Number(error?.status || 0);
   const validationMessage = String(formatBackendValidationError(error) || '').trim();
@@ -4191,6 +4530,45 @@ const extractUserRoleLabel = (user) => {
 
   return 'Kasir';
 };
+const canUserApproveManualApproval = (user) => {
+  const roleRows = Array.isArray(user?.roles)
+    ? user.roles
+    : (user?.roles && typeof user.roles === 'object')
+      ? Object.values(user.roles)
+      : [];
+
+  const labels = [
+    user?.role_name,
+    user?.role,
+    user?.position,
+    user?.jabatan,
+    user?.user_type,
+    user?.level,
+    ...roleRows.flatMap((row) => (
+      row && typeof row === 'object'
+        ? [row.name, row.title, row.label, row.code, row.slug]
+        : [row]
+    )),
+  ]
+    .map((value) => normalizeText(value))
+    .filter(Boolean);
+
+  return labels.some((label) => label === 'owner' || label === 'admin');
+};
+
+const INVOICE_AREA_MENU_FILTER_MAP = Object.freeze({
+  draft_orders: 'draft',
+  invoice_success: 'success',
+  approval_queue: 'approval',
+  receivable: 'receivable',
+});
+
+const INVOICE_AREA_FILTER_MENU_MAP = Object.freeze({
+  draft: 'draft_orders',
+  success: 'invoice_success',
+  approval: 'approval_queue',
+  receivable: 'receivable',
+});
 
 const SalesScreen = ({ currentUser, onLogout }) => {
   const { width, height } = useWindowDimensions();
@@ -4229,10 +4607,12 @@ const SalesScreen = ({ currentUser, onLogout }) => {
   const [paymentNotes, setPaymentNotes] = useState('');
   const [activeMenu, setActiveMenu] = useState('pos');
   const [currentDraftSourceId, setCurrentDraftSourceId] = useState(null);
+  const [currentQueuedDraftQueueId, setCurrentQueuedDraftQueueId] = useState(null);
   const [draftInvoices, setDraftInvoices] = useState([]);
   const [draftTimeTick, setDraftTimeTick] = useState(() => Date.now());
-  const [invoiceFilter, setInvoiceFilter] = useState('all');
+  const [invoiceFilter, setInvoiceFilter] = useState('success');
   const [receivableStatusFilter, setReceivableStatusFilter] = useState('all');
+  const [approvalStatusFilter, setApprovalStatusFilter] = useState('all');
   const [invoiceSearch, setInvoiceSearch] = useState('');
   const [isDraftLoading, setIsDraftLoading] = useState(false);
   const [isDeletingDraftId, setIsDeletingDraftId] = useState(null);
@@ -4300,6 +4680,21 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     visible: false,
     message: '',
   });
+  const isInvoiceAreaMenu = (menu) => Object.prototype.hasOwnProperty.call(INVOICE_AREA_MENU_FILTER_MAP, menu);
+  const resolveInvoiceFilterForMenu = (menu) => INVOICE_AREA_MENU_FILTER_MAP[menu] || 'success';
+  const resolveInvoiceMenuForFilter = (filter) => INVOICE_AREA_FILTER_MENU_MAP[filter] || 'invoice_success';
+  const openInvoiceAreaMenu = (menu) => {
+    const nextMenu = isInvoiceAreaMenu(menu) ? menu : 'invoice_success';
+    const nextFilter = resolveInvoiceFilterForMenu(nextMenu);
+
+    setActiveMenu(nextMenu);
+    setInvoiceFilter(nextFilter);
+    setApprovalStatusFilter('all');
+    setReceivableStatusFilter('all');
+  };
+  const openInvoiceAreaFilter = (filter) => {
+    openInvoiceAreaMenu(resolveInvoiceMenuForFilter(filter));
+  };
   const previewRequestRef = useRef(0);
   const lastBookProductIdRef = useRef(null);
   const resetBookConfiguratorState = () => {
@@ -4333,6 +4728,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     autoCloseMs: 0,
     visual: 'default',
   });
+  const [manualApprovalModal, setManualApprovalModal] = useState(() => createManualApprovalModalState());
   const [isOrderPreviewOpen, setIsOrderPreviewOpen] = useState(false);
   const [isOrderPreviewSubmitting, setIsOrderPreviewSubmitting] = useState(false);
   const [modalDetailPesanan, setModalDetailPesanan] = useState(false);
@@ -4594,6 +4990,8 @@ const SalesScreen = ({ currentUser, onLogout }) => {
   const [isProfileMenuOpen, setIsProfileMenuOpen] = useState(false);
   const userDisplayName = useMemo(() => extractUserDisplayName(currentUser), [currentUser]);
   const userRoleLabel = useMemo(() => extractUserRoleLabel(currentUser), [currentUser]);
+  const currentUserId = useMemo(() => Number(currentUser?.id || currentUser?.user_id || 0) || 0, [currentUser]);
+  const canApproveManualApprovalUser = useMemo(() => canUserApproveManualApproval(currentUser), [currentUser]);
   const userInitial = useMemo(() => String(userDisplayName || 'U').trim().charAt(0).toUpperCase(), [userDisplayName]);
   const activePrinterProfile = useMemo(
     () => normalizePrinterProfile(printerProfile || getDefaultPrinterProfile()),
@@ -5274,6 +5672,324 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       callback();
     }
   };
+  const closeManualApprovalModal = () => {
+    if (manualApprovalModal.isSubmitting) {
+      return;
+    }
+    setManualApprovalModal(createManualApprovalModalState());
+  };
+  const openCreateManualApprovalModal = (row) => {
+    if (!row || isDraftInvoiceRow(row) || isReceivableApprovalInvoiceRow(row)) {
+      openNotice('Approval Manual', 'Approval manual hanya bisa dibuat dari invoice yang sudah terbentuk.');
+      return;
+    }
+    if (!canUserAccessInvoiceRow(row, currentUser)) {
+      openNotice('Approval Manual', 'Invoice tidak tersedia untuk user kasir ini atau sudah tidak bisa diakses.');
+      return;
+    }
+
+    const orderId = Number(row?.id || row?.order?.id || 0) || 0;
+    const invoiceId = Number(row?.invoice?.id || row?.approval?.invoiceId || 0) || 0;
+    const customerId = Number(
+      row?.customer?.id
+      || row?.customer_id
+      || row?.invoice?.customer_id
+      || row?.order?.customer_id
+      || 0
+    ) || 0;
+
+    if (!(orderId > 0 || invoiceId > 0)) {
+      openNotice('Approval Manual', 'Invoice/nota ini belum punya referensi yang valid untuk dibuatkan approval.');
+      return;
+    }
+
+    const suggestedAmount = roundMoney(Number(
+      row?.invoice?.due_total
+      || row?.invoice?.total
+      || row?.total
+      || row?.grand_total
+      || 0
+    ));
+
+    setManualApprovalModal({
+      ...createManualApprovalModalState(),
+      visible: true,
+      mode: 'create',
+      context: 'invoice_manual',
+      orderId,
+      invoiceId,
+      customerId,
+      customerName: String(row?.customer?.name || 'Pelanggan umum').trim() || 'Pelanggan umum',
+      customerPhone: String(row?.customer?.phone || '').trim(),
+      invoiceNo: String(row?.invoice?.invoice_no || '-').trim() || '-',
+      approvalAmount: suggestedAmount > 0 ? formatMoneyAmountInput(suggestedAmount) : '',
+    });
+  };
+  const openCreateCustomerReceivableLimitModal = () => {
+    if (!selectedCustomer || !(Number(selectedCustomer?.id || 0) > 0)) {
+      openNotice('Plafon Piutang', 'Pilih customer dulu sebelum mengajukan plafon piutang.');
+      return;
+    }
+
+    const customerPreferences = selectedCustomer?.preferences && typeof selectedCustomer.preferences === 'object'
+      ? selectedCustomer.preferences
+      : {};
+    const storedReceivableProfile = customerPreferences?.receivable_profile && typeof customerPreferences.receivable_profile === 'object'
+      ? customerPreferences.receivable_profile
+      : {};
+    const receivableLimit = selectedCustomerReceivableSummary?.receivableLimit && typeof selectedCustomerReceivableSummary.receivableLimit === 'object'
+      ? selectedCustomerReceivableSummary.receivableLimit
+      : {};
+    const summaryApplicationProfile = receivableLimit?.applicationProfile && typeof receivableLimit.applicationProfile === 'object'
+      ? receivableLimit.applicationProfile
+      : {};
+    const pendingRequestId = Number(receivableLimit?.pendingRequestId || 0) || 0;
+    const pendingAmount = roundMoney(Number(receivableLimit?.pendingAmount || 0));
+    if (pendingRequestId > 0 || pendingAmount > 0) {
+      openNoticeActions(
+        'Plafon Piutang Masih Menunggu Approval',
+        [
+          `Pelanggan: ${selectedCustomer?.name || 'Pelanggan umum'}${selectedCustomer?.phone ? ` | ${selectedCustomer.phone}` : ''}`,
+          pendingAmount > 0 ? `Nominal diajukan: ${formatRupiah(pendingAmount)}` : null,
+          pendingRequestId > 0 ? `No. request approval: ${buildReceivableApprovalRequestLabel(pendingRequestId)}` : null,
+          'Status approval: Menunggu Approval',
+          'Tunggu approval plafon sebelumnya selesai dulu sebelum membuat pengajuan baru.',
+        ].filter(Boolean).join('\n'),
+        [
+          { label: 'Tutup', role: 'secondary' },
+          {
+            label: 'Buka Butuh Approval',
+            onPress: () => {
+              openInvoiceAreaMenu('approval_queue');
+              loadDraftInvoices().catch(() => {});
+            },
+          },
+        ],
+        null,
+        { showDefaultAction: false },
+      );
+      return;
+    }
+
+    const approvedAmount = roundMoney(Number(receivableLimit?.approvedAmount || 0));
+    const remainingAmount = roundMoney(Number(receivableLimit?.remainingAmount || 0));
+    const suggestedAmount = roundMoney(Math.max(
+      Number(receivableLimit?.pendingAmount || 0),
+      Number(receivableLimit?.approvedAmount || 0),
+      Number(selectedCustomerReceivableSummary?.dueTotal || 0) + Number(grandTotal || 0),
+      Number(grandTotal || 0),
+      0,
+    ));
+
+    setManualApprovalModal({
+      ...createManualApprovalModalState(),
+      visible: true,
+      mode: 'create',
+      context: 'customer_receivable_limit',
+      customerId: Number(selectedCustomer?.id || 0) || 0,
+      customerName: String(selectedCustomer?.name || 'Pelanggan umum').trim() || 'Pelanggan umum',
+      customerPhone: String(selectedCustomer?.phone || '').trim(),
+      invoiceNo: '-',
+      approvalType: 'receivable_limit',
+      approvalAmount: suggestedAmount > 0 ? formatMoneyAmountInput(suggestedAmount) : '',
+      approvedLimitAmount: approvedAmount > 0 ? formatMoneyAmountInput(approvedAmount) : '',
+      currentApprovedLimitAmount: approvedAmount,
+      currentPendingLimitAmount: pendingAmount,
+      currentRemainingLimitAmount: remainingAmount,
+      applicantName: String(
+        summaryApplicationProfile?.applicantName
+        || storedReceivableProfile?.applicant_name
+        || selectedCustomer?.name
+        || ''
+      ).trim(),
+      address: String(
+        summaryApplicationProfile?.address
+        || storedReceivableProfile?.address
+        || selectedCustomer?.address
+        || ''
+      ).trim(),
+      contactPhone: String(
+        summaryApplicationProfile?.phone
+        || storedReceivableProfile?.phone
+        || selectedCustomer?.phone
+        || ''
+      ).trim(),
+      businessName: String(summaryApplicationProfile?.businessName || storedReceivableProfile?.business_name || '').trim(),
+      nikKtp: String(summaryApplicationProfile?.nikKtp || storedReceivableProfile?.nik_ktp || '').trim(),
+      npwp: String(summaryApplicationProfile?.npwp || storedReceivableProfile?.npwp || '').trim(),
+      emergencyContactPhone: String(
+        summaryApplicationProfile?.emergencyContactPhone
+        || storedReceivableProfile?.emergency_contact_phone
+        || ''
+      ).trim(),
+      activeEmail: String(
+        summaryApplicationProfile?.activeEmail
+        || storedReceivableProfile?.active_email
+        || selectedCustomer?.email
+        || ''
+      ).trim(),
+    });
+  };
+  const openManualApprovalDecisionModal = (row, mode = 'approve') => {
+    const approvalInfo = row?.approval && typeof row.approval === 'object' ? row.approval : null;
+    if (!isReceivableApprovalInvoiceRow(row) || !approvalInfo || normalizeApprovalType(approvalInfo?.type) === 'receivable') {
+      openNotice('Approval Manual', 'Aksi ini hanya tersedia untuk approval manual.');
+      return;
+    }
+
+    const approvalId = Number(approvalInfo?.id || row?.__approval_request_id || 0) || 0;
+    if (!(approvalId > 0)) {
+      openNotice('Approval Manual', 'Approval ini belum punya ID yang valid.');
+      return;
+    }
+
+    setManualApprovalModal({
+      ...createManualApprovalModalState(),
+      visible: true,
+      mode,
+      approvalId,
+      orderId: Number(approvalInfo?.orderId || row?.order?.id || 0) || 0,
+      invoiceId: Number(row?.invoice?.id || 0) || 0,
+      customerId: Number(row?.customer?.id || 0) || 0,
+      customerName: String(row?.customer?.name || 'Pelanggan umum').trim() || 'Pelanggan umum',
+      customerPhone: String(row?.customer?.phone || '').trim(),
+      invoiceNo: String(row?.invoice?.invoice_no || approvalInfo?.orderInvoiceNo || '-').trim() || '-',
+      requestLabel: String(approvalInfo?.requestLabel || buildReceivableApprovalRequestLabel(approvalId)).trim() || '-',
+      approvalType: normalizeApprovalType(approvalInfo?.type),
+      approvalAmount: formatMoneyAmountInput(approvalInfo?.amount || 0),
+      approvedLimitAmount: formatMoneyAmountInput(approvalInfo?.amount || 0),
+      applicantName: String(approvalInfo?.applicationProfile?.applicantName || '').trim(),
+      address: String(approvalInfo?.applicationProfile?.address || '').trim(),
+      contactPhone: String(approvalInfo?.applicationProfile?.phone || '').trim(),
+      businessName: String(approvalInfo?.applicationProfile?.businessName || '').trim(),
+      nikKtp: String(approvalInfo?.applicationProfile?.nikKtp || '').trim(),
+      npwp: String(approvalInfo?.applicationProfile?.npwp || '').trim(),
+      emergencyContactPhone: String(approvalInfo?.applicationProfile?.emergencyContactPhone || '').trim(),
+      activeEmail: String(approvalInfo?.applicationProfile?.activeEmail || '').trim(),
+      note: '',
+      status: normalizeReceivableApprovalStatus(approvalInfo?.status || row?.status),
+    });
+  };
+  const handleSubmitManualApproval = async () => {
+    const modalState = manualApprovalModal;
+    if (modalState.isSubmitting) {
+      return;
+    }
+
+    const mode = String(modalState.mode || 'create').trim().toLowerCase();
+    const title = mode === 'create'
+      ? 'Approval Manual'
+      : (mode === 'approve'
+        ? 'Setujui Approval'
+        : (mode === 'reject' ? 'Tolak Approval' : 'Selesaikan Approval'));
+    const note = String(modalState.note || '').trim();
+
+    if (mode === 'create') {
+      const approvalType = normalizeApprovalType(modalState.approvalType);
+      const approvalAmount = roundMoney(parseMoneyAmountInput(modalState.approvalAmount));
+      if (!['receivable_limit', 'management_burden', 'production_mistake'].includes(approvalType)) {
+        openNotice(title, 'Pilih jenis approval manual terlebih dahulu.');
+        return;
+      }
+      if (!(approvalAmount > 0)) {
+        openNotice(title, 'Nominal approval harus lebih besar dari nol.');
+        return;
+      }
+      if (approvalType !== 'receivable_limit' && !(Number(modalState.orderId || 0) > 0 || Number(modalState.invoiceId || 0) > 0)) {
+        openNotice(title, 'Approval manual harus terhubung ke nota atau invoice.');
+        return;
+      }
+      if (approvalType === 'receivable_limit') {
+        const requiredFields = [
+          ['applicantName', 'Nama customer wajib diisi.'],
+          ['address', 'Alamat customer wajib diisi.'],
+          ['contactPhone', 'Nomor handphone customer wajib diisi.'],
+          ['businessName', 'Nama usaha wajib diisi.'],
+          ['nikKtp', 'NIK / KTP wajib diisi.'],
+          ['npwp', 'NPWP wajib diisi.'],
+          ['emergencyContactPhone', 'Nomor kontak darurat wajib diisi.'],
+          ['activeEmail', 'Email aktif wajib diisi.'],
+        ];
+        for (const [field, message] of requiredFields) {
+          if (!String(modalState?.[field] || '').trim()) {
+            openNotice(title, message);
+            return;
+          }
+        }
+        if (!isValidEmailInput(modalState.activeEmail)) {
+          openNotice(title, 'Format email aktif belum valid.');
+          return;
+        }
+      }
+    }
+
+    if (mode === 'reject' && note === '') {
+      openNotice(title, 'Catatan penolakan wajib diisi.');
+      return;
+    }
+
+    setManualApprovalModal((prev) => ({ ...prev, isSubmitting: true }));
+    try {
+      let result = null;
+      if (mode === 'create') {
+        const approvalType = normalizeApprovalType(modalState.approvalType);
+        result = await createPosManualApproval({
+          customer_id: Number(modalState.customerId || 0) > 0 ? Number(modalState.customerId || 0) : undefined,
+          order_id: approvalType === 'receivable_limit'
+            ? undefined
+            : (Number(modalState.orderId || 0) > 0 ? Number(modalState.orderId || 0) : undefined),
+          invoice_id: approvalType === 'receivable_limit'
+            ? undefined
+            : (Number(modalState.invoiceId || 0) > 0 ? Number(modalState.invoiceId || 0) : undefined),
+          approval_type: approvalType,
+          approval_amount: roundMoney(parseMoneyAmountInput(modalState.approvalAmount)),
+          applicant_name: approvalType === 'receivable_limit' ? String(modalState.applicantName || '').trim() : undefined,
+          address: approvalType === 'receivable_limit' ? String(modalState.address || '').trim() : undefined,
+          phone: approvalType === 'receivable_limit' ? String(modalState.contactPhone || '').trim() : undefined,
+          business_name: approvalType === 'receivable_limit' ? String(modalState.businessName || '').trim() : undefined,
+          nik_ktp: approvalType === 'receivable_limit' ? String(modalState.nikKtp || '').trim() : undefined,
+          npwp: approvalType === 'receivable_limit' ? String(modalState.npwp || '').trim() : undefined,
+          emergency_contact_phone: approvalType === 'receivable_limit' ? String(modalState.emergencyContactPhone || '').trim() : undefined,
+          active_email: approvalType === 'receivable_limit' ? String(modalState.activeEmail || '').trim() : undefined,
+          note: note || undefined,
+        });
+      } else if (mode === 'approve') {
+        const approvalPayload = note ? { decision_note: note } : {};
+        if (normalizeApprovalType(modalState.approvalType) === 'receivable_limit') {
+          const approvedLimitAmount = roundMoney(parseMoneyAmountInput(modalState.approvedLimitAmount || modalState.approvalAmount));
+          if (!(approvedLimitAmount > 0)) {
+            openNotice(title, 'Nominal plafon yang disetujui harus lebih besar dari nol.');
+            setManualApprovalModal((prev) => ({ ...prev, isSubmitting: false }));
+            return;
+          }
+          approvalPayload.approval_amount = approvedLimitAmount;
+        }
+        result = await approvePosManualApproval(Number(modalState.approvalId || 0), approvalPayload);
+      } else if (mode === 'reject') {
+        result = await rejectPosManualApproval(Number(modalState.approvalId || 0), { decision_note: note });
+      } else {
+        result = await resolvePosManualApproval(Number(modalState.approvalId || 0), note ? { decision_note: note } : {});
+      }
+
+      const normalizedRow = normalizeReceivableApprovalRow(result || {});
+      const notice = buildReceivableApprovalUpdateNotice(normalizedRow);
+      setManualApprovalModal(createManualApprovalModalState());
+      if (Number(modalState.customerId || 0) > 0) {
+        await loadCustomerReceivableSummary(Number(modalState.customerId || 0), { showNotice: false }).catch(() => {});
+      }
+      await loadDraftInvoices().catch(() => {});
+      openNotice(notice.title, notice.message, null, {
+        visual: notice.visual,
+        autoCloseMs: ['approved', 'resolved'].includes(normalizedRow?.approval?.status) ? 2400 : 2200,
+      });
+    } catch (error) {
+      const errorMessage = isCustomerProcessLockError(error)
+        ? buildCustomerProcessLockNotice(error, modalState.customerName)
+        : String(formatBackendValidationError(error) || error?.message || 'Approval manual gagal diproses.').trim();
+      openNotice(title, errorMessage);
+      setManualApprovalModal((prev) => ({ ...prev, isSubmitting: false }));
+    }
+  };
   const showOutstandingCustomerReceivableNotice = (summary, options = {}) => {
     if (!summary?.hasOutstanding) {
       customerReceivableNoticeKeyRef.current = '';
@@ -5325,10 +6041,19 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     if (!backendReady) {
       return [];
     }
-    const rows = await fetchPosReceivableApprovals({
-      status: options?.status || 'all',
-    });
-    return toDataRows(rows).map(normalizeReceivableApprovalRow);
+    const [receivableRows, manualRows] = await Promise.all([
+      fetchPosReceivableApprovals({
+        status: options?.status || 'all',
+      }).catch(() => []),
+      fetchPosManualApprovals({
+        status: options?.status || 'all',
+      }).catch(() => []),
+    ]);
+
+    return [
+      ...toDataRows(receivableRows),
+      ...toDataRows(manualRows),
+    ].map(normalizeReceivableApprovalRow);
   };
   const syncReceivableApprovalSnapshot = (rows = []) => {
     const nextSnapshot = new Map();
@@ -5356,7 +6081,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         return;
       }
 
-      if (['approved', 'rejected'].includes(currentStatus)) {
+      if (['approved', 'rejected', 'resolved'].includes(currentStatus)) {
         updates.push(buildReceivableApprovalUpdateNotice(row));
       }
     });
@@ -6304,6 +7029,8 @@ const SalesScreen = ({ currentUser, onLogout }) => {
 
     const stillQueued = [];
     let successCount = 0;
+    let blockedCount = 0;
+    let blockedMessage = '';
 
     for (const queued of queue) {
       try {
@@ -6319,14 +7046,19 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         successCount += 1;
       } catch (error) {
         stillQueued.push(queued);
+        if (isCustomerProcessLockError(error)) {
+          blockedCount += 1;
+          blockedMessage = buildCustomerProcessLockNotice(error, String(queued?.payload?.customer_name || '').trim());
+        }
       }
     }
 
     setOrderQueue(stillQueued);
     setQueueCount(stillQueued.length);
 
+    const syncSummaries = [];
     if (successCount > 0) {
-      setLastSyncInfo(`Sinkronisasi offline berhasil: ${successCount} order.`);
+      syncSummaries.push(`Sinkronisasi offline berhasil: ${successCount} order.`);
       setAuditLogs(
         appendOrderAuditLog({
           result: 'flush_queue_success',
@@ -6334,6 +7066,20 @@ const SalesScreen = ({ currentUser, onLogout }) => {
           queue_count: stillQueued.length,
         }),
       );
+    }
+    if (blockedCount > 0) {
+      syncSummaries.push(`Sinkronisasi tertahan: ${blockedCount} order masih terkunci draft/approval aktif.`);
+      setAuditLogs(
+        appendOrderAuditLog({
+          result: 'flush_queue_blocked',
+          blocked_count: blockedCount,
+          queue_count: stillQueued.length,
+          error: blockedMessage || 'Order offline tertahan karena customer masih punya draft/approval aktif.',
+        }),
+      );
+    }
+    if (syncSummaries.length > 0) {
+      setLastSyncInfo(syncSummaries.join(' | '));
     }
     return { successCount, remaining: stillQueued.length };
   };
@@ -7788,7 +8534,8 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       const approvalListRows = approvalRows.filter((row) => {
         const approvalStatus = normalizeReceivableApprovalStatus(row?.approval?.status || row?.status);
         const orderId = Number(row?.approval?.orderId || row?.order?.id || 0) || 0;
-        return !(approvalStatus === 'approved' && orderId > 0);
+        const approvalType = normalizeApprovalType(row?.approval?.type || row?.approval_type);
+        return !(approvalType === 'receivable' && approvalStatus === 'approved' && orderId > 0);
       });
       setDraftInvoices([...queueRows, ...approvalListRows, ...rows]);
     } catch (error) {
@@ -7802,7 +8549,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
   };
 
   useEffect(() => {
-    if (activeMenu === 'draft') {
+    if (isInvoiceAreaMenu(activeMenu)) {
       loadDraftInvoices();
     }
   }, [activeMenu, backendReady]);
@@ -7833,9 +8580,9 @@ const SalesScreen = ({ currentUser, onLogout }) => {
           [
             { label: 'Tutup', role: 'secondary' },
             {
-              label: 'Buka Invoice',
+              label: 'Buka Butuh Approval',
               onPress: () => {
-                setActiveMenu('draft');
+                openInvoiceAreaMenu('approval_queue');
                 loadDraftInvoices({ approvalRows: rows }).catch(() => {});
               },
             },
@@ -8074,15 +8821,36 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         autoCloseMs: 1400,
       });
     } catch (error) {
-      openNotice('Produksi', `Gagal update status item #${itemId}: ${error.message}`);
+      const noticeMessage = isCustomerProcessLockError(error)
+        ? buildCustomerProcessLockNotice(error, String(row?.order?.customer?.name || '').trim())
+        : String(formatBackendValidationError(error) || error?.message || 'Gagal update status produksi.').trim();
+      openNotice('Produksi', `Gagal update status item #${itemId}: ${noticeMessage}`);
     } finally {
       setUpdatingProductionItemId(null);
     }
   };
 
+  const consumeQueuedDraftByQueueId = (queueId) => {
+    const normalizedQueueId = String(queueId || '').trim();
+    if (!normalizedQueueId) {
+      return;
+    }
+
+    const nextQueue = loadOrderQueue().filter((queued) => String(queued?.id || '') !== normalizedQueueId);
+    setOrderQueue(nextQueue);
+    setQueueCount(nextQueue.length);
+    setDraftInvoices((prev) => (Array.isArray(prev) ? prev : []).filter((draft) => (
+      String(draft?.__queue_id || '') !== normalizedQueueId
+    )));
+    setCurrentQueuedDraftQueueId((prev) => (
+      String(prev || '').trim() === normalizedQueueId ? null : prev
+    ));
+  };
+
   const handleContinueDraft = async (row) => {
     if (row?.__source === 'queue') {
       const payload = row?.__queue_payload || {};
+      const queueId = String(row?.__queue_id || '').trim();
       const queueItems = Array.isArray(payload?.items) ? payload.items : [];
       if (queueItems.length === 0) {
         openNotice('Invoice', 'Draft dari antrian tidak memiliki item.');
@@ -8101,6 +8869,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
 
       setCartItems(cartFromQueue);
       setCurrentDraftSourceId(null);
+      setCurrentQueuedDraftQueueId(queueId || null);
       setOrderNumber('');
       setSelectedCustomerId(Number(payload?.customer_id || 0) || null);
       setProductName('');
@@ -8139,6 +8908,10 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       let order = row;
       const detailPayload = await fetchPosOrderDetail(selectedId);
       order = normalizeOrderDetailRow(detailPayload, row) || row;
+      if (!canUserViewInvoiceRow(order, currentUser)) {
+        openNotice('Invoice', 'Invoice tidak tersedia untuk user kasir ini atau sudah tidak bisa diakses.');
+        return;
+      }
       if (!isDraftCandidate(order)) {
         openNotice('Invoice', 'Order ini bukan kandidat draft yang bisa dilanjutkan.');
         return;
@@ -8191,6 +8964,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
 
       setCartItems(cartFromDraft);
       setCurrentDraftSourceId(selectedId);
+      setCurrentQueuedDraftQueueId(null);
       setOrderNumber('');
       setSelectedCustomerId(Number(order?.customer?.id || order?.customer_id || 0) || null);
       setProductName('');
@@ -8245,10 +9019,8 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     try {
       if (isQueueRow) {
         const queueId = String(row?.__queue_id || rowId.replace(/^queue-/, ''));
-        const nextQueue = loadOrderQueue().filter((queued) => String(queued?.id || '') !== queueId);
-        setOrderQueue(nextQueue);
-        setQueueCount(nextQueue.length);
-        setDraftInvoices((prev) => prev.filter((draft) => String(draft?.id || '') !== rowId));
+        consumeQueuedDraftByQueueId(queueId);
+        setDraftInvoices((prev) => (Array.isArray(prev) ? prev : []).filter((draft) => String(draft?.id || '') !== rowId));
         await loadDraftInvoices();
         openNotice('Invoice', 'Draft dari antrian berhasil dihapus.');
         return;
@@ -8751,6 +9523,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
   const resetTransaction = () => {
     setOrderNumber('');
     setCurrentDraftSourceId(null);
+    setCurrentQueuedDraftQueueId(null);
     setSelectedCustomerId(null);
     setTransactionDate(formatDate(new Date()));
     setProductName('');
@@ -9735,6 +10508,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
 
       payload = {
         customer_id: customerId,
+        ...(Number(currentDraftSourceId || 0) > 0 ? { source_order_id: Number(currentDraftSourceId || 0) } : {}),
         ...(mode === 'draft' ? { status: 'draft' } : {}),
         due_at: null,
         discount_type: discountMode === 'percent' ? 'percent' : 'amount',
@@ -9777,11 +10551,15 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       setLastPayloadPreview(payload);
 
       const created = await createPosOrder(payload);
-      if (String(created?.status || '').toLowerCase() === 'pending_approval') {
+      const createdStatus = String(created?.status || '').toLowerCase();
+      if (['pending_approval', 'pending_limit_approval'].includes(createdStatus)) {
         const approvalRequestId = Number(created?.approval_request_id || 0) || null;
+        const isLimitApproval = createdStatus === 'pending_limit_approval';
         const pendingApprovalMessage = String(
           created?.message
-          || 'Customer masih punya piutang. Transaksi dikirim ke owner/admin untuk approval.'
+          || (isLimitApproval
+            ? 'Customer belum memiliki plafon piutang yang disetujui atau plafon aktif tidak mencukupi.'
+            : 'Customer masih punya piutang. Transaksi dikirim ke owner/admin untuk approval.')
         ).trim();
         const currentReceivableSummary = (
           selectedCustomerReceivableSummary
@@ -9790,12 +10568,15 @@ const SalesScreen = ({ currentUser, onLogout }) => {
           ? selectedCustomerReceivableSummary
           : null;
         if (backendReady) {
+          if (Number(customerId || 0) > 0) {
+            await loadCustomerReceivableSummary(Number(customerId || 0), { showNotice: false }).catch(() => {});
+          }
           await loadDraftInvoices().catch(() => {});
         }
 
         setAuditLogs(
           appendOrderAuditLog({
-            result: 'pending_approval',
+            result: isLimitApproval ? 'pending_limit_approval' : 'pending_approval',
             total: grandTotal,
             queue_count: loadOrderQueue().length,
             approval_request_id: approvalRequestId,
@@ -9809,7 +10590,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         );
 
         openNoticeActions(
-          'Menunggu Approval Piutang',
+          isLimitApproval ? 'Menunggu Approval Plafon Piutang' : 'Menunggu Approval Piutang',
           [
             currentReceivableSummary?.customerName
               ? `Pelanggan: ${currentReceivableSummary.customerName}${currentReceivableSummary.customerPhone ? ` | ${currentReceivableSummary.customerPhone}` : ''}`
@@ -9817,20 +10598,34 @@ const SalesScreen = ({ currentUser, onLogout }) => {
             currentReceivableSummary?.dueTotal > 0
               ? `Piutang aktif: ${formatRupiah(currentReceivableSummary.dueTotal)}`
               : null,
+            isLimitApproval && Number(created?.approved_limit_amount || 0) > 0
+              ? `Plafon aktif: ${formatRupiah(created?.approved_limit_amount || 0)}`
+              : null,
+            isLimitApproval && Number(created?.remaining_limit_amount || 0) >= 0 && Number(created?.approved_limit_amount || 0) > 0
+              ? `Sisa plafon saat ini: ${formatRupiah(created?.remaining_limit_amount || 0)}`
+              : null,
+            isLimitApproval && Number(created?.requested_limit_amount || 0) > 0
+              ? `Plafon diminta: ${formatRupiah(created?.requested_limit_amount || 0)}`
+              : null,
+            isLimitApproval && Number(created?.projected_outstanding_total || 0) > 0
+              ? `Total piutang berjalan setelah order: ${formatRupiah(created?.projected_outstanding_total || 0)}`
+              : null,
             currentReceivableSummary?.primaryInvoiceNo
               ? `Invoice terkait: ${currentReceivableSummary.primaryInvoiceNo}`
               : null,
             approvalRequestId ? `No. request approval: ${buildReceivableApprovalRequestLabel(approvalRequestId)}` : null,
             'Status approval: Menunggu Approval',
             pendingApprovalMessage,
-            'Order belum menjadi invoice final dan nota belum bisa dicetak sebelum approval disetujui.',
+            isLimitApproval
+              ? 'Order piutang belum dibuat. Approver bisa menyesuaikan nominal plafon saat menyetujui request ini.'
+              : 'Order belum menjadi invoice final dan nota belum bisa dicetak sebelum approval disetujui.',
           ].filter(Boolean).join('\n'),
           [
             { label: 'Tutup', role: 'secondary' },
             {
-              label: 'Buka Invoice',
+              label: 'Buka Butuh Approval',
               onPress: () => {
-                setActiveMenu('draft');
+                openInvoiceAreaMenu('approval_queue');
                 loadDraftInvoices().catch(() => {});
               },
             },
@@ -9844,6 +10639,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         return {
           ok: false,
           pendingApproval: true,
+          pendingLimitApproval: isLimitApproval,
           approvalRequestId,
           message: pendingApprovalMessage,
         };
@@ -9888,12 +10684,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       });
       let draftStatusWarning = '';
       if (!isDraftMode && backendOrderId && Number(currentDraftSourceId || 0) > 0) {
-        try {
-          await deletePosOrder(Number(currentDraftSourceId || 0));
-          setDraftInvoices((prev) => prev.filter((draft) => Number(draft?.id || 0) !== Number(currentDraftSourceId || 0)));
-        } catch (cleanupError) {
-          draftStatusWarning = `\nCatatan: draft sumber belum berhasil dihapus otomatis (${cleanupError.message}).`;
-        }
+        setDraftInvoices((prev) => prev.filter((draft) => Number(draft?.id || 0) !== Number(currentDraftSourceId || 0)));
       }
       if (mode === 'draft' && backendOrderId) {
         try {
@@ -9906,6 +10697,9 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         } catch (statusError) {
           draftStatusWarning = `\nCatatan: status draft belum terkonfirmasi otomatis (${statusError.message}).`;
         }
+      }
+      if (currentQueuedDraftQueueId) {
+        consumeQueuedDraftByQueueId(currentQueuedDraftQueueId);
       }
 
       setLastSyncInfo(`Order #${backendOrderId} | Invoice ${invoiceNo}`);
@@ -9964,6 +10758,26 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       const shouldQueue = status === 0 || status >= 500 || /network|fetch|timeout|Failed to fetch/i.test(String(error?.message || ''));
 
       if (shouldQueue) {
+        if (mode === 'draft') {
+          setAuditLogs(
+            appendOrderAuditLog({
+              result: 'failed_draft_backend_unreachable',
+              total: grandTotal,
+              queue_count: loadOrderQueue().length,
+              error: String(error?.message || 'Gagal menyimpan draft ke backend'),
+            }),
+          );
+          openNotice(
+            'Draft Butuh Backend Online',
+            'Draft Order wajib tersimpan ke backend supaya bisa ditracking. Cek koneksi/backend lalu simpan draft lagi.',
+          );
+          return {
+            ok: false,
+            queuedOffline: false,
+            backendOrderId: null,
+            invoiceNo: '-',
+          };
+        }
         if (mode === 'process' && usingCustomerDeposit) {
           openNotice(
             'Saldo Pelanggan Butuh Online',
@@ -10016,6 +10830,9 @@ const SalesScreen = ({ currentUser, onLogout }) => {
           },
         };
         enqueueOrderPayload(queuedPayload);
+        if (currentQueuedDraftQueueId && mode === 'process') {
+          consumeQueuedDraftByQueueId(currentQueuedDraftQueueId);
+        }
         const count = loadOrderQueue().length;
         setQueueCount(count);
         setLastPayloadPreview(queuedPayload);
@@ -10061,6 +10878,36 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       }
       const validationMessage = String(formatBackendValidationError(error) || '').trim();
       const lowerValidationMessage = validationMessage.toLowerCase();
+      if (isCustomerProcessLockError(error)) {
+        openNotice(
+          'Proses Customer Terkunci',
+          buildCustomerProcessLockNotice(error, String(selectedCustomer?.name || '').trim()),
+        );
+        return null;
+      }
+      if (isReceivableLimitApplicationRequiredError(error)) {
+        openNoticeActions(
+          'Form Plafon Piutang Wajib Dilengkapi',
+          buildReceivableLimitApplicationRequiredNotice(
+            error,
+            selectedCustomerReceivableSummary,
+            String(selectedCustomer?.name || '').trim(),
+            String(selectedCustomer?.phone || '').trim(),
+          ),
+          [
+            { label: 'Tutup', role: 'secondary' },
+            {
+              label: 'Isi Form Plafon',
+              onPress: () => {
+                openCreateCustomerReceivableLimitModal();
+              },
+            },
+          ],
+          null,
+          { showDefaultAction: false },
+        );
+        return null;
+      }
       const isNegotiationValidation = lowerValidationMessage.includes('negosiasi')
         || lowerValidationMessage.includes('harga bottom')
         || lowerValidationMessage.includes('minimum_qty')
@@ -10351,6 +11198,10 @@ const SalesScreen = ({ currentUser, onLogout }) => {
   };
 
   const handleOpenReceivablePaymentModal = async (row) => {
+    if (!canUserAccessInvoiceRow(row, currentUser)) {
+      openNotice('Piutang Pelanggan', 'Invoice tidak tersedia untuk user kasir ini atau sudah tidak bisa diakses.');
+      return;
+    }
     const invoiceId = Number(row?.invoice?.id || 0);
     const dueTotal = roundMoney(Number(row?.invoice?.due_total || 0));
     const customerId = Number(
@@ -10571,7 +11422,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
   const handleSaveTransaction = async () => {
     const result = await submitTransaction('draft');
     if (result?.ok) {
-      setActiveMenu('draft');
+      openInvoiceAreaMenu('draft_orders');
       await loadDraftInvoices();
     }
   };
@@ -10811,8 +11662,96 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     setIsProfileMenuOpen(false);
     onLogout?.();
   };
+  const visibleInvoiceRows = useMemo(
+    () => filterInvoiceRowsForUser(draftInvoices, currentUser),
+    [currentUser, draftInvoices],
+  );
+  const activeManualApprovalLinks = useMemo(() => {
+    const orderIds = new Set();
+    const invoiceIds = new Set();
+
+    (Array.isArray(receivableApprovalRows) ? receivableApprovalRows : []).forEach((row) => {
+      const approvalType = normalizeApprovalType(row?.approval?.type || row?.approval_type);
+      const approvalStatus = normalizeReceivableApprovalStatus(row?.approval?.status || row?.status);
+      if (approvalType === 'receivable' || !['pending', 'approved', 'rejected'].includes(approvalStatus)) {
+        return;
+      }
+
+      const orderId = Number(row?.approval?.orderId || row?.order?.id || 0) || 0;
+      const invoiceId = Number(row?.approval?.invoiceId || row?.invoice?.id || 0) || 0;
+
+      if (orderId > 0) {
+        orderIds.add(orderId);
+      }
+      if (invoiceId > 0) {
+        invoiceIds.add(invoiceId);
+      }
+    });
+
+    return { orderIds, invoiceIds };
+  }, [receivableApprovalRows]);
+  const invoiceAreaSummary = useMemo(() => {
+    const rows = Array.isArray(visibleInvoiceRows) ? visibleInvoiceRows : [];
+    const totals = rows.reduce((acc, row) => {
+      if (isDraftInvoiceRow(row)) {
+        acc.draftCount += 1;
+      }
+      if (isInvoiceSuccessRow(row)) {
+        acc.successCount += 1;
+      }
+      if (isReceivableApprovalInvoiceRow(row)) {
+        acc.approvalCount += 1;
+      }
+      if (isReceivableInvoiceRow(row)) {
+        acc.receivableCount += 1;
+        acc.receivableDueTotal += Number(row?.invoice?.due_total || 0);
+      }
+      return acc;
+    }, {
+      draftCount: 0,
+      successCount: 0,
+      approvalCount: 0,
+      receivableCount: 0,
+      receivableDueTotal: 0,
+    });
+
+    return {
+      ...totals,
+      receivableDueTotal: roundMoney(totals.receivableDueTotal),
+    };
+  }, [visibleInvoiceRows]);
+  const invoiceSectionMeta = useMemo(() => {
+    if (invoiceFilter === 'draft') {
+      return {
+        title: 'Draft Order',
+        description: 'Order sementara untuk follow up customer, simulasi harga, dan revisi sebelum jadi invoice sukses.',
+      };
+    }
+    if (invoiceFilter === 'success') {
+      return {
+        title: 'Invoice Sukses',
+        description: 'Invoice resmi yang sudah difakturkan, termasuk yang belum lunas maupun yang sudah lunas.',
+      };
+    }
+    if (invoiceFilter === 'approval') {
+      return {
+        title: 'Butuh Approval',
+        description: 'Daftar invoice/nota yang masih membutuhkan approval atau masih terkunci sampai selesai ditangani.',
+      };
+    }
+    if (invoiceFilter === 'receivable') {
+      return {
+        title: 'Piutang',
+        description: 'Semua invoice sukses yang masih punya outstanding dan perlu dipantau sampai lunas.',
+      };
+    }
+    return {
+      title: 'Pusat Invoice',
+      description: 'Ringkasan Draft Order, Invoice Sukses, Butuh Approval, dan Piutang dalam satu area kerja kasir.',
+    };
+  }, [invoiceFilter]);
   const filteredInvoices = useMemo(() => {
-    const rows = Array.isArray(draftInvoices) ? draftInvoices : [];
+    const rows = Array.isArray(visibleInvoiceRows) ? visibleInvoiceRows : [];
     const keyword = normalizeText(invoiceSearch);
     const searchedRows = keyword
       ? rows.filter((row) => {
@@ -10820,21 +11759,40 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         const customerPhone = normalizeText(row?.customer?.phone || '');
         const invoiceNo = normalizeText(row?.invoice?.invoice_no || '');
         const orderId = normalizeText(row?.id || '');
+        const approvalLabel = normalizeText(row?.approval?.requestLabel || '');
+        const approvalType = normalizeText(row?.approval?.typeLabel || row?.approval?.type || '');
+        const approvalContext = normalizeText(row?.approval?.contextLabel || '');
+        const approvalNote = normalizeText(row?.approval?.decisionNote || '');
         return customerName.includes(keyword)
           || customerPhone.includes(keyword)
           || invoiceNo.includes(keyword)
-          || orderId.includes(keyword);
+          || orderId.includes(keyword)
+          || approvalLabel.includes(keyword)
+          || approvalType.includes(keyword)
+          || approvalContext.includes(keyword)
+          || approvalNote.includes(keyword);
       })
       : rows;
     if (invoiceFilter === 'draft') {
       return searchedRows.filter((row) => isDraftInvoiceRow(row));
     }
-    if (invoiceFilter === 'processing') {
-      return searchedRows.filter((row) => isProcessingInvoiceRow(row));
+    if (invoiceFilter === 'success') {
+      return searchedRows.filter((row) => isInvoiceSuccessRow(row));
+    }
+    if (invoiceFilter === 'approval') {
+      return searchedRows
+        .filter((row) => isReceivableApprovalInvoiceRow(row))
+        .filter((row) => {
+          if (approvalStatusFilter === 'all') {
+            return true;
+          }
+          const approvalStatus = normalizeReceivableApprovalStatus(row?.approval?.status || row?.status);
+          return approvalStatus === approvalStatusFilter;
+        });
     }
     if (invoiceFilter === 'receivable') {
       return searchedRows
-        .filter((row) => Number(row?.invoice?.due_total || 0) > 0)
+        .filter((row) => isReceivableInvoiceRow(row))
         .filter((row) => {
           if (receivableStatusFilter === 'payable') {
             return Boolean(row?.invoice?.can_pay);
@@ -10846,11 +11804,11 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         });
     }
     return searchedRows;
-  }, [draftInvoices, invoiceFilter, invoiceSearch, receivableStatusFilter]);
+  }, [approvalStatusFilter, invoiceFilter, invoiceSearch, receivableStatusFilter, visibleInvoiceRows]);
   const receivableInvoiceRows = useMemo(() => {
     const keyword = normalizeText(invoiceSearch);
-    return (Array.isArray(draftInvoices) ? draftInvoices : [])
-      .filter((row) => Number(row?.invoice?.due_total || 0) > 0)
+    return (Array.isArray(visibleInvoiceRows) ? visibleInvoiceRows : [])
+      .filter((row) => isReceivableInvoiceRow(row))
       .filter((row) => {
         if (!keyword) {
           return true;
@@ -10864,8 +11822,11 @@ const SalesScreen = ({ currentUser, onLogout }) => {
           || invoiceNo.includes(keyword)
           || orderId.includes(keyword);
       });
-  }, [draftInvoices, invoiceSearch]);
+  }, [invoiceSearch, visibleInvoiceRows]);
   const receivableCustomerSummary = useMemo(() => {
+    if (invoiceFilter !== 'receivable') {
+      return null;
+    }
     const keyword = normalizeText(invoiceSearch);
     if (!keyword) {
       return null;
@@ -10904,7 +11865,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       oldestInvoiceDate: String(oldestRow?.created_at || ''),
       oldestInvoiceAgeDays: diffDaysFromNow(oldestRow?.created_at),
     };
-  }, [invoiceSearch, receivableInvoiceRows]);
+  }, [invoiceFilter, invoiceSearch, receivableInvoiceRows]);
   const receivablePortfolioSummary = useMemo(() => {
     if (invoiceFilter !== 'receivable') {
       return null;
@@ -10938,6 +11899,47 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       totalBlocked: totals.totalBlocked,
     };
   }, [filteredInvoices, invoiceFilter]);
+  const approvalPortfolioSummary = useMemo(() => {
+    if (invoiceFilter !== 'approval') {
+      return null;
+    }
+    const rows = filteredInvoices.filter((row) => isReceivableApprovalInvoiceRow(row));
+    if (rows.length === 0) {
+      return null;
+    }
+    const summary = rows.reduce((acc, row) => {
+      const approval = row?.approval && typeof row.approval === 'object' ? row.approval : {};
+      const status = normalizeReceivableApprovalStatus(approval?.status || row?.status);
+      const type = normalizeApprovalType(approval?.type);
+      const contextKey = String(approval?.contextKey || '').trim();
+      acc.totalRequests += 1;
+      if (status === 'pending') acc.pending += 1;
+      if (status === 'approved') acc.approved += 1;
+      if (status === 'rejected') acc.rejected += 1;
+      if (status === 'resolved') acc.resolved += 1;
+      if (type === 'receivable_limit') {
+        acc.receivableLimit += 1;
+        if (contextKey === 'new_limit') acc.newLimit += 1;
+        if (contextKey === 'increase_limit') acc.increaseLimit += 1;
+        if (contextKey === 'adjust_limit' || contextKey === 'review_limit') acc.adjustLimit += 1;
+      } else {
+        acc.manualApproval += 1;
+      }
+      return acc;
+    }, {
+      totalRequests: 0,
+      pending: 0,
+      approved: 0,
+      rejected: 0,
+      resolved: 0,
+      receivableLimit: 0,
+      newLimit: 0,
+      increaseLimit: 0,
+      adjustLimit: 0,
+      manualApproval: 0,
+    });
+    return summary;
+  }, [filteredInvoices, invoiceFilter]);
   const closeInvoiceDetailModal = () => {
     setInvoiceDetailModal({
       visible: false,
@@ -10959,7 +11961,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
   };
   const handleViewInvoiceDetail = async (row) => {
     let sourceRow = row;
-    const selectedOrderId = Number(row?.id || 0);
+    const selectedOrderId = Number(row?.approval?.orderId || row?.order?.id || row?.id || 0);
     if (selectedOrderId > 0) {
       try {
         const detailPayload = await fetchPosOrderDetail(selectedOrderId);
@@ -10967,6 +11969,10 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       } catch (_error) {
         // fallback ke row list invoice
       }
+    }
+    if (!canUserViewInvoiceRow(sourceRow, currentUser)) {
+      openNotice('Detail Invoice', 'Invoice tidak tersedia untuk user kasir ini atau sudah tidak bisa diakses.');
+      return;
     }
 
     const orderId = String(sourceRow?.id || '-');
@@ -11158,6 +12164,10 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       } catch (_error) {
         // fallback pakai data list invoice bila detail order gagal diambil
       }
+    }
+    if (!canUserViewInvoiceRow(sourceRow, currentUser)) {
+      openNotice('Cetak Ulang', 'Invoice tidak tersedia untuk user kasir ini atau sudah tidak bisa diakses.');
+      return;
     }
     const items = Array.isArray(sourceRow?.items) ? sourceRow.items : [];
     let itemDetails = items.map((item) => {
@@ -11444,6 +12454,27 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     () => Array.isArray(closingReport?.sales?.status_breakdown) ? closingReport.sales.status_breakdown : [],
     [closingReport],
   );
+  const closingOmzetSummary = useMemo(() => {
+    const gross = roundMoney(Number(closingReport?.sales?.gross_total || 0));
+    const lunas = roundMoney(Number(
+      closingReport?.sales?.omzet_lunas_total
+      ?? closingReport?.sales?.paid_total_from_invoice
+      ?? 0
+    ));
+    const piutang = roundMoney(Number(
+      closingReport?.sales?.omzet_piutang_total
+      ?? closingReport?.sales?.outstanding_total
+      ?? Math.max(gross - lunas, 0)
+    ));
+
+    return {
+      gross,
+      lunas,
+      piutang,
+      invoiceLunasCount: Math.max(0, Number(closingReport?.sales?.invoice_lunas_count || 0) || 0),
+      invoicePiutangCount: Math.max(0, Number(closingReport?.sales?.invoice_piutang_count || 0) || 0),
+    };
+  }, [closingReport]);
   const closingDamageSummary = useMemo(() => {
     const rows = Array.isArray(closingDamageItems) ? closingDamageItems : [];
     return rows.reduce((acc, row) => {
@@ -11506,10 +12537,13 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       `Tanggal: ${reportDate}`,
       `Kasir: ${cashierName}`,
       '',
-      `Penjualan bruto: ${formatRupiah(closingReport?.sales?.gross_total || 0)}`,
+      `Omzet total invoice sukses: ${formatRupiah(closingOmzetSummary.gross)}`,
+      `Omset lunas: ${formatRupiah(closingOmzetSummary.lunas)}`,
+      `Omset piutang: ${formatRupiah(closingOmzetSummary.piutang)}`,
       `Pembayaran penjualan hari ini: ${formatRupiah(closingReport?.sales?.payment_received_total || 0)}`,
       `Pelunasan piutang hari ini: ${formatRupiah(closingReport?.receivable_collections?.total || 0)}`,
-      `Piutang / belum lunas: ${formatRupiah(closingReport?.sales?.outstanding_total || 0)}`,
+      `Invoice lunas: ${closingOmzetSummary.invoiceLunasCount}`,
+      `Invoice piutang: ${closingOmzetSummary.invoicePiutangCount}`,
       `Rata-rata transaksi: ${formatRupiah(closingReport?.sales?.average_ticket || 0)}`,
       '',
       `Tunai seharusnya di kasir: ${formatRupiah(closingCashInHandSummary.physicalCashExpected)}`,
@@ -11527,8 +12561,13 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     closingCashDifferenceValue,
     closingCashInHandSummary.physicalCashExpected,
     closingExpectedCashValue,
+    closingOmzetSummary.gross,
+    closingOmzetSummary.invoiceLunasCount,
+    closingOmzetSummary.invoicePiutangCount,
+    closingOmzetSummary.lunas,
     closingNonCashSummary.total,
     closingOpeningCashValue,
+    closingOmzetSummary.piutang,
     closingReport,
     closingReportDate,
     currentUser?.name,
@@ -11771,9 +12810,12 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     <div class="meta">Tanggal: ${escapeHtml(reportDate)}</div>
     <div class="meta">Kasir: ${escapeHtml(cashierName)}</div>
     <h2>Omzet</h2>
-    <div class="line"><span>Omzet Hari Ini</span><strong>${escapeHtml(formatRupiah(closingReport?.sales?.gross_total || 0))}</strong></div>
+    <div class="line"><span>Omzet Total Invoice</span><strong>${escapeHtml(formatRupiah(closingOmzetSummary.gross))}</strong></div>
+    <div class="line"><span>Omset Lunas</span><strong>${escapeHtml(formatRupiah(closingOmzetSummary.lunas))}</strong></div>
+    <div class="line"><span>Omset Piutang</span><strong>${escapeHtml(formatRupiah(closingOmzetSummary.piutang))}</strong></div>
     <div class="line"><span>Bayar Penjualan Hari Ini</span><strong>${escapeHtml(formatRupiah(closingReport?.sales?.payment_received_total || 0))}</strong></div>
-    <div class="line"><span>Piutang Hari Ini</span><strong>${escapeHtml(formatRupiah(closingReport?.sales?.outstanding_total || 0))}</strong></div>
+    <div class="line"><span>Invoice Lunas</span><strong>${escapeHtml(String(closingOmzetSummary.invoiceLunasCount || 0))}</strong></div>
+    <div class="line"><span>Invoice Piutang</span><strong>${escapeHtml(String(closingOmzetSummary.invoicePiutangCount || 0))}</strong></div>
 
     <h2>Pelunasan Piutang</h2>
     <div class="line"><span>Total Pelunasan</span><strong>${escapeHtml(formatRupiah(closingReport?.receivable_collections?.total || 0))}</strong></div>
@@ -11870,6 +12912,25 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     orderPreviewReceiptText = renderReceiptText(orderPreviewReceiptData, orderPreviewProfile);
   }
   const thermalPreviewWidth = orderPreviewProfile?.paperWidth === '58mm' ? 280 : 360;
+  const manualApprovalMode = String(manualApprovalModal.mode || 'create').trim().toLowerCase();
+  const manualApprovalTypeLabel = formatApprovalTypeLabel(manualApprovalModal.approvalType);
+  const manualApprovalStatusLabel = formatReceivableApprovalStatusLabel(manualApprovalModal.status);
+  const manualApprovalAmountValue = roundMoney(parseMoneyAmountInput(manualApprovalModal.approvalAmount));
+  const approvedLimitAmountValue = roundMoney(parseMoneyAmountInput(manualApprovalModal.approvedLimitAmount || manualApprovalModal.approvalAmount));
+  const manualApprovalTypeKey = normalizeApprovalType(manualApprovalModal.approvalType);
+  const manualApprovalCap = manualApprovalTypeKey === 'production_mistake'
+    ? 200000
+    : (manualApprovalTypeKey === 'management_burden' ? 500000 : 0);
+  const manualApprovalTitle = manualApprovalMode === 'create'
+    ? (manualApprovalTypeKey === 'receivable_limit' ? 'Ajukan Plafon Piutang Customer' : 'Buat Approval Manual')
+    : (manualApprovalMode === 'approve'
+      ? (manualApprovalTypeKey === 'receivable_limit' ? 'Setujui Plafon Piutang Customer' : 'Setujui Approval Manual')
+      : (manualApprovalMode === 'reject' ? 'Tolak Approval Manual' : 'Selesaikan Approval Manual'));
+  const manualApprovalSubmitLabel = manualApprovalMode === 'create'
+    ? (manualApprovalTypeKey === 'receivable_limit' ? 'Ajukan Plafon' : 'Simpan Approval')
+    : (manualApprovalMode === 'approve'
+      ? (manualApprovalTypeKey === 'receivable_limit' ? 'Setujui Plafon' : 'Setujui Approval')
+      : (manualApprovalMode === 'reject' ? 'Tolak Approval' : 'Tandai Selesai'));
 
   if (isPreparingApp) {
     return (
@@ -11973,10 +13034,28 @@ const SalesScreen = ({ currentUser, onLogout }) => {
               <Text style={styles.greenTabText}>Input Order</Text>
             </Pressable>
             <Pressable
-              style={[styles.greenTab, activeMenu === 'draft' ? styles.greenTabActive : null]}
-              onPress={() => setActiveMenu('draft')}
+              style={[styles.greenTab, activeMenu === 'draft_orders' ? styles.greenTabActive : null]}
+              onPress={() => openInvoiceAreaMenu('draft_orders')}
             >
-              <Text style={styles.greenTabText}>Invoice</Text>
+              <Text style={styles.greenTabText}>Draft Order</Text>
+            </Pressable>
+            <Pressable
+              style={[styles.greenTab, activeMenu === 'invoice_success' ? styles.greenTabActive : null]}
+              onPress={() => openInvoiceAreaMenu('invoice_success')}
+            >
+              <Text style={styles.greenTabText}>Invoice Sukses</Text>
+            </Pressable>
+            <Pressable
+              style={[styles.greenTab, activeMenu === 'approval_queue' ? styles.greenTabActive : null]}
+              onPress={() => openInvoiceAreaMenu('approval_queue')}
+            >
+              <Text style={styles.greenTabText}>Butuh Approval</Text>
+            </Pressable>
+            <Pressable
+              style={[styles.greenTab, activeMenu === 'receivable' ? styles.greenTabActive : null]}
+              onPress={() => openInvoiceAreaMenu('receivable')}
+            >
+              <Text style={styles.greenTabText}>Piutang</Text>
             </Pressable>
             <Pressable
               style={[styles.greenTab, activeMenu === 'production' ? styles.greenTabActive : null]}
@@ -12014,11 +13093,13 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                   customerDepositBalance={customerDepositBalance}
                   onPressDeposit={openDepositModal}
                   loadingDepositBalance={loadingDepositBalance}
+                  selectedCustomerReceivableSummary={selectedCustomerReceivableSummary}
+                  onPressReceivableLimit={openCreateCustomerReceivableLimitModal}
                 />
 
                 <View style={styles.tagihanPanel}>
                   <Text style={styles.tagihanText}>Tagihan : {formatRupiah(grandTotal)}</Text>
-                  {queueCount > 0 ? <Text style={styles.payloadFlag}>Antrian invoice disimpan offline: {queueCount}</Text> : null}
+                  {queueCount > 0 ? <Text style={styles.payloadFlag}>Antrian order offline tersisa: {queueCount}</Text> : null}
                   {lastSyncInfo ? <Text style={styles.payloadFlag}>{lastSyncInfo}</Text> : null}
                   {masterSyncStatus?.label ? (
                     masterSyncStatus.state === 'syncing' ? (
@@ -12189,143 +13270,46 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                 deferPaymentMethodSelection
               />
             </>
-          ) : activeMenu === 'draft' ? (
+          ) : isInvoiceAreaMenu(activeMenu) ? (
             <View style={styles.draftPanel}>
-              <View style={styles.draftHeaderRow}>
-                <Text style={styles.debugTitle}>Daftar Invoice</Text>
-                <View style={styles.headerActions}>
-                  <Pressable
-                    style={styles.refreshButton}
-                    onPress={async () => {
-                      await flushQueuedOrders();
-                      await loadDraftInvoices();
-                    }}
-                  >
-                    <Text style={styles.refreshButtonText}>Kirim Ulang Antrian</Text>
-                  </Pressable>
-                  <Pressable style={styles.refreshButton} onPress={loadDraftInvoices}>
-                    <Text style={styles.refreshButtonText}>{isDraftLoading ? 'Memuat...' : 'Refresh'}</Text>
-                  </Pressable>
-                </View>
-              </View>
-              <View style={styles.filterRow}>
-                <Pressable
-                  style={[styles.filterButton, invoiceFilter === 'all' ? styles.filterButtonActive : null]}
-                  onPress={() => setInvoiceFilter('all')}
-                >
-                  <Text style={[styles.filterButtonText, invoiceFilter === 'all' ? styles.filterButtonTextActive : null]}>Semua</Text>
-                </Pressable>
-                <Pressable
-                  style={[styles.filterButton, invoiceFilter === 'draft' ? styles.filterButtonActive : null]}
-                  onPress={() => setInvoiceFilter('draft')}
-                >
-                  <Text style={[styles.filterButtonText, invoiceFilter === 'draft' ? styles.filterButtonTextActive : null]}>Draft Invoice</Text>
-                </Pressable>
-                <Pressable
-                  style={[styles.filterButton, invoiceFilter === 'processing' ? styles.filterButtonActive : null]}
-                  onPress={() => setInvoiceFilter('processing')}
-                >
-                  <Text style={[styles.filterButtonText, invoiceFilter === 'processing' ? styles.filterButtonTextActive : null]}>Invoice Proses</Text>
-                </Pressable>
-                <Pressable
-                  style={[styles.filterButton, invoiceFilter === 'receivable' ? styles.filterButtonActive : null]}
-                  onPress={() => setInvoiceFilter('receivable')}
-                >
-                  <Text style={[styles.filterButtonText, invoiceFilter === 'receivable' ? styles.filterButtonTextActive : null]}>Piutang</Text>
-                </Pressable>
-              </View>
-              {invoiceFilter === 'receivable' ? (
-                <View style={styles.filterRow}>
-                  <Pressable
-                    style={[styles.filterButton, receivableStatusFilter === 'all' ? styles.filterButtonActive : null]}
-                    onPress={() => setReceivableStatusFilter('all')}
-                  >
-                    <Text style={[styles.filterButtonText, receivableStatusFilter === 'all' ? styles.filterButtonTextActive : null]}>
-                      Semua Piutang
-                    </Text>
-                  </Pressable>
-                  <Pressable
-                    style={[styles.filterButton, receivableStatusFilter === 'payable' ? styles.filterButtonActive : null]}
-                    onPress={() => setReceivableStatusFilter('payable')}
-                  >
-                    <Text style={[styles.filterButtonText, receivableStatusFilter === 'payable' ? styles.filterButtonTextActive : null]}>
-                      Bisa Dibayar
-                    </Text>
-                  </Pressable>
-                  <Pressable
-                    style={[styles.filterButton, receivableStatusFilter === 'blocked' ? styles.filterButtonActive : null]}
-                    onPress={() => setReceivableStatusFilter('blocked')}
-                  >
-                    <Text style={[styles.filterButtonText, receivableStatusFilter === 'blocked' ? styles.filterButtonTextActive : null]}>
-                      Belum Bisa Dibayar
-                    </Text>
-                  </Pressable>
-                </View>
-              ) : null}
-              <TextInput
-                value={invoiceSearch}
-                onChangeText={setInvoiceSearch}
-                placeholder="Cari nama customer / no HP / no invoice / order id..."
-                placeholderTextColor="#777777"
-                style={styles.invoiceSearchInput}
+              <InvoiceWorkspaceHeader
+                sectionMeta={invoiceSectionMeta}
+                onFlushQueue={async () => {
+                  await flushQueuedOrders();
+                  await loadDraftInvoices();
+                }}
+                onRefresh={loadDraftInvoices}
+                isLoading={isDraftLoading}
+                invoiceFilter={invoiceFilter}
+                onSelectAreaMenu={openInvoiceAreaMenu}
+                onSelectAreaFilter={openInvoiceAreaFilter}
+                invoiceAreaSummary={invoiceAreaSummary}
+                receivableStatusFilter={receivableStatusFilter}
+                onChangeReceivableStatusFilter={setReceivableStatusFilter}
+                approvalStatusFilter={approvalStatusFilter}
+                onChangeApprovalStatusFilter={setApprovalStatusFilter}
+                invoiceSearch={invoiceSearch}
+                onChangeInvoiceSearch={setInvoiceSearch}
               />
-              {receivableCustomerSummary ? (
-                <View style={styles.receivableSummaryCard}>
-                  <Text style={styles.receivableSummaryTitle}>Ringkasan Piutang Pelanggan</Text>
-                  <Text style={styles.receivableSummaryName}>
-                    {receivableCustomerSummary.customerName}
-                    {receivableCustomerSummary.customerPhone ? ` | ${receivableCustomerSummary.customerPhone}` : ''}
-                  </Text>
-                  {receivableCustomerSummary.customerCount > 1 ? (
-                    <Text style={styles.receivableSummaryWarning}>
-                      Hasil pencarian mencakup {receivableCustomerSummary.customerCount} pelanggan. Persempit nama / nomor HP agar tracking lebih spesifik.
-                    </Text>
-                  ) : null}
-                  <Text style={styles.receivableSummaryMeta}>
-                    Total invoice piutang: {receivableCustomerSummary.totalInvoice}
-                  </Text>
-                  <Text style={styles.receivableSummaryMeta}>
-                    Total nilai invoice: {formatRupiah(receivableCustomerSummary.totalAmount)}
-                  </Text>
-                  <Text style={styles.receivableSummaryMeta}>
-                    Invoice tertua: {receivableCustomerSummary.oldestInvoiceNo} | {formatDateText(receivableCustomerSummary.oldestInvoiceDate)}
-                  </Text>
-                  <Text style={styles.receivableSummaryMeta}>
-                    Umur piutang tertua: {receivableCustomerSummary.oldestInvoiceAgeDays} hari
-                  </Text>
-                  <Text style={styles.receivableSummaryAmount}>
-                    Total piutang: {formatRupiah(receivableCustomerSummary.totalDue)}
-                  </Text>
-                </View>
-              ) : null}
-              {receivablePortfolioSummary ? (
-                <View style={styles.receivableSummaryCard}>
-                  <Text style={styles.receivableSummaryTitle}>Portofolio Piutang Tampil</Text>
-                  <Text style={styles.receivableSummaryMeta}>
-                    Total invoice piutang: {receivablePortfolioSummary.totalInvoices}
-                  </Text>
-                  <Text style={styles.receivableSummaryMeta}>
-                    Bisa dibayar: {receivablePortfolioSummary.totalPayable} | Belum bisa dibayar: {receivablePortfolioSummary.totalBlocked}
-                  </Text>
-                  <Text style={styles.receivableSummaryMeta}>
-                    Total sudah dibayar: {formatRupiah(receivablePortfolioSummary.totalPaid)}
-                  </Text>
-                  <Text style={styles.receivableSummaryAmount}>
-                    Total outstanding: {formatRupiah(receivablePortfolioSummary.totalDue)}
-                  </Text>
-                </View>
-              ) : null}
-              {filteredInvoices.length === 0 ? (
-                <Text style={styles.debugText}>
-                  {isDraftLoading
+              <InvoiceWorkspaceContent
+                customerSummary={receivableCustomerSummary}
+                portfolioSummary={receivablePortfolioSummary}
+                approvalSummary={approvalPortfolioSummary}
+                hasRows={filteredInvoices.length > 0}
+                formatDateText={formatDateText}
+                emptyMessage={
+                  isDraftLoading
                     ? 'Memuat invoice...'
+                    : invoiceFilter === 'approval'
+                      ? 'Belum ada approval sesuai filter.'
+                    : invoiceFilter === 'success'
+                      ? 'Belum ada invoice sukses sesuai filter.'
                     : invoiceFilter === 'receivable'
                       ? 'Belum ada invoice piutang sesuai filter.'
-                      : 'Belum ada invoice sesuai filter.'}
-                </Text>
-              ) : (
-                <View style={styles.draftList}>
-                  {filteredInvoices.map((row, index) => {
+                      : 'Belum ada invoice sesuai filter.'
+                }
+              >
+                {filteredInvoices.map((row, index) => {
                     const isApprovalRow = isReceivableApprovalInvoiceRow(row);
                     const approvalInfo = isApprovalRow
                       ? (row?.approval && typeof row.approval === 'object' ? row.approval : null)
@@ -12351,6 +13335,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                       row?.invoice?.total
                       || row?.total
                       || row?.grand_total
+                      || approvalInfo?.amount
                       || row?.__queue_total
                       || calculateDraftItemsTotal(queuedItems)
                       || 0,
@@ -12360,192 +13345,116 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                     const isDraftRow = isDraftInvoiceRow(row);
                     const draftExpiry = isDraftRow ? getDraftExpiryMeta(row?.created_at, draftTimeTick) : null;
                     const invoiceStatus = normalizeInvoiceOrderStatus(row);
+                    const approvalStatus = normalizeReceivableApprovalStatus(approvalInfo?.status || row?.status);
+                    const approvalType = normalizeApprovalType(approvalInfo?.type);
                     const approvalStatusText = approvalInfo
-                      ? formatReceivableApprovalStatusLabel(approvalInfo?.status || 'approved')
+                      ? formatReceivableApprovalStatusLabel(approvalStatus || 'approved')
                       : '';
                     const productionStage = getCurrentProductionStageForInvoice(row);
+                    const paymentLifecycle = resolveInvoicePaymentLifecycle(row);
+                    const productionLifecycle = resolveInvoiceProductionLifecycle(row);
                     const productionLabel = isDraftRow ? 'Belum Masuk Produksi' : productionStage.label;
                     const productionColor = isDraftRow ? '#6b7280' : getProductionStatusTextColor(productionStage.key);
                     const snapshotState = isDraftRow ? resolveDraftSnapshotState(row) : null;
+                    const invoiceStatusLabel = formatDraftStatusLabel(invoiceStatus);
+                    const invoiceStatusColor = getInvoiceStatusTextColor(invoiceStatus);
                     const paymentMethodLabel = resolveOrderPaymentMethodLabel(row);
                     const paymentTargetLabel = resolveOrderPaymentTargetLabel(row, bankAccounts);
                     const paymentMethodType = normalizePaymentMethodType(paymentMethodLabel);
-                    return (
-                      <View key={String(row?.id || `row-${index}`)} style={styles.draftCard}>
-                        <View style={styles.draftInfo}>
-                          <Text style={styles.draftTitle}>#{displayId} | {invoiceNo}</Text>
-                          <Text style={styles.draftMeta}>{customerName}</Text>
-                          {snapshotState ? (
-                            <View
-                              style={[
-                                styles.draftSnapshotBadge,
-                                { backgroundColor: snapshotState.backgroundColor, borderColor: snapshotState.color },
-                              ]}
-                            >
-                              <Text style={[styles.draftSnapshotBadgeText, { color: snapshotState.color }]}>
-                                {snapshotState.label}
-                              </Text>
-                            </View>
-                          ) : null}
-                          <View style={styles.invoiceStatusRow}>
-                            <Text style={styles.draftMeta}>Status: </Text>
-                            <Text style={[styles.draftMeta, styles.invoiceStatusText, { color: getInvoiceStatusTextColor(invoiceStatus) }]}>
-                              {formatDraftStatusLabel(invoiceStatus)}
-                            </Text>
-                          </View>
-                          {approvalInfo ? (
-                            <View style={styles.invoiceStatusRow}>
-                              <Text style={styles.draftMeta}>Approval Piutang: </Text>
-                              <Text
-                                style={[
-                                  styles.draftMeta,
-                                  styles.invoiceStatusText,
-                                  {
-                                    color: getInvoiceStatusTextColor(
-                                      isApprovalRow
-                                        ? invoiceStatus
-                                        : 'approved',
-                                    ),
-                                  },
-                                ]}
-                              >
-                                {approvalStatusText}
-                              </Text>
-                            </View>
-                          ) : null}
-                          <View style={styles.productionCurrentRow}>
-                            <Text style={styles.draftMeta}>Produksi: </Text>
-                            <Text
-                              style={[
-                                styles.draftMeta,
-                                styles.productionCurrentText,
-                                { color: productionColor },
-                              ]}
-                            >
-                              {productionLabel}
-                              {!isDraftRow && productionStage.count > 0 ? ` (${productionStage.count} item)` : ''}
-                            </Text>
-                          </View>
-                          <View style={styles.invoicePaymentBadgeRow}>
-                            <View
-                              style={[
-                                styles.invoicePaymentBadge,
-                                paymentMethodType === 'cash'
-                                  ? styles.invoicePaymentBadgeCash
-                                  : isCustomerDepositPaymentMethod(paymentMethodLabel)
-                                    ? styles.invoicePaymentBadgeDeposit
-                                    : styles.invoicePaymentBadgeNonCash,
-                              ]}
-                            >
-                              <Text
-                                style={[
-                                  styles.invoicePaymentBadgeText,
-                                  paymentMethodType === 'cash'
-                                    ? styles.invoicePaymentBadgeTextCash
-                                    : isCustomerDepositPaymentMethod(paymentMethodLabel)
-                                      ? styles.invoicePaymentBadgeTextDeposit
-                                      : styles.invoicePaymentBadgeTextNonCash,
-                                ]}
-                              >
-                                {paymentMethodLabel}
-                              </Text>
-                            </View>
-                            {paymentTargetLabel ? (
-                              <View style={styles.invoicePaymentTargetBadge}>
-                                <Text style={styles.invoicePaymentTargetBadgeText}>{paymentTargetLabel}</Text>
-                              </View>
-                            ) : null}
-                          </View>
-                          <Text style={styles.draftMeta}>Item: {itemCount} | Total: {formatRupiah(total)}</Text>
-                          {approvalInfo?.outstandingTotal > 0 ? (
-                            <Text style={styles.receivableDueText}>
-                              Piutang sebelumnya: {formatRupiah(approvalInfo.outstandingTotal)}
-                              {approvalInfo?.approver?.name ? ` | Diproses oleh: ${approvalInfo.approver.name}` : ''}
-                            </Text>
-                          ) : null}
-                          {approvalInfo?.decisionNote ? (
-                            <Text style={styles.draftMeta}>Catatan approval: {approvalInfo.decisionNote}</Text>
-                          ) : null}
-                          {Number(row?.invoice?.due_total || 0) > 0 ? (
-                            <Text style={styles.receivableDueText}>
-                              Piutang: {formatRupiah(row?.invoice?.due_total || 0)} | Terbayar: {formatRupiah(row?.invoice?.paid_total || 0)}
-                            </Text>
-                          ) : null}
-                          <Text style={styles.draftMeta}>Tanggal: {String(row?.created_at || '-')}</Text>
-                          {isDraftRow ? (
-                            <Text
-                              style={[
-                                styles.draftExpiryMeta,
-                                draftExpiry?.isExpired ? styles.draftExpiryMetaExpired : null,
-                              ]}
-                            >
-                              {draftExpiry?.label || `Auto hapus ${DRAFT_AUTO_DELETE_HOURS} jam`}
-                            </Text>
-                          ) : null}
-                        </View>
-                        <View style={styles.draftActionColumn}>
-                          {isDraftRow ? (
-                            <>
-                              <Pressable
-                                style={[
-                                  styles.continueDraftButton,
-                                  isDeleting ? styles.draftActionDisabled : null,
-                                ]}
-                                disabled={isDeleting}
-                                onPress={() => handleContinueDraft(row)}
-                              >
-                                <Text style={styles.continueDraftButtonText}>Lanjutkan</Text>
-                              </Pressable>
-                              <Pressable
-                                style={[
-                                  styles.deleteDraftButton,
-                                  isDeleting ? styles.draftActionDisabled : null,
-                                ]}
-                                disabled={isDeleting}
-                                onPress={() => confirmDeleteDraft(row)}
-                              >
-                                {isDeleting ? (
-                                  <View style={styles.inlineLoadingButtonContent}>
-                                    <SyncLoadingAnimation size={20} />
-                                    <Text style={styles.deleteDraftButtonText}>Memproses...</Text>
-                                  </View>
-                                ) : (
-                                  <Text style={styles.deleteDraftButtonText}>Hapus</Text>
-                                )}
-                              </Pressable>
-                            </>
-                          ) : (
-                            <>
-                              <Pressable style={styles.continueDraftButton} onPress={() => handleViewInvoiceDetail(row)}>
-                                <Text style={styles.continueDraftButtonText}>Detail</Text>
-                              </Pressable>
-                              {!isApprovalRow && Number(row?.invoice?.due_total || 0) > 0 ? (
-                                <Pressable
-                                  style={[
-                                    styles.receivablePayButton,
-                                    !Boolean(row?.invoice?.can_pay) ? styles.draftActionDisabled : null,
-                                  ]}
-                                  disabled={!Boolean(row?.invoice?.can_pay)}
-                                  onPress={() => handleOpenReceivablePaymentModal(row)}
-                                >
-                                  <Text style={styles.receivablePayButtonText}>
-                                    {Boolean(row?.invoice?.can_pay) ? 'Bayar Piutang' : 'Belum Bisa Dibayar'}
-                                  </Text>
-                                </Pressable>
-                              ) : null}
-                              {!isApprovalRow ? (
-                                <Pressable style={styles.refreshButton} onPress={() => handleReprintInvoice(row)}>
-                                  <Text style={styles.refreshButtonText}>Cetak Ulang</Text>
-                                </Pressable>
-                              ) : null}
-                            </>
-                          )}
-                        </View>
-                      </View>
+                    const paymentBadgeVariant = paymentMethodType === 'cash'
+                      ? 'cash'
+                      : (isCustomerDepositPaymentMethod(paymentMethodLabel) ? 'deposit' : 'noncash');
+                    const isManualApprovalRow = isApprovalRow && approvalType !== 'receivable';
+                    const approvalLabelPrefix = approvalInfo?.typeLabel ? `Approval ${approvalInfo.typeLabel}: ` : 'Approval: ';
+                    const approvalStatusColor = getInvoiceStatusTextColor(
+                      isApprovalRow
+                        ? invoiceStatus
+                        : 'approved',
                     );
-                  })}
-                </View>
-              )}
+                    const orderId = Number(row?.id || row?.order?.id || 0) || 0;
+                    const invoiceId = Number(row?.invoice?.id || row?.approval?.invoiceId || 0) || 0;
+                    const dueTotal = Number(row?.invoice?.due_total || 0) || 0;
+                    const paidTotal = Number(row?.invoice?.paid_total || 0) || 0;
+                    const canPayReceivable = Boolean(row?.invoice?.can_pay);
+                    const isPaidInvoice = paymentLifecycle.key === 'paid';
+                    const hasApprovedReceivableApproval = Boolean(
+                      approvalInfo
+                      && approvalType === 'receivable'
+                      && approvalStatus === 'approved'
+                    );
+                    const hasActiveLinkedManualApproval = !isApprovalRow && (
+                      (orderId > 0 && activeManualApprovalLinks.orderIds.has(orderId))
+                      || (invoiceId > 0 && activeManualApprovalLinks.invoiceIds.has(invoiceId))
+                    );
+                    const canCreateManualApproval = !isDraftRow
+                      && !isApprovalRow
+                      && !isPaidInvoice
+                      && !hasApprovedReceivableApproval
+                      && !hasActiveLinkedManualApproval
+                      && canUserAccessInvoiceRow(row, currentUser)
+                      && (
+                        orderId > 0
+                        || invoiceId > 0
+                      );
+                    const canApproveManualApprovalRow = isManualApprovalRow
+                      && approvalStatus === 'pending'
+                      && canApproveManualApprovalUser;
+                    const canResolveManualApprovalRow = isManualApprovalRow
+                      && Boolean(approvalInfo?.canResolve)
+                      && (
+                        approvalStatus !== 'pending'
+                        || Number(approvalInfo?.requester?.id || 0) === currentUserId
+                        || canApproveManualApprovalUser
+                      );
+                    return (
+                      <InvoiceWorkspaceRowCard
+                        key={String(row?.id || `row-${index}`)}
+                        styles={styles}
+                        displayId={displayId}
+                        invoiceNo={invoiceNo}
+                        customerName={customerName}
+                        snapshotState={snapshotState}
+                        invoiceStatusLabel={invoiceStatusLabel}
+                        invoiceStatusColor={invoiceStatusColor}
+                        isDraftRow={isDraftRow}
+                        paymentLifecycle={paymentLifecycle}
+                        approvalInfo={approvalInfo}
+                        approvalLabelPrefix={approvalLabelPrefix}
+                        approvalStatusText={approvalStatusText}
+                        approvalStatusColor={approvalStatusColor}
+                        productionLifecycle={productionLifecycle}
+                        productionLabel={productionLabel}
+                        productionColor={productionColor}
+                        productionStageCount={Number(productionStage.count || 0) || 0}
+                        paymentMethodLabel={paymentMethodLabel}
+                        paymentTargetLabel={paymentTargetLabel}
+                        paymentBadgeVariant={paymentBadgeVariant}
+                        itemCount={itemCount}
+                        total={total}
+                        dueTotal={dueTotal}
+                        paidTotal={paidTotal}
+                        createdAtText={String(row?.created_at || '-')}
+                        draftExpiryLabel={draftExpiry?.label || 'Draft aktif tersimpan'}
+                        draftExpired={Boolean(draftExpiry?.isExpired)}
+                        isDeleting={isDeleting}
+                        isApprovalRow={isApprovalRow}
+                        canCreateManualApproval={canCreateManualApproval}
+                        canApproveManualApprovalRow={canApproveManualApprovalRow}
+                        canResolveManualApprovalRow={canResolveManualApprovalRow}
+                        canPayReceivable={canPayReceivable}
+                        onContinueDraft={() => handleContinueDraft(row)}
+                        onDeleteDraft={() => confirmDeleteDraft(row)}
+                        onViewDetail={() => handleViewInvoiceDetail(row)}
+                        onCreateManualApproval={() => openCreateManualApprovalModal(row)}
+                        onApproveManualApproval={() => openManualApprovalDecisionModal(row, 'approve')}
+                        onRejectManualApproval={() => openManualApprovalDecisionModal(row, 'reject')}
+                        onResolveManualApproval={() => openManualApprovalDecisionModal(row, 'resolve')}
+                        onOpenReceivablePayment={() => handleOpenReceivablePaymentModal(row)}
+                        onReprintInvoice={() => handleReprintInvoice(row)}
+                      />
+                  );
+                })}
+              </InvoiceWorkspaceContent>
             </View>
           ) : activeMenu === 'production' ? (
             <ProductionPanel
@@ -13010,8 +13919,16 @@ const SalesScreen = ({ currentUser, onLogout }) => {
 
                   <View style={styles.reportSummaryGrid}>
                     <View style={[styles.reportSummaryCard, styles.reportSummaryCardInfo]}>
-                      <Text style={styles.reportSummaryLabel}>Omzet Hari Ini</Text>
-                      <Text style={styles.reportSummaryValue}>{formatRupiah(closingReport?.sales?.gross_total || 0)}</Text>
+                      <Text style={styles.reportSummaryLabel}>Omzet Total Invoice</Text>
+                      <Text style={styles.reportSummaryValue}>{formatRupiah(closingOmzetSummary.gross)}</Text>
+                    </View>
+                    <View style={[styles.reportSummaryCard, styles.reportSummaryCardInfo]}>
+                      <Text style={styles.reportSummaryLabel}>Omset Lunas</Text>
+                      <Text style={styles.reportSummaryValue}>{formatRupiah(closingOmzetSummary.lunas)}</Text>
+                    </View>
+                    <View style={[styles.reportSummaryCard, styles.reportSummaryCardWarning]}>
+                      <Text style={styles.reportSummaryLabel}>Omset Piutang</Text>
+                      <Text style={styles.reportSummaryValue}>{formatRupiah(closingOmzetSummary.piutang)}</Text>
                     </View>
                     <View style={[styles.reportSummaryCard, styles.reportSummaryCardInfo]}>
                       <Text style={styles.reportSummaryLabel}>Pembayaran Penjualan Hari Ini</Text>
@@ -13020,10 +13937,6 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                     <View style={[styles.reportSummaryCard, styles.reportSummaryCardAccent]}>
                       <Text style={styles.reportSummaryLabel}>Pelunasan Piutang Hari Ini</Text>
                       <Text style={styles.reportSummaryValue}>{formatRupiah(closingReport?.receivable_collections?.total || 0)}</Text>
-                    </View>
-                    <View style={[styles.reportSummaryCard, styles.reportSummaryCardWarning]}>
-                      <Text style={styles.reportSummaryLabel}>Piutang / Outstanding</Text>
-                      <Text style={styles.reportSummaryValue}>{formatRupiah(closingReport?.sales?.outstanding_total || 0)}</Text>
                     </View>
                     <View style={[styles.reportSummaryCard, styles.reportSummaryCardCash]}>
                       <Text style={styles.reportSummaryLabel}>Kas Masuk Bersih</Text>
@@ -13165,6 +14078,14 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                     <View style={styles.reportLineRow}>
                       <Text style={styles.reportLineLabel}>Jumlah invoice</Text>
                       <Text style={styles.reportLineValue}>{closingReport?.sales?.invoice_count || 0}</Text>
+                    </View>
+                    <View style={styles.reportLineRow}>
+                      <Text style={styles.reportLineLabel}>Invoice lunas</Text>
+                      <Text style={styles.reportLineValue}>{closingOmzetSummary.invoiceLunasCount}</Text>
+                    </View>
+                    <View style={styles.reportLineRow}>
+                      <Text style={styles.reportLineLabel}>Invoice piutang</Text>
+                      <Text style={styles.reportLineValue}>{closingOmzetSummary.invoicePiutangCount}</Text>
                     </View>
                     <View style={styles.reportLineRow}>
                       <Text style={styles.reportLineLabel}>Rata-rata transaksi</Text>
@@ -14050,6 +14971,299 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       </Modal>
 
       <Modal
+        visible={manualApprovalModal.visible}
+        transparent
+        animationType="fade"
+        onRequestClose={closeManualApprovalModal}
+      >
+        <View style={styles.popupBackdrop}>
+          <View style={[styles.popupCard, styles.manualApprovalCard]}>
+            <Text style={styles.popupTitle}>{manualApprovalTitle}</Text>
+            <Text style={styles.popupMessage}>
+              Customer: {manualApprovalModal.customerName || 'Pelanggan umum'}
+              {manualApprovalModal.customerPhone ? ` | ${manualApprovalModal.customerPhone}` : ''}
+            </Text>
+            <Text style={styles.popupMessage}>
+              {manualApprovalMode === 'create'
+                ? (manualApprovalTypeKey === 'receivable_limit'
+                  ? 'Request: Pengajuan plafon customer'
+                  : `Invoice: ${manualApprovalModal.invoiceNo || '-'}`)
+                : `Request: ${manualApprovalModal.requestLabel || '-'}`}
+            </Text>
+
+            <View style={styles.manualApprovalSummaryCard}>
+              <Text style={styles.manualApprovalSummaryTitle}>Ringkasan Approval</Text>
+              {manualApprovalMode !== 'create' ? (
+                <>
+                  <Text style={styles.manualApprovalSummaryText}>
+                    {manualApprovalTypeKey === 'receivable_limit'
+                      ? `Request plafon: ${manualApprovalModal.requestLabel || '-'}`
+                      : `Invoice terkait: ${manualApprovalModal.invoiceNo || '-'}`}
+                  </Text>
+                  <Text style={styles.manualApprovalSummaryText}>Status saat ini: {manualApprovalStatusLabel}</Text>
+                </>
+              ) : null}
+              <Text style={styles.manualApprovalSummaryText}>Jenis: {manualApprovalTypeLabel}</Text>
+              {manualApprovalAmountValue > 0 ? (
+                <Text style={styles.manualApprovalSummaryText}>Nominal: {formatRupiah(manualApprovalAmountValue)}</Text>
+              ) : null}
+              {manualApprovalTypeKey === 'receivable_limit' && manualApprovalModal.applicantName ? (
+                <Text style={styles.manualApprovalSummaryText}>Pemohon: {manualApprovalModal.applicantName}</Text>
+              ) : null}
+              {manualApprovalTypeKey === 'receivable_limit' && manualApprovalModal.businessName ? (
+                <Text style={styles.manualApprovalSummaryText}>Usaha: {manualApprovalModal.businessName}</Text>
+              ) : null}
+              {manualApprovalTypeKey === 'receivable_limit' && manualApprovalModal.contactPhone ? (
+                <Text style={styles.manualApprovalSummaryText}>No. HP: {manualApprovalModal.contactPhone}</Text>
+              ) : null}
+              {manualApprovalTypeKey === 'receivable_limit' && manualApprovalModal.activeEmail ? (
+                <Text style={styles.manualApprovalSummaryText}>Email aktif: {manualApprovalModal.activeEmail}</Text>
+              ) : null}
+              {manualApprovalTypeKey === 'receivable_limit' && manualApprovalModal.address ? (
+                <Text style={styles.manualApprovalSummaryText}>Alamat: {manualApprovalModal.address}</Text>
+              ) : null}
+              {manualApprovalTypeKey === 'receivable_limit' && manualApprovalModal.nikKtp ? (
+                <Text style={styles.manualApprovalSummaryText}>NIK / KTP: {manualApprovalModal.nikKtp}</Text>
+              ) : null}
+              {manualApprovalTypeKey === 'receivable_limit' && manualApprovalModal.npwp ? (
+                <Text style={styles.manualApprovalSummaryText}>NPWP: {manualApprovalModal.npwp}</Text>
+              ) : null}
+              {manualApprovalTypeKey === 'receivable_limit' && manualApprovalModal.emergencyContactPhone ? (
+                <Text style={styles.manualApprovalSummaryText}>Kontak darurat: {manualApprovalModal.emergencyContactPhone}</Text>
+              ) : null}
+              {manualApprovalTypeKey === 'receivable_limit' && manualApprovalModal.currentApprovedLimitAmount > 0 ? (
+                <Text style={styles.manualApprovalSummaryText}>
+                  Plafon aktif saat ini: {formatRupiah(manualApprovalModal.currentApprovedLimitAmount)}
+                </Text>
+              ) : null}
+              {manualApprovalTypeKey === 'receivable_limit' && manualApprovalModal.currentRemainingLimitAmount >= 0 && manualApprovalModal.currentApprovedLimitAmount > 0 ? (
+                <Text style={styles.manualApprovalSummaryText}>
+                  Sisa plafon saat ini: {formatRupiah(manualApprovalModal.currentRemainingLimitAmount)}
+                </Text>
+              ) : null}
+            </View>
+
+            <View style={styles.pickupForm}>
+              {manualApprovalMode === 'create' ? (
+                <>
+                  {manualApprovalModal.context === 'customer_receivable_limit' || manualApprovalTypeKey === 'receivable_limit' ? null : (
+                    <>
+                      <Text style={styles.pickupLabel}>Jenis Approval</Text>
+                      <View style={styles.manualApprovalTypeRow}>
+                        {[
+                          { key: 'management_burden', label: 'Beban Management' },
+                          { key: 'production_mistake', label: 'Kesalahan Produksi / Karyawan' },
+                        ].map((option) => {
+                          const active = normalizeApprovalType(manualApprovalModal.approvalType) === option.key;
+                          return (
+                            <Pressable
+                              key={option.key}
+                              style={[
+                                styles.manualApprovalTypeButton,
+                                active ? styles.manualApprovalTypeButtonActive : null,
+                                manualApprovalModal.isSubmitting ? styles.draftActionDisabled : null,
+                              ]}
+                              disabled={manualApprovalModal.isSubmitting}
+                              onPress={() => setManualApprovalModal((prev) => ({ ...prev, approvalType: option.key }))}
+                            >
+                              <Text
+                                style={[
+                                  styles.manualApprovalTypeButtonText,
+                                  active ? styles.manualApprovalTypeButtonTextActive : null,
+                                ]}
+                              >
+                                {option.label}
+                              </Text>
+                            </Pressable>
+                          );
+                        })}
+                      </View>
+                    </>
+                  )}
+
+                  {manualApprovalTypeKey === 'receivable_limit' ? (
+                    <>
+                      <Text style={styles.pickupLabel}>Nama Customer</Text>
+                      <TextInput
+                        value={manualApprovalModal.applicantName}
+                        onChangeText={(value) => setManualApprovalModal((prev) => ({ ...prev, applicantName: String(value || '') }))}
+                        placeholder="Nama lengkap customer"
+                        placeholderTextColor="#777777"
+                        style={styles.pickupInput}
+                        editable={!manualApprovalModal.isSubmitting}
+                      />
+
+                      <Text style={styles.pickupLabel}>Alamat</Text>
+                      <TextInput
+                        value={manualApprovalModal.address}
+                        onChangeText={(value) => setManualApprovalModal((prev) => ({ ...prev, address: String(value || '') }))}
+                        placeholder="Alamat lengkap customer"
+                        placeholderTextColor="#777777"
+                        style={[styles.pickupInput, styles.pickupInputNote]}
+                        multiline
+                        editable={!manualApprovalModal.isSubmitting}
+                      />
+
+                      <Text style={styles.pickupLabel}>Nomor Handphone</Text>
+                      <TextInput
+                        value={manualApprovalModal.contactPhone}
+                        onChangeText={(value) => setManualApprovalModal((prev) => ({ ...prev, contactPhone: String(value || '') }))}
+                        placeholder="08xxxxxxxxxx"
+                        placeholderTextColor="#777777"
+                        keyboardType="phone-pad"
+                        style={styles.pickupInput}
+                        editable={!manualApprovalModal.isSubmitting}
+                      />
+
+                      <Text style={styles.pickupLabel}>Nama Usaha</Text>
+                      <TextInput
+                        value={manualApprovalModal.businessName}
+                        onChangeText={(value) => setManualApprovalModal((prev) => ({ ...prev, businessName: String(value || '') }))}
+                        placeholder="Nama usaha / toko / instansi"
+                        placeholderTextColor="#777777"
+                        style={styles.pickupInput}
+                        editable={!manualApprovalModal.isSubmitting}
+                      />
+
+                      <Text style={styles.pickupLabel}>NIK / KTP</Text>
+                      <TextInput
+                        value={manualApprovalModal.nikKtp}
+                        onChangeText={(value) => setManualApprovalModal((prev) => ({ ...prev, nikKtp: String(value || '') }))}
+                        placeholder="Nomor NIK / KTP"
+                        placeholderTextColor="#777777"
+                        style={styles.pickupInput}
+                        editable={!manualApprovalModal.isSubmitting}
+                      />
+
+                      <Text style={styles.pickupLabel}>NPWP</Text>
+                      <TextInput
+                        value={manualApprovalModal.npwp}
+                        onChangeText={(value) => setManualApprovalModal((prev) => ({ ...prev, npwp: String(value || '') }))}
+                        placeholder="Nomor NPWP"
+                        placeholderTextColor="#777777"
+                        style={styles.pickupInput}
+                        editable={!manualApprovalModal.isSubmitting}
+                      />
+
+                      <Text style={styles.pickupLabel}>Nomor Kontak Darurat</Text>
+                      <TextInput
+                        value={manualApprovalModal.emergencyContactPhone}
+                        onChangeText={(value) => setManualApprovalModal((prev) => ({ ...prev, emergencyContactPhone: String(value || '') }))}
+                        placeholder="Nomor keluarga / PIC darurat"
+                        placeholderTextColor="#777777"
+                        keyboardType="phone-pad"
+                        style={styles.pickupInput}
+                        editable={!manualApprovalModal.isSubmitting}
+                      />
+
+                      <Text style={styles.pickupLabel}>Email Aktif</Text>
+                      <TextInput
+                        value={manualApprovalModal.activeEmail}
+                        onChangeText={(value) => setManualApprovalModal((prev) => ({ ...prev, activeEmail: String(value || '') }))}
+                        placeholder="email@aktif.com"
+                        placeholderTextColor="#777777"
+                        keyboardType="email-address"
+                        autoCapitalize="none"
+                        style={styles.pickupInput}
+                        editable={!manualApprovalModal.isSubmitting}
+                      />
+                    </>
+                  ) : null}
+
+                  <Text style={styles.pickupLabel}>Nominal Approval</Text>
+                  <TextInput
+                    value={manualApprovalModal.approvalAmount}
+                    onChangeText={(value) => setManualApprovalModal((prev) => ({ ...prev, approvalAmount: normalizeMoneyAmountInput(value) }))}
+                    keyboardType="decimal-pad"
+                    placeholder="0"
+                    placeholderTextColor="#777777"
+                    style={styles.pickupInput}
+                    editable={!manualApprovalModal.isSubmitting}
+                  />
+                  <Text style={styles.manualApprovalHelperText}>
+                    {manualApprovalTypeKey === 'receivable_limit'
+                      ? 'Masukkan plafon piutang yang diajukan untuk customer ini. Owner/admin bisa menyesuaikan nominal saat menyetujui request.'
+                      : `Plafon ${manualApprovalTypeLabel}: ${formatRupiah(manualApprovalCap)}. Sesuaikan nominal approval dengan biaya/risiko yang perlu disetujui.`}
+                  </Text>
+                </>
+              ) : null}
+              {manualApprovalMode === 'approve' && manualApprovalTypeKey === 'receivable_limit' ? (
+                <>
+                  <Text style={styles.pickupLabel}>Nominal Plafon Disetujui</Text>
+                  <TextInput
+                    value={manualApprovalModal.approvedLimitAmount}
+                    onChangeText={(value) => setManualApprovalModal((prev) => ({ ...prev, approvedLimitAmount: normalizeMoneyAmountInput(value) }))}
+                    keyboardType="decimal-pad"
+                    placeholder="0"
+                    placeholderTextColor="#777777"
+                    style={styles.pickupInput}
+                    editable={!manualApprovalModal.isSubmitting}
+                  />
+                  {approvedLimitAmountValue > 0 ? (
+                    <Text style={styles.manualApprovalHelperText}>
+                      Plafon yang akan disimpan untuk customer: {formatRupiah(approvedLimitAmountValue)}.
+                    </Text>
+                  ) : null}
+                </>
+              ) : null}
+
+              <Text style={styles.pickupLabel}>
+                {manualApprovalMode === 'reject'
+                  ? 'Catatan Penolakan'
+                  : manualApprovalMode === 'approve'
+                    ? 'Catatan Persetujuan (Opsional)'
+                    : manualApprovalMode === 'resolve'
+                      ? 'Catatan Penyelesaian (Opsional)'
+                      : 'Catatan Approval (Opsional)'}
+              </Text>
+              <TextInput
+                value={manualApprovalModal.note}
+                onChangeText={(value) => setManualApprovalModal((prev) => ({ ...prev, note: String(value || '') }))}
+                placeholder={
+                  manualApprovalMode === 'reject'
+                    ? 'Alasan approval ditolak'
+                    : (manualApprovalMode === 'resolve'
+                      ? 'Ringkasan tindak lanjut atau hasil penanganan'
+                      : 'Catatan tambahan untuk approval ini')
+                }
+                placeholderTextColor="#777777"
+                style={[styles.pickupInput, styles.pickupInputNote]}
+                multiline
+                editable={!manualApprovalModal.isSubmitting}
+              />
+              {manualApprovalMode === 'reject' ? (
+                <Text style={styles.manualApprovalWarningText}>Catatan penolakan wajib diisi sebelum approval ditolak.</Text>
+              ) : null}
+            </View>
+
+            <View style={styles.popupActions}>
+              <Pressable
+                style={[styles.popupButton, styles.popupButtonSecondary]}
+                disabled={manualApprovalModal.isSubmitting}
+                onPress={closeManualApprovalModal}
+              >
+                <Text style={[styles.popupButtonText, styles.popupButtonTextSecondary]}>Batal</Text>
+              </Pressable>
+              <Pressable
+                style={[styles.popupButton, manualApprovalModal.isSubmitting ? styles.draftActionDisabled : null]}
+                disabled={manualApprovalModal.isSubmitting}
+                onPress={handleSubmitManualApproval}
+              >
+                {manualApprovalModal.isSubmitting ? (
+                  <View style={styles.inlineLoadingButtonContent}>
+                    <SyncLoadingAnimation size={20} />
+                    <Text style={styles.popupButtonText}>Memproses...</Text>
+                  </View>
+                ) : (
+                  <Text style={styles.popupButtonText}>{manualApprovalSubmitLabel}</Text>
+                )}
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      <Modal
         visible={invoiceDetailModal.visible}
         transparent
         animationType="fade"
@@ -14625,9 +15839,6 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     fontSize: 11,
   },
-  draftList: {
-    gap: 8,
-  },
   invoiceSearchInput: {
     borderWidth: 1,
     borderColor: '#bdbdbd',
@@ -14637,43 +15848,6 @@ const styles = StyleSheet.create({
     paddingHorizontal: 10,
     paddingVertical: 7,
     marginBottom: 8,
-  },
-  receivableSummaryCard: {
-    borderWidth: 1,
-    borderColor: '#c7d7ef',
-    backgroundColor: '#f7fbff',
-    padding: 10,
-    marginBottom: 10,
-  },
-  receivableSummaryTitle: {
-    fontSize: 11,
-    fontWeight: '800',
-    color: '#24426f',
-    textTransform: 'uppercase',
-  },
-  receivableSummaryName: {
-    marginTop: 6,
-    fontSize: 13,
-    fontWeight: '700',
-    color: '#1e2d45',
-  },
-  receivableSummaryMeta: {
-    marginTop: 3,
-    fontSize: 11,
-    color: '#5c6780',
-  },
-  receivableSummaryWarning: {
-    marginTop: 6,
-    fontSize: 10,
-    lineHeight: 15,
-    color: '#8a5d00',
-    fontWeight: '700',
-  },
-  receivableSummaryAmount: {
-    marginTop: 6,
-    fontSize: 18,
-    fontWeight: '800',
-    color: '#1d6a3c',
   },
   receivableDueText: {
     fontSize: 11,
@@ -15205,6 +16379,32 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     fontSize: 11,
   },
+  approvalCreateButton: {
+    borderWidth: 1,
+    borderColor: '#a16207',
+    backgroundColor: '#f5b928',
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    alignItems: 'center',
+  },
+  approvalCreateButtonText: {
+    color: '#4a3204',
+    fontWeight: '800',
+    fontSize: 11,
+  },
+  approvalResolveButton: {
+    borderWidth: 1,
+    borderColor: '#1d7a45',
+    backgroundColor: '#2d9d58',
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    alignItems: 'center',
+  },
+  approvalResolveButtonText: {
+    color: '#ffffff',
+    fontWeight: '800',
+    fontSize: 11,
+  },
   deleteDraftButton: {
     borderWidth: 1,
     borderColor: '#982222',
@@ -15306,6 +16506,10 @@ const styles = StyleSheet.create({
   },
   bankPickerCard: {
     maxWidth: 560,
+  },
+  manualApprovalCard: {
+    maxWidth: 620,
+    alignItems: 'stretch',
   },
   pickupCard: {
     maxWidth: 520,
@@ -15421,6 +16625,61 @@ const styles = StyleSheet.create({
   pickupForm: {
     marginTop: 8,
     gap: 6,
+  },
+  manualApprovalSummaryCard: {
+    marginTop: 8,
+    marginBottom: 2,
+    borderWidth: 1,
+    borderColor: '#d6dfef',
+    backgroundColor: '#f7faff',
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    gap: 3,
+  },
+  manualApprovalSummaryTitle: {
+    fontSize: 11,
+    fontWeight: '800',
+    color: '#244784',
+    textTransform: 'uppercase',
+  },
+  manualApprovalSummaryText: {
+    fontSize: 11,
+    color: '#31415f',
+  },
+  manualApprovalTypeRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 6,
+  },
+  manualApprovalTypeButton: {
+    borderWidth: 1,
+    borderColor: '#b9c1cf',
+    backgroundColor: '#f7f7f7',
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+  },
+  manualApprovalTypeButtonActive: {
+    borderColor: '#2250c9',
+    backgroundColor: '#2f64ef',
+  },
+  manualApprovalTypeButtonText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#263041',
+  },
+  manualApprovalTypeButtonTextActive: {
+    color: '#ffffff',
+  },
+  manualApprovalHelperText: {
+    fontSize: 10,
+    lineHeight: 15,
+    color: '#6a4a02',
+  },
+  manualApprovalWarningText: {
+    fontSize: 10,
+    lineHeight: 15,
+    color: '#b42318',
+    fontWeight: '700',
   },
   pickupLabel: {
     fontSize: 11,

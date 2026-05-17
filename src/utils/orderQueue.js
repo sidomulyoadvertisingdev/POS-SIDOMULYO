@@ -1,5 +1,4 @@
 const STORAGE_KEY = 'pos_order_queue_v1';
-const DRAFT_TTL_MS = 24 * 60 * 60 * 1000;
 
 let memoryQueue = [];
 
@@ -7,16 +6,7 @@ const canUseLocalStorage = () => {
   return typeof globalThis !== 'undefined' && typeof globalThis.localStorage !== 'undefined';
 };
 
-const filterExpiredQueue = (queue) => {
-  const now = Date.now();
-  return (Array.isArray(queue) ? queue : []).filter((item) => {
-    const createdAt = new Date(item?.created_at || 0).getTime();
-    if (!Number.isFinite(createdAt) || createdAt <= 0) {
-      return true;
-    }
-    return now - createdAt < DRAFT_TTL_MS;
-  });
-};
+const normalizeQueue = (queue) => (Array.isArray(queue) ? queue : []);
 
 export const loadOrderQueue = () => {
   if (canUseLocalStorage()) {
@@ -26,16 +16,12 @@ export const loadOrderQueue = () => {
         return [];
       }
       const parsed = JSON.parse(raw);
-      const cleaned = filterExpiredQueue(parsed);
-      if (cleaned.length !== (Array.isArray(parsed) ? parsed.length : 0)) {
-        persistQueue(cleaned);
-      }
-      return cleaned;
+      return normalizeQueue(parsed);
     } catch (error) {
       return [];
     }
   }
-  memoryQueue = filterExpiredQueue(memoryQueue);
+  memoryQueue = normalizeQueue(memoryQueue);
   return memoryQueue;
 };
 
@@ -74,5 +60,5 @@ export const shiftOrderQueue = () => {
 };
 
 export const setOrderQueue = (queue) => {
-  persistQueue(filterExpiredQueue(queue));
+  persistQueue(normalizeQueue(queue));
 };

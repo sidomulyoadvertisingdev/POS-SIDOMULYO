@@ -46,6 +46,8 @@ const TransactionHeader = ({
   customerDepositBalance = 0,
   onPressDeposit,
   loadingDepositBalance = false,
+  selectedCustomerReceivableSummary = null,
+  onPressReceivableLimit,
 }) => {
   const [isCustomerModalOpen, setIsCustomerModalOpen] = useState(false);
   const [customerSearch, setCustomerSearch] = useState('');
@@ -81,6 +83,20 @@ const TransactionHeader = ({
     () => (Array.isArray(customerTypes) ? customerTypes : []),
     [customerTypes],
   );
+  const receivableLimitSummary = selectedCustomerReceivableSummary?.receivableLimit
+    && typeof selectedCustomerReceivableSummary.receivableLimit === 'object'
+    ? selectedCustomerReceivableSummary.receivableLimit
+    : {};
+  const approvedReceivableLimitAmount = Number(receivableLimitSummary?.approvedAmount || 0) || 0;
+  const remainingReceivableLimitAmount = Number(receivableLimitSummary?.remainingAmount || 0) || 0;
+  const pendingReceivableLimitAmount = Number(receivableLimitSummary?.pendingAmount || 0) || 0;
+  const receivableLimitStatus = normalizeText(receivableLimitSummary?.status || '');
+  const lastReceivableLimitRequest = receivableLimitSummary?.lastRequest
+    && typeof receivableLimitSummary.lastRequest === 'object'
+    ? receivableLimitSummary.lastRequest
+    : null;
+  const receivableLimitRejected = normalizeText(lastReceivableLimitRequest?.status || '') === 'rejected';
+  const receivableLimitProfileCompleted = Boolean(receivableLimitSummary?.profileCompleted);
   const resolveCustomerTypeLabel = (customer) => {
     const directCandidates = [
       customer?.label,
@@ -211,22 +227,77 @@ const TransactionHeader = ({
                   Deposit
                 </Text>
               </Pressable>
+              <Pressable
+                style={[
+                  styles.receivableLimitButton,
+                  (!backendReady || !selectedCustomer) ? styles.depositButtonDisabled : null,
+                ]}
+                onPress={() => onPressReceivableLimit?.()}
+                disabled={!backendReady || !selectedCustomer}
+              >
+                <Text
+                  style={[
+                    styles.receivableLimitButtonText,
+                    (!backendReady || !selectedCustomer) ? styles.depositButtonTextDisabled : null,
+                  ]}
+                >
+                  Plafon
+                </Text>
+              </Pressable>
             </View>
 
             {selectedCustomer ? (
-              <View style={styles.depositMetaRow}>
-                <View style={styles.depositBadge}>
-                  {loadingDepositBalance ? (
-                    <AppLoadingAnimation size={20} fallbackColor="#1d6a3c" />
+              <View style={styles.depositMetaWrap}>
+                <View style={styles.depositMetaRow}>
+                  <View style={styles.depositBadge}>
+                    {loadingDepositBalance ? (
+                      <AppLoadingAnimation size={20} fallbackColor="#1d6a3c" />
+                    ) : (
+                      <Text style={styles.depositBadgeText}>
+                        Saldo Customer: Rp {Number(customerDepositBalance || 0).toLocaleString('id-ID')}
+                      </Text>
+                    )}
+                  </View>
+                </View>
+                <View style={[styles.depositBadge, styles.receivableLimitBadge]}>
+                  <Text style={styles.receivableLimitBadgeText}>
+                    {pendingReceivableLimitAmount > 0 || receivableLimitStatus === 'pending'
+                      ? `Plafon Piutang: Menunggu approval ${Number(pendingReceivableLimitAmount || 0).toLocaleString('id-ID')}`
+                      : approvedReceivableLimitAmount > 0
+                        ? `Plafon Piutang: Rp ${Number(approvedReceivableLimitAmount || 0).toLocaleString('id-ID')} | Sisa Rp ${Number(remainingReceivableLimitAmount || 0).toLocaleString('id-ID')}`
+                        : receivableLimitRejected
+                          ? 'Plafon Piutang: Pengajuan terakhir ditolak'
+                        : 'Plafon Piutang: Belum disetujui'}
+                  </Text>
+                  {selectedCustomerReceivableSummary?.hasOutstanding ? (
+                    <Text style={styles.receivableLimitHintText}>
+                      Piutang aktif: Rp {Number(selectedCustomerReceivableSummary?.dueTotal || 0).toLocaleString('id-ID')}
+                    </Text>
+                  ) : pendingReceivableLimitAmount > 0 || receivableLimitStatus === 'pending' ? (
+                    <Text style={styles.receivableLimitHintText}>
+                      Admin akan menentukan plafon final saat menyetujui pengajuan ini.
+                    </Text>
+                  ) : approvedReceivableLimitAmount > 0 && receivableLimitRejected ? (
+                    <Text style={styles.receivableLimitHintText}>
+                      Pengajuan perubahan plafon terakhir ditolak. Batas aktif tetap Rp {Number(approvedReceivableLimitAmount || 0).toLocaleString('id-ID')}.
+                    </Text>
+                  ) : receivableLimitRejected ? (
+                    <Text style={styles.receivableLimitHintText}>
+                      Pengajuan plafon terakhir ditolak. Revisi formulir lalu ajukan ulang.
+                    </Text>
+                  ) : !receivableLimitProfileCompleted ? (
+                    <Text style={styles.receivableLimitHintText}>
+                      Lengkapi formulir plafon customer dulu sebelum transaksi piutang pertama.
+                    </Text>
                   ) : (
-                    <Text style={styles.depositBadgeText}>
-                      Saldo Customer: Rp {Number(customerDepositBalance || 0).toLocaleString('id-ID')}
+                    <Text style={styles.receivableLimitHintText}>
+                      Gunakan tombol Plafon untuk ajukan / ubah batas piutang customer. Nilai final plafon tetap ditentukan admin.
                     </Text>
                   )}
                 </View>
               </View>
             ) : (
-              <Text style={styles.helperText}>Pilih customer dulu untuk cek saldo dan top up</Text>
+              <Text style={styles.helperText}>Pilih customer dulu untuk cek saldo, top up, dan plafon piutang</Text>
             )}
           </View>
         </View>
@@ -446,6 +517,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 6,
+    flexWrap: 'wrap',
   },
   value: {
     flex: 1,
@@ -514,6 +586,23 @@ const styles = StyleSheet.create({
   depositButtonTextDisabled: {
     color: '#7b8798',
   },
+  receivableLimitButton: {
+    borderWidth: 1,
+    borderColor: '#9a6a12',
+    backgroundColor: '#fff6df',
+    minHeight: 26,
+    paddingHorizontal: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  receivableLimitButtonText: {
+    color: '#86560f',
+    fontSize: 11,
+    fontWeight: '800',
+  },
+  depositMetaWrap: {
+    gap: 6,
+  },
   depositMetaRow: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -527,10 +616,25 @@ const styles = StyleSheet.create({
     paddingVertical: 5,
     justifyContent: 'center',
   },
+  receivableLimitBadge: {
+    borderColor: '#e7c98a',
+    backgroundColor: '#fff9ec',
+  },
   depositBadgeText: {
     fontSize: 11,
     fontWeight: '700',
     color: '#1d6a3c',
+  },
+  receivableLimitBadgeText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#86560f',
+  },
+  receivableLimitHintText: {
+    fontSize: 10,
+    color: '#6f582c',
+    fontWeight: '700',
+    marginTop: 3,
   },
   helperText: {
     fontSize: 10,

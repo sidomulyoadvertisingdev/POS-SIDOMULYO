@@ -642,6 +642,53 @@ export const fetchPosReceivableApprovals = async (params = {}) => {
   return toDataList(payload);
 };
 
+export const fetchPosManualApprovals = async (params = {}) => {
+  await ensureAuthenticated();
+  const query = new URLSearchParams();
+  if (params?.status) {
+    query.set('status', String(params.status));
+  }
+  const suffix = query.toString() ? `?${query.toString()}` : '';
+  const payload = await request(`/pos/approvals${suffix}`);
+  return toDataList(payload);
+};
+
+export const createPosManualApproval = async (payload) => {
+  await ensureAuthenticated();
+  const body = await request('/pos/approvals', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+  return toDataItem(body);
+};
+
+export const approvePosManualApproval = async (approvalId, payload = {}) => {
+  await ensureAuthenticated();
+  const body = await request(`/pos/approvals/${approvalId}/approve`, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+  return toDataItem(body);
+};
+
+export const rejectPosManualApproval = async (approvalId, payload) => {
+  await ensureAuthenticated();
+  const body = await request(`/pos/approvals/${approvalId}/reject`, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+  return toDataItem(body);
+};
+
+export const resolvePosManualApproval = async (approvalId, payload = {}) => {
+  await ensureAuthenticated();
+  const body = await request(`/pos/approvals/${approvalId}/resolve`, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+  return toDataItem(body);
+};
+
 export const fetchPosClosingSummary = async (params = {}) => {
   await ensureAuthenticated();
   const query = new URLSearchParams();
