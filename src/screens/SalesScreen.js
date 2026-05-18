@@ -4212,92 +4212,14 @@ const addLocalDays = (value, days = 0) => {
   base.setDate(base.getDate() + Number(days || 0));
   return base;
 };
-const startOfLocalWeek = (value = new Date()) => {
-  const base = startOfLocalDay(value);
-  const dayOfWeek = base.getDay();
-  const diff = dayOfWeek === 0 ? -6 : 1 - dayOfWeek;
-  return addLocalDays(base, diff);
-};
-const startOfLocalMonth = (value = new Date()) => {
-  const date = startOfLocalDay(value);
-  return new Date(date.getFullYear(), date.getMonth(), 1);
-};
-const endOfLocalMonth = (value = new Date()) => {
-  const date = startOfLocalDay(value);
-  return new Date(date.getFullYear(), date.getMonth() + 1, 0);
-};
-const formatMonthPresetLabel = (value) => {
-  const date = startOfLocalDay(value);
-  return date.toLocaleDateString('id-ID', {
-    month: 'long',
-    year: 'numeric',
-  });
-};
-const buildInvoiceDatePresetCollections = (referenceDate = new Date()) => {
+const resolveDefaultInvoiceDateFilter = (referenceDate = new Date()) => {
   const today = startOfLocalDay(referenceDate);
-  const yesterday = addLocalDays(today, -1);
-  const weekStart = startOfLocalWeek(today);
-  const monthStart = startOfLocalMonth(today);
-  const previousMonthStart = startOfLocalMonth(new Date(today.getFullYear(), today.getMonth() - 1, 1));
-  const previousMonthEnd = endOfLocalMonth(previousMonthStart);
-
-  const quickPresets = [
-    {
-      key: 'today',
-      label: 'Hari Ini',
-      from: formatIsoDate(today),
-      to: formatIsoDate(today),
-    },
-    {
-      key: 'yesterday',
-      label: 'Kemarin',
-      from: formatIsoDate(yesterday),
-      to: formatIsoDate(yesterday),
-    },
-    {
-      key: 'this_week',
-      label: 'Minggu Ini',
-      from: formatIsoDate(weekStart),
-      to: formatIsoDate(today),
-    },
-    {
-      key: 'last_7_days',
-      label: '7 Hari',
-      from: formatIsoDate(addLocalDays(today, -6)),
-      to: formatIsoDate(today),
-    },
-    {
-      key: 'this_month',
-      label: 'Bulan Ini',
-      from: formatIsoDate(monthStart),
-      to: formatIsoDate(today),
-    },
-    {
-      key: 'last_month',
-      label: 'Bulan Lalu',
-      from: formatIsoDate(previousMonthStart),
-      to: formatIsoDate(previousMonthEnd),
-    },
-  ];
-
-  const monthPresets = Array.from({ length: 6 }, (_, index) => {
-    const monthDate = new Date(today.getFullYear(), today.getMonth() - index, 1);
-    const monthRangeStart = startOfLocalMonth(monthDate);
-    const monthRangeEnd = endOfLocalMonth(monthDate);
-    const key = `month:${formatIsoDate(monthRangeStart).slice(0, 7)}`;
-
-    return {
-      key,
-      label: formatMonthPresetLabel(monthDate),
-      from: formatIsoDate(monthRangeStart),
-      to: formatIsoDate(monthRangeEnd),
-    };
-  });
-
-  return { quickPresets, monthPresets };
+  return {
+    from: formatIsoDate(today),
+    to: formatIsoDate(today),
+  };
 };
-const DEFAULT_INVOICE_DATE_PRESET = buildInvoiceDatePresetCollections(new Date()).quickPresets
-  .find((preset) => preset?.key === 'this_month') || null;
+const DEFAULT_INVOICE_DATE_FILTER = resolveDefaultInvoiceDateFilter(new Date());
 const resolveInvoiceDateRange = (dateFrom, dateTo) => {
   const startAt = parseIsoDateTimestamp(dateFrom, 'start');
   const endAt = parseIsoDateTimestamp(dateTo, 'end');
@@ -4882,40 +4804,10 @@ const SalesScreen = ({ currentUser, onLogout }) => {
   const [draftInvoices, setDraftInvoices] = useState([]);
   const [draftTimeTick, setDraftTimeTick] = useState(() => Date.now());
   const [invoiceFilter, setInvoiceFilter] = useState('success');
-  const [receivableStatusFilter, setReceivableStatusFilter] = useState('all');
   const [approvalStatusFilter, setApprovalStatusFilter] = useState('all');
   const [invoiceSearch, setInvoiceSearch] = useState('');
-  const [invoiceDateFrom, setInvoiceDateFrom] = useState(() => String(DEFAULT_INVOICE_DATE_PRESET?.from || '').trim());
-  const [invoiceDateTo, setInvoiceDateTo] = useState(() => String(DEFAULT_INVOICE_DATE_PRESET?.to || '').trim());
-  const invoiceDatePresetCollections = useMemo(
-    () => buildInvoiceDatePresetCollections(new Date()),
-    [],
-  );
-  const allInvoiceDatePresets = useMemo(
-    () => [
-      ...invoiceDatePresetCollections.quickPresets,
-      ...invoiceDatePresetCollections.monthPresets,
-    ],
-    [invoiceDatePresetCollections],
-  );
-  const activeInvoiceDatePresetKey = useMemo(() => {
-    const selectedFrom = String(invoiceDateFrom || '').trim();
-    const selectedTo = String(invoiceDateTo || '').trim();
-    const matchedPreset = allInvoiceDatePresets.find((preset) => (
-      String(preset?.from || '').trim() === selectedFrom
-      && String(preset?.to || '').trim() === selectedTo
-    ));
-
-    return matchedPreset?.key || '';
-  }, [allInvoiceDatePresets, invoiceDateFrom, invoiceDateTo]);
-  const applyInvoiceDatePreset = (preset) => {
-    setInvoiceDateFrom(String(preset?.from || '').trim());
-    setInvoiceDateTo(String(preset?.to || '').trim());
-  };
-  const clearInvoiceDateFilter = () => {
-    setInvoiceDateFrom('');
-    setInvoiceDateTo('');
-  };
+  const [invoiceDateFrom, setInvoiceDateFrom] = useState(() => String(DEFAULT_INVOICE_DATE_FILTER?.from || '').trim());
+  const [invoiceDateTo, setInvoiceDateTo] = useState(() => String(DEFAULT_INVOICE_DATE_FILTER?.to || '').trim());
   const [isDraftLoading, setIsDraftLoading] = useState(false);
   const [isDeletingDraftId, setIsDeletingDraftId] = useState(null);
   const [productionRows, setProductionRows] = useState([]);
@@ -4992,7 +4884,6 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     setActiveMenu(nextMenu);
     setInvoiceFilter(nextFilter);
     setApprovalStatusFilter('all');
-    setReceivableStatusFilter('all');
   };
   const openInvoiceAreaFilter = (filter) => {
     openInvoiceAreaMenu(resolveInvoiceMenuForFilter(filter));
@@ -12119,7 +12010,10 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         acc.successAmount += totalAmount;
       }
       if (isReceivableApprovalInvoiceRow(row)) {
-        acc.approvalCount += 1;
+        const approvalStatus = normalizeReceivableApprovalStatus(row?.approval?.status || row?.status);
+        if (approvalStatus !== 'resolved') {
+          acc.approvalCount += 1;
+        }
       }
       if (isReceivableInvoiceRow(row)) {
         acc.receivableCount += 1;
@@ -12206,28 +12100,21 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       return searchedRows
         .filter((row) => isReceivableApprovalInvoiceRow(row))
         .filter((row) => {
+          const approvalStatus = normalizeReceivableApprovalStatus(row?.approval?.status || row?.status);
+          if (approvalStatus === 'resolved') {
+            return false;
+          }
           if (approvalStatusFilter === 'all') {
             return true;
           }
-          const approvalStatus = normalizeReceivableApprovalStatus(row?.approval?.status || row?.status);
           return approvalStatus === approvalStatusFilter;
         });
     }
     if (invoiceFilter === 'receivable') {
-      return searchedRows
-        .filter((row) => isReceivableInvoiceRow(row))
-        .filter((row) => {
-          if (receivableStatusFilter === 'payable') {
-            return Boolean(row?.invoice?.can_pay);
-          }
-          if (receivableStatusFilter === 'blocked') {
-            return !Boolean(row?.invoice?.can_pay);
-          }
-          return true;
-        });
+      return searchedRows.filter((row) => isReceivableInvoiceRow(row));
     }
     return searchedRows;
-  }, [approvalStatusFilter, dateFilteredInvoiceRows, invoiceFilter, invoiceSearch, receivableStatusFilter]);
+  }, [approvalStatusFilter, dateFilteredInvoiceRows, invoiceFilter, invoiceSearch]);
   const filteredInvoiceSummary = useMemo(() => {
     if (!['draft', 'success'].includes(invoiceFilter)) {
       return null;
@@ -12367,7 +12254,6 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       if (status === 'pending') acc.pending += 1;
       if (status === 'approved') acc.approved += 1;
       if (status === 'rejected') acc.rejected += 1;
-      if (status === 'resolved') acc.resolved += 1;
       if (type === 'receivable_limit') {
         acc.receivableLimit += 1;
         if (contextKey === 'new_limit') acc.newLimit += 1;
@@ -12382,7 +12268,6 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       pending: 0,
       approved: 0,
       rejected: 0,
-      resolved: 0,
       receivableLimit: 0,
       newLimit: 0,
       increaseLimit: 0,
@@ -13731,19 +13616,18 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                 onSelectAreaMenu={openInvoiceAreaMenu}
                 onSelectAreaFilter={openInvoiceAreaFilter}
                 invoiceAreaSummary={invoiceAreaSummary}
-                receivableStatusFilter={receivableStatusFilter}
-                onChangeReceivableStatusFilter={setReceivableStatusFilter}
                 approvalStatusFilter={approvalStatusFilter}
                 onChangeApprovalStatusFilter={setApprovalStatusFilter}
                 invoiceSearch={invoiceSearch}
                 onChangeInvoiceSearch={setInvoiceSearch}
                 invoiceDateFrom={invoiceDateFrom}
                 invoiceDateTo={invoiceDateTo}
-                invoiceDateQuickPresets={invoiceDatePresetCollections.quickPresets}
-                invoiceDateMonthPresets={invoiceDatePresetCollections.monthPresets}
-                activeInvoiceDatePresetKey={activeInvoiceDatePresetKey}
-                onSelectInvoiceDatePreset={applyInvoiceDatePreset}
-                onClearInvoiceDateFilter={clearInvoiceDateFilter}
+                onChangeInvoiceDateFrom={setInvoiceDateFrom}
+                onChangeInvoiceDateTo={setInvoiceDateTo}
+                onClearInvoiceDateFilter={() => {
+                  setInvoiceDateFrom('');
+                  setInvoiceDateTo('');
+                }}
               />
               <InvoiceWorkspaceContent
                 filteredSummary={filteredInvoiceSummary}

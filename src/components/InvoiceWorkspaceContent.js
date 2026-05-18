@@ -82,7 +82,7 @@ const InvoiceWorkspaceContent = ({
           Total request: {approvalSummary.totalRequests}
         </Text>
         <Text style={styles.summaryMeta}>
-          Menunggu: {approvalSummary.pending} | Disetujui: {approvalSummary.approved} | Ditolak: {approvalSummary.rejected} | Selesai: {approvalSummary.resolved}
+          Menunggu: {approvalSummary.pending} | Disetujui: {approvalSummary.approved} | Ditolak: {approvalSummary.rejected}
         </Text>
         <Text style={styles.summaryMeta}>
           Plafon customer: {approvalSummary.receivableLimit} | Approval nota/manual: {approvalSummary.manualApproval}
