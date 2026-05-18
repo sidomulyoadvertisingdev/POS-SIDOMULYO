@@ -57,10 +57,28 @@ const resolveAreaCount = (summary = {}, key = '') => {
 };
 
 const resolveAreaMeta = (summary = {}, key = '', fallback = '') => {
-  if (key === 'receivable') {
-    return `Outstanding ${formatRupiah(summary?.receivableDueTotal || 0)}`;
-  }
   return fallback;
+};
+
+const resolveAreaAmount = (summary = {}, key = '') => {
+  if (key === 'draft') return formatRupiah(summary?.draftAmount || 0);
+  if (key === 'success') return formatRupiah(summary?.successAmount || 0);
+  if (key === 'receivable') return formatRupiah(summary?.receivableDueTotal || 0);
+  return '';
+};
+
+const resolveAreaAmountLabel = (key = '') => {
+  if (key === 'draft') return 'Total Draft';
+  if (key === 'success') return 'Total Sukses';
+  if (key === 'receivable') return 'Total Piutang';
+  return '';
+};
+
+const resolveAreaAmountStyle = (styles, key = '') => {
+  if (key === 'draft') return styles.areaAmountDraft;
+  if (key === 'success') return styles.areaAmountSuccess;
+  if (key === 'receivable') return styles.areaAmountReceivable;
+  return null;
 };
 
 const InvoiceWorkspaceHeader = ({
@@ -78,6 +96,13 @@ const InvoiceWorkspaceHeader = ({
   onChangeApprovalStatusFilter,
   invoiceSearch,
   onChangeInvoiceSearch,
+  invoiceDateFrom,
+  invoiceDateTo,
+  invoiceDateQuickPresets = [],
+  invoiceDateMonthPresets = [],
+  activeInvoiceDatePresetKey = '',
+  onSelectInvoiceDatePreset,
+  onClearInvoiceDateFilter,
 }) => (
   <>
     <View style={styles.headerRow}>
@@ -98,6 +123,8 @@ const InvoiceWorkspaceHeader = ({
     <View style={styles.areaGrid}>
       {AREA_CARDS.map((card) => {
         const active = invoiceFilter === card.key;
+        const amount = resolveAreaAmount(invoiceAreaSummary, card.key);
+        const amountLabel = resolveAreaAmountLabel(card.key);
         return (
           <Pressable
             key={card.key}
@@ -110,6 +137,14 @@ const InvoiceWorkspaceHeader = ({
             <Text style={[styles.areaLabel, active ? styles.areaLabelActive : null]}>
               {card.label}
             </Text>
+            {amount ? (
+              <View style={styles.areaAmountWrap}>
+                <Text style={styles.areaAmountLabel}>{amountLabel}</Text>
+                <Text style={[styles.areaAmount, resolveAreaAmountStyle(styles, card.key)]}>
+                  {amount}
+                </Text>
+              </View>
+            ) : null}
             <Text style={[styles.areaMeta, active ? styles.areaMetaActive : null]}>
               {resolveAreaMeta(invoiceAreaSummary, card.key, card.meta)}
             </Text>
@@ -180,6 +215,58 @@ const InvoiceWorkspaceHeader = ({
       placeholderTextColor="#777777"
       style={styles.searchInput}
     />
+
+    <View style={styles.datePickerCard}>
+      <Text style={styles.datePickerTitle}>Pilih Tanggal Cepat</Text>
+      <Text style={styles.datePickerMeta}>
+        {invoiceDateFrom || invoiceDateTo
+          ? `Periode aktif: ${invoiceDateFrom || 'awal'} s/d ${invoiceDateTo || 'akhir'}`
+          : 'Periode aktif: Semua tanggal'}
+      </Text>
+
+      <View style={styles.filterRow}>
+        <Pressable
+          style={[styles.filterButton, !activeInvoiceDatePresetKey ? styles.filterButtonActive : null]}
+          onPress={onClearInvoiceDateFilter}
+        >
+          <Text style={[styles.filterButtonText, !activeInvoiceDatePresetKey ? styles.filterButtonTextActive : null]}>
+            Semua Tanggal
+          </Text>
+        </Pressable>
+        {invoiceDateQuickPresets.map((preset) => {
+          const active = activeInvoiceDatePresetKey === preset.key;
+          return (
+            <Pressable
+              key={preset.key}
+              style={[styles.filterButton, active ? styles.filterButtonActive : null]}
+              onPress={() => onSelectInvoiceDatePreset?.(preset)}
+            >
+              <Text style={[styles.filterButtonText, active ? styles.filterButtonTextActive : null]}>
+                {preset.label}
+              </Text>
+            </Pressable>
+          );
+        })}
+      </View>
+
+      <Text style={styles.datePickerTitle}>Rekomendasi Bulan</Text>
+      <View style={styles.filterRow}>
+        {invoiceDateMonthPresets.map((preset) => {
+          const active = activeInvoiceDatePresetKey === preset.key;
+          return (
+            <Pressable
+              key={preset.key}
+              style={[styles.filterButton, active ? styles.filterButtonActive : null]}
+              onPress={() => onSelectInvoiceDatePreset?.(preset)}
+            >
+              <Text style={[styles.filterButtonText, active ? styles.filterButtonTextActive : null]}>
+                {preset.label}
+              </Text>
+            </Pressable>
+          );
+        })}
+      </View>
+    </View>
   </>
 );
 
@@ -230,7 +317,7 @@ const styles = StyleSheet.create({
   areaCard: {
     flexGrow: 1,
     flexBasis: 180,
-    minHeight: 88,
+    minHeight: 124,
     borderWidth: 1,
     borderColor: '#c7d7ef',
     backgroundColor: '#f7fbff',
@@ -269,6 +356,31 @@ const styles = StyleSheet.create({
   areaMetaActive: {
     color: '#35507a',
   },
+  areaAmountWrap: {
+    marginTop: 6,
+    marginBottom: 4,
+  },
+  areaAmountLabel: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: '#667085',
+    textTransform: 'uppercase',
+    marginBottom: 2,
+  },
+  areaAmount: {
+    fontSize: 22,
+    fontWeight: '900',
+    lineHeight: 26,
+  },
+  areaAmountDraft: {
+    color: '#b42318',
+  },
+  areaAmountSuccess: {
+    color: '#067647',
+  },
+  areaAmountReceivable: {
+    color: '#101828',
+  },
   filterRow: {
     flexDirection: 'row',
     gap: 6,
@@ -302,6 +414,25 @@ const styles = StyleSheet.create({
     fontSize: 12,
     paddingHorizontal: 10,
     paddingVertical: 7,
+    marginBottom: 8,
+  },
+  datePickerCard: {
+    borderWidth: 1,
+    borderColor: '#c7d7ef',
+    backgroundColor: '#f7fbff',
+    padding: 10,
+    marginBottom: 8,
+  },
+  datePickerTitle: {
+    fontSize: 11,
+    fontWeight: '800',
+    color: '#24426f',
+    textTransform: 'uppercase',
+    marginBottom: 6,
+  },
+  datePickerMeta: {
+    fontSize: 11,
+    color: '#5c6780',
     marginBottom: 8,
   },
 });

@@ -64,6 +64,12 @@ const API_EMAIL = String(extra.erpEmail || '').trim();
 const API_PASSWORD = String(extra.erpPassword || '');
 const API_TOKEN = String(extra.erpToken || '').trim();
 const REQUEST_TIMEOUT_MS = 20000;
+const PRODUCTS_REQUEST_TIMEOUT_MS = 45000;
+const PRODUCTS_REQUEST_PER_PAGE = 100;
+const INVOICE_REQUEST_TIMEOUT_MS = 45000;
+const INVOICE_REQUEST_PER_PAGE = 100;
+const SYNC_CHANGES_REQUEST_LIMIT = 200;
+const SYNC_CHANGES_MAX_PAGES = 20;
 
 let authToken = String(API_TOKEN || '').trim();
 let sessionEmail = '';
@@ -74,23 +80,30 @@ if (!isSupportedApiUrl(API_BASE_URL)) {
   throw new Error(`Base URL backend tidak valid atau belum terisi. Nilai saat ini: ${API_BASE_URL}`);
 }
 
-const createTimeoutError = (url) => {
-  const error = new Error(`Request timeout setelah ${Math.round(REQUEST_TIMEOUT_MS / 1000)} detik. Cek koneksi ke backend: ${url}`);
+const createTimeoutError = (url, timeoutMs = REQUEST_TIMEOUT_MS) => {
+  const error = new Error(`Request timeout setelah ${Math.round(timeoutMs / 1000)} detik. Cek koneksi ke backend: ${url}`);
   error.status = 0;
   error.code = 'REQUEST_TIMEOUT';
   return error;
 };
 
 const fetchWithTimeout = async (url, options = {}) => {
+  const {
+    timeoutMs: requestedTimeoutMs,
+    ...fetchOptions
+  } = options || {};
+  const timeoutMs = Number.isFinite(Number(requestedTimeoutMs)) && Number(requestedTimeoutMs) > 0
+    ? Number(requestedTimeoutMs)
+    : REQUEST_TIMEOUT_MS;
   let timeoutId = null;
 
   try {
     return await Promise.race([
-      fetch(url, options),
+      fetch(url, fetchOptions),
       new Promise((_, reject) => {
         timeoutId = setTimeout(() => {
-          reject(createTimeoutError(url));
-        }, REQUEST_TIMEOUT_MS);
+          reject(createTimeoutError(url, timeoutMs));
+        }, timeoutMs);
       }),
     ]);
   } finally {
@@ -174,10 +187,16 @@ const authenticateWithCredentials = async (email, password) => {
 };
 
 const request = async (path, options = {}, retryOnAuth = true) => {
+  const {
+    headers: extraHeaders = {},
+    timeoutMs,
+    ...requestOptions
+  } = options || {};
   const requestUrl = `${API_BASE_URL}${path}`;
   const response = await fetchWithTimeout(requestUrl, {
-    ...options,
-    headers: buildHeaders(options.headers || {}),
+    ...requestOptions,
+    timeoutMs,
+    headers: buildHeaders(extraHeaders),
   });
 
   if (response.redirected && typeof response.url === 'string') {
@@ -356,10 +375,62 @@ export const useDefaultLoginCredentials = async () => {
   return authenticateWithCredentials(API_EMAIL, API_PASSWORD);
 };
 
-export const fetchPosProducts = async () => {
+export const fetchPosProductsPage = async (params = {}) => {
   await ensureAuthenticated();
-  const payload = await request('/pos/products?per_page=500');
-  return toDataList(payload);
+  const requestedPerPage = Number(params?.perPage || 0);
+  const perPage = Number.isFinite(requestedPerPage) && requestedPerPage > 0
+    ? Math.min(Math.max(Math.trunc(requestedPerPage), 1), 500)
+    : PRODUCTS_REQUEST_PER_PAGE;
+  const requestedPage = Number(params?.page || 0);
+  const page = Number.isFinite(requestedPage) && requestedPage > 0
+    ? Math.trunc(requestedPage)
+    : 1;
+  const requestedTimeoutMs = Number(params?.timeoutMs || 0);
+  const timeoutMs = Number.isFinite(requestedTimeoutMs) && requestedTimeoutMs > 0
+    ? requestedTimeoutMs
+    : PRODUCTS_REQUEST_TIMEOUT_MS;
+  const query = new URLSearchParams();
+  query.set('per_page', String(perPage));
+  query.set('page', String(page));
+  if (params?.search) {
+    query.set('search', String(params.search));
+  }
+  const payload = await request(`/pos/products?${query.toString()}`, { timeoutMs });
+  return toPaginatedDataList(payload);
+};
+
+export const fetchPosProducts = async (params = {}) => {
+  const requestedPerPage = Number(params?.perPage || 0);
+  const perPage = Number.isFinite(requestedPerPage) && requestedPerPage > 0
+    ? Math.min(Math.max(Math.trunc(requestedPerPage), 1), 500)
+    : PRODUCTS_REQUEST_PER_PAGE;
+  const requestedMaxPages = Number(params?.maxPages || 0);
+  const maxPages = Number.isFinite(requestedMaxPages) && requestedMaxPages > 0
+    ? Math.max(Math.trunc(requestedMaxPages), 1)
+    : 100;
+
+  const rowsById = new Map();
+  let page = 1;
+
+  while (page <= maxPages) {
+    const response = await fetchPosProductsPage({ ...params, perPage, page });
+    response.data.forEach((row) => {
+      const key = Number(row?.id || 0);
+      if (key > 0) {
+        rowsById.set(key, row);
+        return;
+      }
+      rowsById.set(`product-${page}-${rowsById.size}`, row);
+    });
+
+    if (!response.meta?.hasMore) {
+      break;
+    }
+
+    page += 1;
+  }
+
+  return Array.from(rowsById.values());
 };
 
 export const fetchPosProductDetail = async (productId) => {
@@ -457,18 +528,132 @@ export const fetchPosSyncStatus = async () => {
   ]);
 };
 
-export const fetchPosSyncChanges = async (since = '') => {
-  await ensureAuthenticated();
-  const query = new URLSearchParams();
-  if (since) {
-    query.set('since', String(since));
-  }
-  const suffix = query.toString() ? `?${query.toString()}` : '';
+const extractSyncChangesSource = (payload) => (
+  payload?.data && typeof payload.data === 'object' && !Array.isArray(payload.data)
+    ? payload.data
+    : payload
+);
 
-  return requestOptionalEndpointCandidates([
-    `/sync/changes${suffix}`,
-    `/pos/sync/changes${suffix}`,
-  ]);
+const extractSyncChangesPagination = (payload) => {
+  const source = extractSyncChangesSource(payload);
+  return source?.pagination && typeof source.pagination === 'object' && !Array.isArray(source.pagination)
+    ? source.pagination
+    : null;
+};
+
+const mergeSyncRowsById = (target, rows = [], fallbackPrefix = 'row') => {
+  (Array.isArray(rows) ? rows : []).forEach((row, index) => {
+    const id = Number(row?.id || 0);
+    const key = id > 0 ? `id:${id}` : `${fallbackPrefix}:${target.size}:${index}`;
+    target.set(key, row);
+  });
+};
+
+const mergeSyncIds = (target, rows = []) => {
+  (Array.isArray(rows) ? rows : []).forEach((row) => {
+    const id = Number(row || 0);
+    if (id > 0) {
+      target.add(id);
+    }
+  });
+};
+
+const buildSyncChangesMergedPayload = ({
+  productsById,
+  customersById,
+  deletedProductIds,
+  deletedCustomerIds,
+  serverTime,
+  pagination,
+}) => ({
+  products: Array.from(productsById.values()),
+  customers: Array.from(customersById.values()),
+  deletedProductIds: Array.from(deletedProductIds.values()),
+  deletedCustomerIds: Array.from(deletedCustomerIds.values()),
+  serverTime: String(serverTime || '').trim(),
+  pagination: pagination || null,
+});
+
+export const fetchPosSyncChanges = async (since = '', options = {}) => {
+  await ensureAuthenticated();
+  const requestedLimit = Number(options?.limit || 0);
+  const limit = Number.isFinite(requestedLimit) && requestedLimit > 0
+    ? Math.min(Math.max(Math.trunc(requestedLimit), 1), 500)
+    : SYNC_CHANGES_REQUEST_LIMIT;
+  const requestedMaxPages = Number(options?.maxPages || 0);
+  const maxPages = Number.isFinite(requestedMaxPages) && requestedMaxPages > 0
+    ? Math.max(Math.trunc(requestedMaxPages), 1)
+    : SYNC_CHANGES_MAX_PAGES;
+
+  const productsById = new Map();
+  const customersById = new Map();
+  const deletedProductIds = new Set();
+  const deletedCustomerIds = new Set();
+  let serverTime = '';
+  let pagination = null;
+  let cursors = {
+    products: '',
+    customers: '',
+    deleted_products: '',
+    deleted_customers: '',
+  };
+  let page = 0;
+
+  while (page < maxPages) {
+    const query = new URLSearchParams();
+    if (since) {
+      query.set('since', String(since));
+    }
+    query.set('limit', String(limit));
+    if (cursors.products) query.set('products_cursor', String(cursors.products));
+    if (cursors.customers) query.set('customers_cursor', String(cursors.customers));
+    if (cursors.deleted_products) query.set('deleted_products_cursor', String(cursors.deleted_products));
+    if (cursors.deleted_customers) query.set('deleted_customers_cursor', String(cursors.deleted_customers));
+
+    const suffix = query.toString() ? `?${query.toString()}` : '';
+    const payload = await requestOptionalEndpointCandidates([
+      `/sync/changes${suffix}`,
+      `/pos/sync/changes${suffix}`,
+    ]);
+    const source = extractSyncChangesSource(payload);
+    const nextPagination = extractSyncChangesPagination(payload);
+
+    if (!nextPagination) {
+      return payload;
+    }
+
+    mergeSyncRowsById(productsById, source?.products, 'product');
+    mergeSyncRowsById(customersById, source?.customers, 'customer');
+    mergeSyncIds(deletedProductIds, source?.deletedProductIds ?? source?.deleted_product_ids);
+    mergeSyncIds(deletedCustomerIds, source?.deletedCustomerIds ?? source?.deleted_customer_ids);
+
+    serverTime = String(source?.serverTime ?? source?.server_time ?? serverTime ?? '').trim();
+    pagination = nextPagination;
+    page += 1;
+
+    const nextCursors = {
+      products: String(nextPagination?.products_next_cursor || ''),
+      customers: String(nextPagination?.customers_next_cursor || ''),
+      deleted_products: String(nextPagination?.deleted_products_next_cursor || ''),
+      deleted_customers: String(nextPagination?.deleted_customers_next_cursor || ''),
+    };
+
+    const hasNextCursor = Object.values(nextCursors).some((value) => String(value || '').trim() !== '');
+    if (!Boolean(nextPagination?.has_more) || !hasNextCursor) {
+      break;
+    }
+
+    cursors = nextCursors;
+  }
+
+  return buildSyncChangesMergedPayload({
+    productsById,
+    customersById,
+    deletedProductIds,
+    deletedCustomerIds,
+    serverTime,
+    pagination,
+  });
 };
 
 export const fetchPosCustomerTypes = async () => {
@@ -633,22 +818,142 @@ export const deletePosOrder = async (orderId) => {
   );
 };
 
-export const fetchPosOrderTransactions = async (params = {}) => {
+export const fetchPosOrderTransactionsPage = async (params = {}) => {
   await ensureAuthenticated();
+  const requestedPerPage = Number(params?.perPage || 0);
+  const perPage = Number.isFinite(requestedPerPage) && requestedPerPage > 0
+    ? Math.min(Math.max(Math.trunc(requestedPerPage), 1), 500)
+    : INVOICE_REQUEST_PER_PAGE;
+  const requestedPage = Number(params?.page || 0);
+  const page = Number.isFinite(requestedPage) && requestedPage > 0
+    ? Math.trunc(requestedPage)
+    : 1;
+  const requestedTimeoutMs = Number(params?.timeoutMs || 0);
+  const timeoutMs = Number.isFinite(requestedTimeoutMs) && requestedTimeoutMs > 0
+    ? requestedTimeoutMs
+    : INVOICE_REQUEST_TIMEOUT_MS;
   const query = new URLSearchParams();
+  query.set('per_page', String(perPage));
+  query.set('page', String(page));
   if (params?.status) {
     query.set('status', String(params.status));
   }
   if (params?.search) {
     query.set('search', String(params.search));
   }
-  const suffix = query.toString() ? `?${query.toString()}` : '';
-  return request(`/pos/orders/transactions${suffix}`);
+  if (params?.view) {
+    query.set('view', String(params.view));
+  }
+  const payload = await request(`/pos/orders/transactions?${query.toString()}`, { timeoutMs });
+  return toPaginatedDataList(payload);
 };
 
-export const fetchPosOrders = async () => {
+export const fetchPosOrderTransactions = async (params = {}) => {
+  const payload = await fetchPosOrderTransactionsPage(params);
+  return payload.data;
+};
+
+export const fetchAllPosOrderTransactions = async (params = {}) => {
+  const requestedPerPage = Number(params?.perPage || 0);
+  const perPage = Number.isFinite(requestedPerPage) && requestedPerPage > 0
+    ? Math.min(Math.max(Math.trunc(requestedPerPage), 1), 500)
+    : INVOICE_REQUEST_PER_PAGE;
+  const requestedMaxPages = Number(params?.maxPages || 0);
+  const maxPages = Number.isFinite(requestedMaxPages) && requestedMaxPages > 0
+    ? Math.max(Math.trunc(requestedMaxPages), 1)
+    : 100;
+
+  const rowsById = new Map();
+  let page = 1;
+
+  while (page <= maxPages) {
+    const response = await fetchPosOrderTransactionsPage({ ...params, perPage, page });
+    response.data.forEach((row) => {
+      const primaryId = Number(row?.id || row?.order?.id || row?.invoice?.id || 0);
+      if (primaryId > 0) {
+        rowsById.set(primaryId, row);
+        return;
+      }
+      rowsById.set(`tx-${page}-${rowsById.size}`, row);
+    });
+
+    if (!response.meta?.hasMore) {
+      break;
+    }
+
+    page += 1;
+  }
+
+  return Array.from(rowsById.values());
+};
+
+export const fetchPosOrdersPage = async (params = {}) => {
   await ensureAuthenticated();
-  return request('/pos/orders');
+  const requestedPerPage = Number(params?.perPage || 0);
+  const perPage = Number.isFinite(requestedPerPage) && requestedPerPage > 0
+    ? Math.min(Math.max(Math.trunc(requestedPerPage), 1), 500)
+    : INVOICE_REQUEST_PER_PAGE;
+  const requestedPage = Number(params?.page || 0);
+  const page = Number.isFinite(requestedPage) && requestedPage > 0
+    ? Math.trunc(requestedPage)
+    : 1;
+  const requestedTimeoutMs = Number(params?.timeoutMs || 0);
+  const timeoutMs = Number.isFinite(requestedTimeoutMs) && requestedTimeoutMs > 0
+    ? requestedTimeoutMs
+    : INVOICE_REQUEST_TIMEOUT_MS;
+  const query = new URLSearchParams();
+  query.set('per_page', String(perPage));
+  query.set('page', String(page));
+  if (params?.status) {
+    query.set('status', String(params.status));
+  }
+  if (params?.search) {
+    query.set('search', String(params.search));
+  }
+  if (params?.view) {
+    query.set('view', String(params.view));
+  }
+  const payload = await request(`/pos/orders?${query.toString()}`, { timeoutMs });
+  return toPaginatedDataList(payload);
+};
+
+export const fetchPosOrders = async (params = {}) => {
+  const payload = await fetchPosOrdersPage(params);
+  return payload.data;
+};
+
+export const fetchAllPosOrders = async (params = {}) => {
+  const requestedPerPage = Number(params?.perPage || 0);
+  const perPage = Number.isFinite(requestedPerPage) && requestedPerPage > 0
+    ? Math.min(Math.max(Math.trunc(requestedPerPage), 1), 500)
+    : INVOICE_REQUEST_PER_PAGE;
+  const requestedMaxPages = Number(params?.maxPages || 0);
+  const maxPages = Number.isFinite(requestedMaxPages) && requestedMaxPages > 0
+    ? Math.max(Math.trunc(requestedMaxPages), 1)
+    : 100;
+
+  const rowsById = new Map();
+  let page = 1;
+
+  while (page <= maxPages) {
+    const response = await fetchPosOrdersPage({ ...params, perPage, page });
+    response.data.forEach((row) => {
+      const primaryId = Number(row?.id || row?.order?.id || row?.invoice?.id || 0);
+      if (primaryId > 0) {
+        rowsById.set(primaryId, row);
+        return;
+      }
+      rowsById.set(`order-${page}-${rowsById.size}`, row);
+    });
+
+    if (!response.meta?.hasMore) {
+      break;
+    }
+
+    page += 1;
+  }
+
+  return Array.from(rowsById.values());
 };
 
 export const fetchPosReceivableApprovals = async (params = {}) => {

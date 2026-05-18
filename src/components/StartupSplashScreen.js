@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Animated, Easing, Image, StyleSheet, Text, View, useWindowDimensions } from 'react-native';
+import { Animated, Easing, Image, Platform, StyleSheet, Text, View, useWindowDimensions } from 'react-native';
 import { Asset } from 'expo-asset';
 
 const AnimatedView = Animated.createAnimatedComponent(View);
@@ -13,6 +13,7 @@ export default function StartupSplashScreen({ version, onFinish }) {
   const floatOffset = useRef(new Animated.Value(0)).current;
   const fadeOutOpacity = useRef(new Animated.Value(1)).current;
   const glowPulse = useRef(new Animated.Value(0)).current;
+  const canUseNativeDriver = Platform.OS !== 'web';
 
   const logoSize = Math.max(180, Math.min(width < 900 ? width * 0.22 : width * 0.14, 230));
 
@@ -50,13 +51,13 @@ export default function StartupSplashScreen({ version, onFinish }) {
           toValue: 1,
           duration: 1800,
           easing: Easing.inOut(Easing.quad),
-          useNativeDriver: true,
+          useNativeDriver: canUseNativeDriver,
         }),
         Animated.timing(glowPulse, {
           toValue: 0,
           duration: 1800,
           easing: Easing.inOut(Easing.quad),
-          useNativeDriver: true,
+          useNativeDriver: canUseNativeDriver,
         }),
       ]),
     );
@@ -67,13 +68,13 @@ export default function StartupSplashScreen({ version, onFinish }) {
           toValue: -10,
           duration: 900,
           easing: Easing.inOut(Easing.sin),
-          useNativeDriver: true,
+          useNativeDriver: canUseNativeDriver,
         }),
         Animated.timing(floatOffset, {
           toValue: 0,
           duration: 900,
           easing: Easing.inOut(Easing.sin),
-          useNativeDriver: true,
+          useNativeDriver: canUseNativeDriver,
         }),
       ]),
     );
@@ -83,7 +84,7 @@ export default function StartupSplashScreen({ version, onFinish }) {
         toValue: 0,
         duration: 420,
         easing: Easing.out(Easing.quad),
-        useNativeDriver: true,
+        useNativeDriver: canUseNativeDriver,
       }).start(() => {
         floatLoop.stop();
         pulseLoop.stop();
@@ -96,14 +97,14 @@ export default function StartupSplashScreen({ version, onFinish }) {
         toValue: 1,
         duration: 360,
         easing: Easing.out(Easing.quad),
-        useNativeDriver: true,
+        useNativeDriver: canUseNativeDriver,
       }),
       Animated.spring(introScale, {
         toValue: 1,
         damping: 11,
         mass: 0.9,
         stiffness: 140,
-        useNativeDriver: true,
+        useNativeDriver: canUseNativeDriver,
       }),
     ]).start(() => {
       pulseLoop.start();
@@ -115,7 +116,7 @@ export default function StartupSplashScreen({ version, onFinish }) {
       floatLoop.stop();
       pulseLoop.stop();
     };
-  }, [fadeOutOpacity, floatOffset, glowPulse, introOpacity, introScale, onFinish]);
+  }, [canUseNativeDriver, fadeOutOpacity, floatOffset, glowPulse, introOpacity, introScale, onFinish]);
 
   const glowScale = glowPulse.interpolate({
     inputRange: [0, 1],
@@ -130,7 +131,6 @@ export default function StartupSplashScreen({ version, onFinish }) {
     <AnimatedView style={[styles.overlay, { opacity: fadeOutOpacity }]}>
       <View style={styles.backgroundBase} />
       <AnimatedView
-        pointerEvents="none"
         style={[
           styles.glow,
           {
@@ -191,6 +191,7 @@ const styles = StyleSheet.create({
     marginLeft: -120,
     marginTop: -160,
     backgroundColor: 'rgba(47,100,239,0.18)',
+    pointerEvents: 'none',
   },
   content: {
     flex: 1,

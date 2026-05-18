@@ -2,6 +2,7 @@ import { StyleSheet, Text, View } from 'react-native';
 import { formatRupiah } from '../utils/currency';
 
 const InvoiceWorkspaceContent = ({
+  filteredSummary = null,
   customerSummary = null,
   portfolioSummary = null,
   approvalSummary = null,
@@ -11,6 +12,21 @@ const InvoiceWorkspaceContent = ({
   children,
 }) => (
   <>
+    {filteredSummary ? (
+      <View style={styles.summaryCard}>
+        <Text style={styles.summaryTitle}>{filteredSummary.title}</Text>
+        <Text style={styles.summaryMeta}>
+          Total invoice: {filteredSummary.totalInvoices}
+        </Text>
+        <Text style={styles.summaryMeta}>
+          Periode: {filteredSummary.periodLabel}
+        </Text>
+        <Text style={styles.summaryAmount}>
+          Total amount: {formatRupiah(filteredSummary.totalAmount)}
+        </Text>
+      </View>
+    ) : null}
+
     {customerSummary ? (
       <View style={styles.summaryCard}>
         <Text style={styles.summaryTitle}>Ringkasan Piutang Pelanggan</Text>

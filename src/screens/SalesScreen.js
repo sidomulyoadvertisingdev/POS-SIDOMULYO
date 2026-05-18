@@ -40,8 +40,8 @@ import {
   fetchPosMaterials,
   fetchPosClosingSummary,
   fetchPosOrderDetail,
-  fetchPosOrders,
-  fetchPosOrderTransactions,
+  fetchAllPosOrders,
+  fetchAllPosOrderTransactions,
   fetchPosProductionItems,
   fetchPosProductionMaterials,
   fetchPosProductDetail,
@@ -1850,12 +1850,14 @@ const REPRINT_SPEC_CACHE_KEY = 'pos_reprint_spec_cache_v1';
 const REPRINT_SPEC_CACHE_MAX = 120;
 const PRINTER_PROFILE_STORAGE_KEY = 'pos_printer_profile_v1';
 const MASTER_SYNC_META_STORAGE_KEY = 'pos_master_sync_meta_v1';
+const MASTER_DATA_SNAPSHOT_STORAGE_KEY = 'pos_master_data_snapshot_v1';
 const MASTER_SYNC_POLL_INTERVAL_MS = 30000;
 const MASTER_SYNC_FULL_REFRESH_INTERVAL_MS = 5 * 60 * 1000;
 const MASTER_SYNC_FALLBACK_INTERVAL_MS = 45000;
 let memoryReprintSpecCache = [];
 let memoryPrinterProfile = null;
 let memoryMasterSyncMeta = {};
+let memoryMasterDataSnapshot = null;
 const canUseLocalStorage = () => {
   return typeof globalThis !== 'undefined' && typeof globalThis.localStorage !== 'undefined';
 };
@@ -1882,6 +1884,65 @@ const persistMasterSyncMeta = (value) => {
     }
   } else {
     memoryMasterSyncMeta = next;
+  }
+};
+const normalizeMasterDataSnapshotCache = (value) => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return null;
+  }
+
+  const normalized = {
+    products: Array.isArray(value.products) ? value.products : [],
+    finishingCatalog: Array.isArray(value.finishingCatalog) ? value.finishingCatalog : [],
+    materials: Array.isArray(value.materials) ? value.materials : [],
+    catalogMaterialNameMap: value.catalogMaterialNameMap && typeof value.catalogMaterialNameMap === 'object' && !Array.isArray(value.catalogMaterialNameMap)
+      ? value.catalogMaterialNameMap
+      : {},
+    customers: Array.isArray(value.customers) ? value.customers : [],
+    customerTypes: Array.isArray(value.customerTypes) ? value.customerTypes : [],
+    posSettingsMeta: value.posSettingsMeta && typeof value.posSettingsMeta === 'object' && !Array.isArray(value.posSettingsMeta)
+      ? value.posSettingsMeta
+      : {},
+    posSettings: value.posSettings && typeof value.posSettings === 'object' && !Array.isArray(value.posSettings)
+      ? value.posSettings
+      : null,
+  };
+
+  const hasUsableRows = normalized.products.length > 0
+    || normalized.customers.length > 0
+    || normalized.materials.length > 0
+    || normalized.finishingCatalog.length > 0
+    || Boolean(normalized.posSettings);
+
+  return hasUsableRows ? normalized : null;
+};
+const hasUsableMasterDataSnapshot = (value) => Boolean(normalizeMasterDataSnapshotCache(value));
+const loadMasterDataSnapshotCache = () => {
+  if (canUseLocalStorage()) {
+    try {
+      const raw = globalThis.localStorage.getItem(MASTER_DATA_SNAPSHOT_STORAGE_KEY);
+      if (!raw) return null;
+      return normalizeMasterDataSnapshotCache(JSON.parse(raw));
+    } catch (_error) {
+      return null;
+    }
+  }
+  return normalizeMasterDataSnapshotCache(memoryMasterDataSnapshot);
+};
+const persistMasterDataSnapshotCache = (value) => {
+  const next = normalizeMasterDataSnapshotCache(value);
+  if (!next) {
+    return;
+  }
+
+  if (canUseLocalStorage()) {
+    try {
+      globalThis.localStorage.setItem(MASTER_DATA_SNAPSHOT_STORAGE_KEY, JSON.stringify(next));
+    } catch (_error) {
+      // ignore storage errors
+    }
+  } else {
+    memoryMasterDataSnapshot = next;
   }
 };
 const toSyncVersionValue = (value) => {
@@ -2208,6 +2269,18 @@ const normalizeInvoiceOrderStatus = (row) => {
     || '',
   );
 };
+const resolveInvoiceRowTotalAmount = (row) => {
+  const queuedItems = Array.isArray(row?.items) ? row.items : [];
+  return roundMoney(Number(
+    row?.invoice?.total
+    || row?.total
+    || row?.grand_total
+    || row?.approval?.amount
+    || row?.__queue_total
+    || calculateDraftItemsTotal(queuedItems)
+    || 0,
+  ));
+};
 const isDraftInvoiceRow = (row) => {
   return isDraftInvoiceRowVisible(row);
 };
@@ -2274,6 +2347,20 @@ const resolveInvoiceProductionLifecycle = (row) => {
   return { key: 'not_required', label: 'Tidak Perlu Produksi', color: '#475467' };
 };
 const getProductionCountsForInvoice = (row) => {
+  const summarizedProduction = row?.production && typeof row.production === 'object' ? row.production : null;
+  if (summarizedProduction) {
+    const counts = {
+      waiting_design: Number(summarizedProduction?.waiting_design || 0) || 0,
+      waiting_production: Number(summarizedProduction?.waiting_production || 0) || 0,
+      in_batch: Number(summarizedProduction?.in_batch || 0) || 0,
+      printed: Number(summarizedProduction?.printed || 0) || 0,
+    };
+    const totalTracked = Object.values(counts).reduce((sum, val) => sum + Number(val || 0), 0);
+    if (totalTracked > 0) {
+      return counts;
+    }
+  }
+
   const items = Array.isArray(row?.items) ? row.items : [];
   if (items.length === 0) {
     return null;
@@ -2295,6 +2382,13 @@ const getProductionCountsForInvoice = (row) => {
     return null;
   }
   return counts;
+};
+const getInvoiceRowItemCount = (row) => {
+  const explicitCount = Number(row?.item_count ?? row?.production?.item_count ?? 0) || 0;
+  if (explicitCount > 0) {
+    return explicitCount;
+  }
+  return Array.isArray(row?.items) ? row.items.length : 0;
 };
 const summarizeProductionStatusForInvoice = (row) => {
   const counts = getProductionCountsForInvoice(row);
@@ -4012,8 +4106,11 @@ const resolveOrderPaymentMethodLabel = (row) => humanizePaymentMethod(
   || '',
 );
 const resolveOrderPaymentTargetLabel = (row, accountRows = []) => {
+  const directTarget = row?.payment_target && typeof row.payment_target === 'object' ? row.payment_target : null;
   const resolvedBankAccountId = Number(
-    row?.bank_account_id
+    directTarget?.id
+    || directTarget?.bank_account_id
+    || row?.bank_account_id
     || row?.invoice?.bank_account_id
     || row?.payment?.bank_account_id
     || row?.payment_debug?.last_payment_bank_account_id
@@ -4025,6 +4122,14 @@ const resolveOrderPaymentTargetLabel = (row, accountRows = []) => {
     || Number(accountRow?.accountingAccountId || 0) === resolvedBankAccountId
   )) || null;
   const fallbackPaymentTargetName = [(
+    directTarget?.label
+    || ''
+  ), (
+    [directTarget?.code, directTarget?.name]
+      .map((value) => String(value || '').trim())
+      .filter(Boolean)
+      .join(' - ')
+  ), (
     row?.payment_debug?.last_payment_bank_account_code
     || row?.payment_debug?.invoice_sales_bank_account_code
     || ''
@@ -4086,6 +4191,167 @@ const isValidIsoDateText = (value) => {
     return false;
   }
   return formatIsoDate(parsed) === text;
+};
+const parseIsoDateTimestamp = (value, boundary = 'start') => {
+  const text = String(value || '').trim();
+  if (!isValidIsoDateText(text)) {
+    return null;
+  }
+  const [year, month, day] = text.split('-').map((part) => Number(part));
+  if (boundary === 'end') {
+    return new Date(year, month - 1, day, 23, 59, 59, 999).getTime();
+  }
+  return new Date(year, month - 1, day, 0, 0, 0, 0).getTime();
+};
+const startOfLocalDay = (value = new Date()) => {
+  const date = value instanceof Date ? value : new Date(value);
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate());
+};
+const addLocalDays = (value, days = 0) => {
+  const base = startOfLocalDay(value);
+  base.setDate(base.getDate() + Number(days || 0));
+  return base;
+};
+const startOfLocalWeek = (value = new Date()) => {
+  const base = startOfLocalDay(value);
+  const dayOfWeek = base.getDay();
+  const diff = dayOfWeek === 0 ? -6 : 1 - dayOfWeek;
+  return addLocalDays(base, diff);
+};
+const startOfLocalMonth = (value = new Date()) => {
+  const date = startOfLocalDay(value);
+  return new Date(date.getFullYear(), date.getMonth(), 1);
+};
+const endOfLocalMonth = (value = new Date()) => {
+  const date = startOfLocalDay(value);
+  return new Date(date.getFullYear(), date.getMonth() + 1, 0);
+};
+const formatMonthPresetLabel = (value) => {
+  const date = startOfLocalDay(value);
+  return date.toLocaleDateString('id-ID', {
+    month: 'long',
+    year: 'numeric',
+  });
+};
+const buildInvoiceDatePresetCollections = (referenceDate = new Date()) => {
+  const today = startOfLocalDay(referenceDate);
+  const yesterday = addLocalDays(today, -1);
+  const weekStart = startOfLocalWeek(today);
+  const monthStart = startOfLocalMonth(today);
+  const previousMonthStart = startOfLocalMonth(new Date(today.getFullYear(), today.getMonth() - 1, 1));
+  const previousMonthEnd = endOfLocalMonth(previousMonthStart);
+
+  const quickPresets = [
+    {
+      key: 'today',
+      label: 'Hari Ini',
+      from: formatIsoDate(today),
+      to: formatIsoDate(today),
+    },
+    {
+      key: 'yesterday',
+      label: 'Kemarin',
+      from: formatIsoDate(yesterday),
+      to: formatIsoDate(yesterday),
+    },
+    {
+      key: 'this_week',
+      label: 'Minggu Ini',
+      from: formatIsoDate(weekStart),
+      to: formatIsoDate(today),
+    },
+    {
+      key: 'last_7_days',
+      label: '7 Hari',
+      from: formatIsoDate(addLocalDays(today, -6)),
+      to: formatIsoDate(today),
+    },
+    {
+      key: 'this_month',
+      label: 'Bulan Ini',
+      from: formatIsoDate(monthStart),
+      to: formatIsoDate(today),
+    },
+    {
+      key: 'last_month',
+      label: 'Bulan Lalu',
+      from: formatIsoDate(previousMonthStart),
+      to: formatIsoDate(previousMonthEnd),
+    },
+  ];
+
+  const monthPresets = Array.from({ length: 6 }, (_, index) => {
+    const monthDate = new Date(today.getFullYear(), today.getMonth() - index, 1);
+    const monthRangeStart = startOfLocalMonth(monthDate);
+    const monthRangeEnd = endOfLocalMonth(monthDate);
+    const key = `month:${formatIsoDate(monthRangeStart).slice(0, 7)}`;
+
+    return {
+      key,
+      label: formatMonthPresetLabel(monthDate),
+      from: formatIsoDate(monthRangeStart),
+      to: formatIsoDate(monthRangeEnd),
+    };
+  });
+
+  return { quickPresets, monthPresets };
+};
+const DEFAULT_INVOICE_DATE_PRESET = buildInvoiceDatePresetCollections(new Date()).quickPresets
+  .find((preset) => preset?.key === 'this_month') || null;
+const resolveInvoiceDateRange = (dateFrom, dateTo) => {
+  const startAt = parseIsoDateTimestamp(dateFrom, 'start');
+  const endAt = parseIsoDateTimestamp(dateTo, 'end');
+
+  if (startAt !== null && endAt !== null && startAt > endAt) {
+    return {
+      startAt: parseIsoDateTimestamp(dateTo, 'start'),
+      endAt: parseIsoDateTimestamp(dateFrom, 'end'),
+    };
+  }
+
+  return { startAt, endAt };
+};
+const resolveInvoiceRowDateText = (row) => {
+  return String(
+    row?.invoice?.invoice_date
+    || row?.invoice?.created_at
+    || row?.created_at
+    || row?.order?.created_at
+    || row?.order?.updated_at
+    || '',
+  ).trim();
+};
+const parseInvoiceRowDateTimestamp = (row) => {
+  const raw = resolveInvoiceRowDateText(row);
+  if (!raw) {
+    return null;
+  }
+  if (isValidIsoDateText(raw)) {
+    return parseIsoDateTimestamp(raw, 'start');
+  }
+  const parsed = new Date(raw);
+  if (Number.isNaN(parsed.getTime())) {
+    return null;
+  }
+  return parsed.getTime();
+};
+const isInvoiceRowInDateRange = (row, dateFrom, dateTo) => {
+  const { startAt, endAt } = resolveInvoiceDateRange(dateFrom, dateTo);
+  if (startAt === null && endAt === null) {
+    return true;
+  }
+
+  const rowTimestamp = parseInvoiceRowDateTimestamp(row);
+  if (rowTimestamp === null) {
+    return false;
+  }
+  if (startAt !== null && rowTimestamp < startAt) {
+    return false;
+  }
+  if (endAt !== null && rowTimestamp > endAt) {
+    return false;
+  }
+  return true;
 };
 const formatCashFlowSourceLabel = (value) => {
   const source = String(value || '').trim().toLowerCase();
@@ -4378,6 +4644,11 @@ const resolveDraftSnapshotState = (row) => {
     };
   }
 
+  const summarizedState = row?.draft_snapshot_state;
+  if (summarizedState && typeof summarizedState === 'object' && !Array.isArray(summarizedState)) {
+    return summarizedState;
+  }
+
   const items = Array.isArray(row?.items) ? row.items : [];
   if (items.length === 0) {
     return {
@@ -4614,6 +4885,37 @@ const SalesScreen = ({ currentUser, onLogout }) => {
   const [receivableStatusFilter, setReceivableStatusFilter] = useState('all');
   const [approvalStatusFilter, setApprovalStatusFilter] = useState('all');
   const [invoiceSearch, setInvoiceSearch] = useState('');
+  const [invoiceDateFrom, setInvoiceDateFrom] = useState(() => String(DEFAULT_INVOICE_DATE_PRESET?.from || '').trim());
+  const [invoiceDateTo, setInvoiceDateTo] = useState(() => String(DEFAULT_INVOICE_DATE_PRESET?.to || '').trim());
+  const invoiceDatePresetCollections = useMemo(
+    () => buildInvoiceDatePresetCollections(new Date()),
+    [],
+  );
+  const allInvoiceDatePresets = useMemo(
+    () => [
+      ...invoiceDatePresetCollections.quickPresets,
+      ...invoiceDatePresetCollections.monthPresets,
+    ],
+    [invoiceDatePresetCollections],
+  );
+  const activeInvoiceDatePresetKey = useMemo(() => {
+    const selectedFrom = String(invoiceDateFrom || '').trim();
+    const selectedTo = String(invoiceDateTo || '').trim();
+    const matchedPreset = allInvoiceDatePresets.find((preset) => (
+      String(preset?.from || '').trim() === selectedFrom
+      && String(preset?.to || '').trim() === selectedTo
+    ));
+
+    return matchedPreset?.key || '';
+  }, [allInvoiceDatePresets, invoiceDateFrom, invoiceDateTo]);
+  const applyInvoiceDatePreset = (preset) => {
+    setInvoiceDateFrom(String(preset?.from || '').trim());
+    setInvoiceDateTo(String(preset?.to || '').trim());
+  };
+  const clearInvoiceDateFilter = () => {
+    setInvoiceDateFrom('');
+    setInvoiceDateTo('');
+  };
   const [isDraftLoading, setIsDraftLoading] = useState(false);
   const [isDeletingDraftId, setIsDeletingDraftId] = useState(null);
   const [productionRows, setProductionRows] = useState([]);
@@ -5460,6 +5762,24 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     if (options?.resetProductDetails !== false) {
       setProductDetails({});
     }
+    if (options?.persistCache !== false) {
+      persistMasterDataSnapshotCache({
+        products: Array.isArray(nextSnapshot.products) ? nextSnapshot.products : [],
+        finishingCatalog: Array.isArray(nextSnapshot.finishingCatalog) ? nextSnapshot.finishingCatalog : [],
+        materials: Array.isArray(nextSnapshot.materials) ? nextSnapshot.materials : [],
+        catalogMaterialNameMap: nextSnapshot.catalogMaterialNameMap && typeof nextSnapshot.catalogMaterialNameMap === 'object'
+          ? nextSnapshot.catalogMaterialNameMap
+          : {},
+        customers: Array.isArray(nextSnapshot.customers) ? nextSnapshot.customers : [],
+        customerTypes: Array.isArray(nextSnapshot.customerTypes) ? nextSnapshot.customerTypes : [],
+        posSettingsMeta: nextSnapshot.posSettingsMeta && typeof nextSnapshot.posSettingsMeta === 'object'
+          ? nextSnapshot.posSettingsMeta
+          : {},
+        posSettings: nextSnapshot.posSettings && typeof nextSnapshot.posSettings === 'object'
+          ? nextSnapshot.posSettings
+          : null,
+      });
+    }
   };
 
   const updateMasterSyncMeta = (updates = {}) => {
@@ -5625,6 +5945,30 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       if (Number(error?.status || 0) === 401) {
         handleSessionExpired();
         return { failed: true, reason: 'unauthorized' };
+      }
+      const cachedSnapshot = loadMasterDataSnapshotCache();
+      const hasLiveMasterData = (
+        (Array.isArray(products) && products.length > 0)
+        || (Array.isArray(customers) && customers.length > 0)
+        || (Array.isArray(materials) && materials.length > 0)
+      );
+      if (String(error?.code || '').trim() === 'REQUEST_TIMEOUT' && (hasLiveMasterData || hasUsableMasterDataSnapshot(cachedSnapshot))) {
+        if (!hasLiveMasterData && cachedSnapshot) {
+          applyMasterDataSnapshot(cachedSnapshot, {
+            resetProductDetails: false,
+            persistCache: false,
+          });
+        }
+        const staleLabelTime = formatSyncClock(previousMeta?.lastSuccessfulSyncAt);
+        setMasterSyncStatus((prev) => ({
+          ...prev,
+          state: 'success',
+          label: staleLabelTime
+            ? `Sinkron tertunda, data terakhir (${staleLabelTime}) masih dipakai`
+            : 'Sinkron tertunda, data terakhir masih dipakai',
+          lastSuccessfulAt: previousMeta?.lastSuccessfulSyncAt || prev.lastSuccessfulAt,
+        }));
+        return { failed: true, reason: 'timeout_using_cache', error };
       }
       setMasterSyncStatus((prev) => ({
         ...prev,
@@ -6140,6 +6484,16 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       ...(fallbackRow && typeof fallbackRow === 'object' ? fallbackRow : {}),
       ...(nestedOrder || {}),
       ...detailRow,
+      list_compact: detailItems.length > 0
+        ? false
+        : Boolean(detailRow?.list_compact ?? nestedOrder?.list_compact ?? fallbackRow?.list_compact),
+      item_count: Number(
+        detailRow?.item_count
+        || nestedOrder?.item_count
+        || fallbackRow?.item_count
+        || detailItems.length
+        || 0
+      ) || 0,
       customer: detailRow?.customer || nestedOrder?.customer || fallbackRow?.customer || null,
       invoice: detailRow?.invoice || nestedOrder?.invoice || fallbackRow?.invoice || null,
       pickup: detailRow?.pickup || nestedOrder?.pickup || fallbackRow?.pickup || null,
@@ -6719,7 +7073,9 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     const paidTotal = Number(sourceRow?.invoice?.paid_total || sourceRow?.paid_total || 0) || 0;
     const dueTotal = Number(sourceRow?.invoice?.due_total || sourceRow?.due_total || 0) || 0;
     const resolvedBankAccountId = Number(
-      sourceRow?.bank_account_id
+      sourceRow?.payment_target?.id
+      || sourceRow?.payment_target?.bank_account_id
+      || sourceRow?.bank_account_id
       || sourceRow?.invoice?.bank_account_id
       || sourceRow?.payment?.bank_account_id
       || 0
@@ -6729,6 +7085,14 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       || Number(row?.accountingAccountId || 0) === resolvedBankAccountId
     )) || null;
     const fallbackPaymentTargetName = [(
+      sourceRow?.payment_target?.label
+      || ''
+    ), (
+      [sourceRow?.payment_target?.code, sourceRow?.payment_target?.name]
+        .map((value) => String(value || '').trim())
+        .filter(Boolean)
+        .join(' - ')
+    ), (
       sourceRow?.payment_debug?.last_payment_bank_account_code
       || sourceRow?.payment_debug?.invoice_sales_bank_account_code
       || ''
@@ -6965,6 +7329,28 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       if (Number(error?.status || 0) === 401) {
         handleSessionExpired();
         setIsPreparingApp(false);
+        return;
+      }
+      const cachedSnapshot = loadMasterDataSnapshotCache();
+      if (hasUsableMasterDataSnapshot(cachedSnapshot)) {
+        applyMasterDataSnapshot(cachedSnapshot, {
+          resetProductDetails: true,
+          persistCache: false,
+        });
+        setBackendReady(true);
+        setHealthStatus({
+          state: 'offline',
+          label: 'Offline',
+          checkedAt: new Date().toISOString(),
+        });
+        setLastSyncInfo(`Mode cache lokal aktif: ${error.message}`);
+        setMasterSyncStatus((prev) => ({
+          ...prev,
+          state: 'success',
+          label: 'Backend lambat, memakai cache data master terakhir',
+          lastSuccessfulAt: masterSyncMetaRef.current?.lastSuccessfulSyncAt || prev.lastSuccessfulAt,
+        }));
+        setPrepareMessage('Cache data master berhasil dipakai.');
         return;
       }
       setHealthStatus({
@@ -8522,12 +8908,32 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     }
     try {
       setIsDraftLoading(true);
-      const payload = await fetchPosOrderTransactions();
-      let rows = toDataRows(payload);
-      if (rows.length === 0) {
-        const fallback = await fetchPosOrders();
-        rows = toDataRows(fallback);
+      const invoiceRequestOptions = {
+        perPage: 100,
+        maxPages: 100,
+        timeoutMs: 45000,
+        view: 'workspace',
+      };
+      let rows = [];
+      let invoiceLoadError = null;
+
+      try {
+        rows = await fetchAllPosOrderTransactions(invoiceRequestOptions);
+      } catch (error) {
+        invoiceLoadError = error;
       }
+
+      if (rows.length === 0) {
+        try {
+          rows = await fetchAllPosOrders(invoiceRequestOptions);
+          invoiceLoadError = null;
+        } catch (fallbackError) {
+          invoiceLoadError = invoiceLoadError
+            ? new Error(`${invoiceLoadError.message}\nFallback daftar order juga gagal: ${fallbackError.message}`)
+            : fallbackError;
+        }
+      }
+
       const approvalRows = approvalRowsInput || await fetchReceivableApprovalRows().catch(() => []);
       setReceivableApprovalRows(approvalRows);
       syncReceivableApprovalSnapshot(approvalRows);
@@ -8537,7 +8943,12 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         const approvalType = normalizeApprovalType(row?.approval?.type || row?.approval_type);
         return !(approvalType === 'receivable' && approvalStatus === 'approved' && orderId > 0);
       });
-      setDraftInvoices([...queueRows, ...approvalListRows, ...rows]);
+      const mergedRows = [...queueRows, ...approvalListRows, ...rows];
+      setDraftInvoices(mergedRows);
+
+      if (invoiceLoadError && mergedRows.length === 0) {
+        openNotice('Invoice', `Gagal memuat invoice: ${invoiceLoadError.message}`);
+      }
     } catch (error) {
       setDraftInvoices(queueRows);
       if (queueRows.length === 0) {
@@ -11666,6 +12077,11 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     () => filterInvoiceRowsForUser(draftInvoices, currentUser),
     [currentUser, draftInvoices],
   );
+  const dateFilteredInvoiceRows = useMemo(
+    () => (Array.isArray(visibleInvoiceRows) ? visibleInvoiceRows : [])
+      .filter((row) => isInvoiceRowInDateRange(row, invoiceDateFrom, invoiceDateTo)),
+    [invoiceDateFrom, invoiceDateTo, visibleInvoiceRows],
+  );
   const activeManualApprovalLinks = useMemo(() => {
     const orderIds = new Set();
     const invoiceIds = new Set();
@@ -11691,13 +12107,16 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     return { orderIds, invoiceIds };
   }, [receivableApprovalRows]);
   const invoiceAreaSummary = useMemo(() => {
-    const rows = Array.isArray(visibleInvoiceRows) ? visibleInvoiceRows : [];
+    const rows = Array.isArray(dateFilteredInvoiceRows) ? dateFilteredInvoiceRows : [];
     const totals = rows.reduce((acc, row) => {
+      const totalAmount = resolveInvoiceRowTotalAmount(row);
       if (isDraftInvoiceRow(row)) {
         acc.draftCount += 1;
+        acc.draftAmount += totalAmount;
       }
       if (isInvoiceSuccessRow(row)) {
         acc.successCount += 1;
+        acc.successAmount += totalAmount;
       }
       if (isReceivableApprovalInvoiceRow(row)) {
         acc.approvalCount += 1;
@@ -11709,7 +12128,9 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       return acc;
     }, {
       draftCount: 0,
+      draftAmount: 0,
       successCount: 0,
+      successAmount: 0,
       approvalCount: 0,
       receivableCount: 0,
       receivableDueTotal: 0,
@@ -11717,9 +12138,11 @@ const SalesScreen = ({ currentUser, onLogout }) => {
 
     return {
       ...totals,
+      draftAmount: roundMoney(totals.draftAmount),
+      successAmount: roundMoney(totals.successAmount),
       receivableDueTotal: roundMoney(totals.receivableDueTotal),
     };
-  }, [visibleInvoiceRows]);
+  }, [dateFilteredInvoiceRows]);
   const invoiceSectionMeta = useMemo(() => {
     if (invoiceFilter === 'draft') {
       return {
@@ -11751,7 +12174,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     };
   }, [invoiceFilter]);
   const filteredInvoices = useMemo(() => {
-    const rows = Array.isArray(visibleInvoiceRows) ? visibleInvoiceRows : [];
+    const rows = Array.isArray(dateFilteredInvoiceRows) ? dateFilteredInvoiceRows : [];
     const keyword = normalizeText(invoiceSearch);
     const searchedRows = keyword
       ? rows.filter((row) => {
@@ -11804,10 +12227,38 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         });
     }
     return searchedRows;
-  }, [approvalStatusFilter, invoiceFilter, invoiceSearch, receivableStatusFilter, visibleInvoiceRows]);
+  }, [approvalStatusFilter, dateFilteredInvoiceRows, invoiceFilter, invoiceSearch, receivableStatusFilter]);
+  const filteredInvoiceSummary = useMemo(() => {
+    if (!['draft', 'success'].includes(invoiceFilter)) {
+      return null;
+    }
+    const rows = Array.isArray(filteredInvoices) ? filteredInvoices : [];
+    if (rows.length === 0) {
+      return null;
+    }
+    const totals = rows.reduce((acc, row) => {
+      acc.totalInvoices += 1;
+      acc.totalAmount += resolveInvoiceRowTotalAmount(row);
+      return acc;
+    }, {
+      totalInvoices: 0,
+      totalAmount: 0,
+    });
+    const dateRangeActive = Boolean(String(invoiceDateFrom || '').trim() || String(invoiceDateTo || '').trim());
+    const periodLabel = dateRangeActive
+      ? `${String(invoiceDateFrom || '').trim() || 'awal'} s/d ${String(invoiceDateTo || '').trim() || 'akhir'}`
+      : 'Semua tanggal';
+
+    return {
+      title: invoiceFilter === 'draft' ? 'Ringkasan Draft Tampil' : 'Ringkasan Invoice Sukses Tampil',
+      totalInvoices: totals.totalInvoices,
+      totalAmount: roundMoney(totals.totalAmount),
+      periodLabel,
+    };
+  }, [filteredInvoices, invoiceDateFrom, invoiceDateTo, invoiceFilter]);
   const receivableInvoiceRows = useMemo(() => {
     const keyword = normalizeText(invoiceSearch);
-    return (Array.isArray(visibleInvoiceRows) ? visibleInvoiceRows : [])
+    return (Array.isArray(dateFilteredInvoiceRows) ? dateFilteredInvoiceRows : [])
       .filter((row) => isReceivableInvoiceRow(row))
       .filter((row) => {
         if (!keyword) {
@@ -11822,7 +12273,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
           || invoiceNo.includes(keyword)
           || orderId.includes(keyword);
       });
-  }, [invoiceSearch, visibleInvoiceRows]);
+  }, [dateFilteredInvoiceRows, invoiceSearch]);
   const receivableCustomerSummary = useMemo(() => {
     if (invoiceFilter !== 'receivable') {
       return null;
@@ -11840,8 +12291,8 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         .filter(Boolean),
     ));
     const oldestRow = [...rows].sort((a, b) => {
-      const aTime = new Date(a?.created_at || 0).getTime() || 0;
-      const bTime = new Date(b?.created_at || 0).getTime() || 0;
+      const aTime = parseInvoiceRowDateTimestamp(a) || 0;
+      const bTime = parseInvoiceRowDateTimestamp(b) || 0;
       return aTime - bTime;
     })[0] || null;
     const summary = rows.reduce((acc, row) => {
@@ -11862,8 +12313,8 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       totalAmount: roundMoney(summary.totalAmount),
       customerCount: uniqueCustomers.length,
       oldestInvoiceNo: String(oldestRow?.invoice?.invoice_no || '-'),
-      oldestInvoiceDate: String(oldestRow?.created_at || ''),
-      oldestInvoiceAgeDays: diffDaysFromNow(oldestRow?.created_at),
+      oldestInvoiceDate: resolveInvoiceRowDateText(oldestRow),
+      oldestInvoiceAgeDays: diffDaysFromNow(resolveInvoiceRowDateText(oldestRow)),
     };
   }, [invoiceFilter, invoiceSearch, receivableInvoiceRows]);
   const receivablePortfolioSummary = useMemo(() => {
@@ -11961,14 +12412,21 @@ const SalesScreen = ({ currentUser, onLogout }) => {
   };
   const handleViewInvoiceDetail = async (row) => {
     let sourceRow = row;
+    let detailLoaded = false;
     const selectedOrderId = Number(row?.approval?.orderId || row?.order?.id || row?.id || 0);
     if (selectedOrderId > 0) {
       try {
         const detailPayload = await fetchPosOrderDetail(selectedOrderId);
         sourceRow = normalizeOrderDetailRow(detailPayload, row) || row;
+        detailLoaded = true;
       } catch (_error) {
         // fallback ke row list invoice
       }
+    }
+    const hasInlineItems = Array.isArray(sourceRow?.items) && sourceRow.items.length > 0;
+    if (!detailLoaded && Boolean(sourceRow?.list_compact) && !hasInlineItems) {
+      openNotice('Detail Invoice', 'Detail invoice lengkap belum berhasil dimuat. Coba refresh lalu buka lagi.');
+      return;
     }
     if (!canUserViewInvoiceRow(sourceRow, currentUser)) {
       openNotice('Detail Invoice', 'Invoice tidak tersedia untuk user kasir ini atau sudah tidak bisa diakses.');
@@ -12156,14 +12614,21 @@ const SalesScreen = ({ currentUser, onLogout }) => {
   };
   const handleReprintInvoice = async (row) => {
     let sourceRow = row;
+    let detailLoaded = false;
     const orderId = Number(row?.id || 0);
     if (orderId > 0) {
       try {
         const detailPayload = await fetchPosOrderDetail(orderId);
         sourceRow = normalizeOrderDetailRow(detailPayload, row) || row;
+        detailLoaded = true;
       } catch (_error) {
         // fallback pakai data list invoice bila detail order gagal diambil
       }
+    }
+    const hasInlineItems = Array.isArray(sourceRow?.items) && sourceRow.items.length > 0;
+    if (!detailLoaded && Boolean(sourceRow?.list_compact) && !hasInlineItems) {
+      openNotice('Cetak Ulang', 'Detail invoice lengkap belum berhasil dimuat. Coba refresh lalu ulangi cetak.');
+      return;
     }
     if (!canUserViewInvoiceRow(sourceRow, currentUser)) {
       openNotice('Cetak Ulang', 'Invoice tidak tersedia untuk user kasir ini atau sudah tidak bisa diakses.');
@@ -13034,28 +13499,10 @@ const SalesScreen = ({ currentUser, onLogout }) => {
               <Text style={styles.greenTabText}>Input Order</Text>
             </Pressable>
             <Pressable
-              style={[styles.greenTab, activeMenu === 'draft_orders' ? styles.greenTabActive : null]}
-              onPress={() => openInvoiceAreaMenu('draft_orders')}
+              style={[styles.greenTab, isInvoiceAreaMenu(activeMenu) ? styles.greenTabActive : null]}
+              onPress={() => openInvoiceAreaMenu(resolveInvoiceMenuForFilter(invoiceFilter))}
             >
-              <Text style={styles.greenTabText}>Draft Order</Text>
-            </Pressable>
-            <Pressable
-              style={[styles.greenTab, activeMenu === 'invoice_success' ? styles.greenTabActive : null]}
-              onPress={() => openInvoiceAreaMenu('invoice_success')}
-            >
-              <Text style={styles.greenTabText}>Invoice Sukses</Text>
-            </Pressable>
-            <Pressable
-              style={[styles.greenTab, activeMenu === 'approval_queue' ? styles.greenTabActive : null]}
-              onPress={() => openInvoiceAreaMenu('approval_queue')}
-            >
-              <Text style={styles.greenTabText}>Butuh Approval</Text>
-            </Pressable>
-            <Pressable
-              style={[styles.greenTab, activeMenu === 'receivable' ? styles.greenTabActive : null]}
-              onPress={() => openInvoiceAreaMenu('receivable')}
-            >
-              <Text style={styles.greenTabText}>Piutang</Text>
+              <Text style={styles.greenTabText}>Invoice</Text>
             </Pressable>
             <Pressable
               style={[styles.greenTab, activeMenu === 'production' ? styles.greenTabActive : null]}
@@ -13290,8 +13737,16 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                 onChangeApprovalStatusFilter={setApprovalStatusFilter}
                 invoiceSearch={invoiceSearch}
                 onChangeInvoiceSearch={setInvoiceSearch}
+                invoiceDateFrom={invoiceDateFrom}
+                invoiceDateTo={invoiceDateTo}
+                invoiceDateQuickPresets={invoiceDatePresetCollections.quickPresets}
+                invoiceDateMonthPresets={invoiceDatePresetCollections.monthPresets}
+                activeInvoiceDatePresetKey={activeInvoiceDatePresetKey}
+                onSelectInvoiceDatePreset={applyInvoiceDatePreset}
+                onClearInvoiceDateFilter={clearInvoiceDateFilter}
               />
               <InvoiceWorkspaceContent
+                filteredSummary={filteredInvoiceSummary}
                 customerSummary={receivableCustomerSummary}
                 portfolioSummary={receivablePortfolioSummary}
                 approvalSummary={approvalPortfolioSummary}
@@ -13330,17 +13785,8 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                       : String(row?.id || '-');
                     const invoiceNo = String(row?.invoice?.invoice_no || '').trim() || (isApprovalRow ? 'Belum ada invoice' : '-');
                     const customerName = String(row?.customer?.name || 'Pelanggan umum');
-                    const queuedItems = Array.isArray(row?.items) ? row.items : [];
-                    const total = Number(
-                      row?.invoice?.total
-                      || row?.total
-                      || row?.grand_total
-                      || approvalInfo?.amount
-                      || row?.__queue_total
-                      || calculateDraftItemsTotal(queuedItems)
-                      || 0,
-                    );
-                    const itemCount = Array.isArray(row?.items) ? row.items.length : 0;
+                    const total = resolveInvoiceRowTotalAmount(row);
+                    const itemCount = getInvoiceRowItemCount(row);
                     const isDeleting = String(isDeletingDraftId || '') === String(row?.id || '');
                     const isDraftRow = isDraftInvoiceRow(row);
                     const draftExpiry = isDraftRow ? getDraftExpiryMeta(row?.created_at, draftTimeTick) : null;
@@ -13433,7 +13879,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                         total={total}
                         dueTotal={dueTotal}
                         paidTotal={paidTotal}
-                        createdAtText={String(row?.created_at || '-')}
+                        createdAtText={resolveInvoiceRowDateText(row) || '-'}
                         draftExpiryLabel={draftExpiry?.label || 'Draft aktif tersimpan'}
                         draftExpired={Boolean(draftExpiry?.isExpired)}
                         isDeleting={isDeleting}
@@ -16448,11 +16894,17 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     borderRadius: 18,
-    shadowColor: '#163a85',
-    shadowOpacity: 0.08,
-    shadowRadius: 22,
-    shadowOffset: { width: 0, height: 10 },
-    elevation: 5,
+    ...(Platform.OS === 'web'
+      ? {
+        boxShadow: '0px 10px 22px rgba(22, 58, 133, 0.08)',
+      }
+      : {
+        shadowColor: '#163a85',
+        shadowOpacity: 0.08,
+        shadowRadius: 22,
+        shadowOffset: { width: 0, height: 10 },
+        elevation: 5,
+      }),
   },
   loadingTitle: {
     marginTop: 18,
