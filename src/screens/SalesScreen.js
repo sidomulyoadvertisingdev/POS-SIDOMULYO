@@ -2,10 +2,12 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { Alert, AppState, Image, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, Vibration, View, useWindowDimensions } from 'react-native';
 import { Asset } from 'expo-asset';
 import CartList from '../components/CartList';
+import ExpensePanel from '../components/ExpensePanel';
 import InvoiceWorkspaceContent from '../components/InvoiceWorkspaceContent';
 import InvoiceWorkspaceHeader from '../components/InvoiceWorkspaceHeader';
 import InvoiceWorkspaceRowCard from '../components/InvoiceWorkspaceRowCard';
 import PaymentSummary from '../components/PaymentSummary';
+import PurchaseMaterialPanel from '../components/PurchaseMaterialPanel';
 import ProductForm from '../components/ProductForm';
 import ProductionPanel from '../components/ProductionPanel';
 import SuccessAnimation from '../components/SuccessAnimation';
@@ -47,6 +49,7 @@ import {
   fetchPosProductDetail,
   fetchPosProducts,
   fetchPosReceivableApprovals,
+  getPengeluaranCategoryOptions,
   fetchPosManualApprovals,
   fetchPosSettings,
   fetchPosSyncChanges,
@@ -4823,12 +4826,17 @@ const SalesScreen = ({ currentUser, onLogout }) => {
   const [isFinanceRecipientsLoading, setIsFinanceRecipientsLoading] = useState(false);
   const [cashFlowTypes, setCashFlowTypes] = useState([]);
   const [isCashFlowTypesLoading, setIsCashFlowTypesLoading] = useState(false);
+  const [cashFlowSourceAccounts, setCashFlowSourceAccounts] = useState([]);
+  const [isCashFlowAccountsLoading, setIsCashFlowAccountsLoading] = useState(false);
   const [cashFlowRows, setCashFlowRows] = useState([]);
   const [isCashFlowRowsLoading, setIsCashFlowRowsLoading] = useState(false);
   const [cashFlowTransactionType, setCashFlowTransactionType] = useState('expense');
   const [cashFlowHistoryFilter, setCashFlowHistoryFilter] = useState('all');
   const [cashFlowTypeId, setCashFlowTypeId] = useState(null);
+  const [cashFlowSourceAccountId, setCashFlowSourceAccountId] = useState(null);
   const [cashFlowCategory, setCashFlowCategory] = useState('');
+  const [expenseCategoryModalVisible, setExpenseCategoryModalVisible] = useState(false);
+  const [expenseCategorySearch, setExpenseCategorySearch] = useState('');
   const [cashFlowAmount, setCashFlowAmount] = useState('');
   const [cashFlowNote, setCashFlowNote] = useState('');
   const [isCashFlowSubmitting, setIsCashFlowSubmitting] = useState(false);
@@ -5402,16 +5410,61 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     }
     try {
       setIsCashFlowTypesLoading(true);
-      const rows = await fetchPosCashFlowTypes({
-        type: transactionType || cashFlowTransactionType || '',
-        active_only: true,
-      });
-      setCashFlowTypes(Array.isArray(rows) ? rows : []);
+      const resolvedType = String(transactionType || cashFlowTransactionType || '').trim().toLowerCase();
+      if (resolvedType === 'expense') {
+        const rows = await getPengeluaranCategoryOptions();
+        setCashFlowTypes((Array.isArray(rows) ? rows : []).map((row) => ({
+          ...row,
+          id: Number(row?.id || 0) || null,
+          name: String(row?.name || '').trim(),
+          transaction_type: 'expense',
+          purchase_category_id: Number(row?.id || 0) || null,
+          purchase_category_code: String(row?.code || '').trim(),
+        })));
+      } else {
+        const rows = await fetchPosCashFlowTypes({
+          type: resolvedType,
+          active_only: true,
+        });
+        setCashFlowTypes(Array.isArray(rows) ? rows : []);
+      }
     } catch (error) {
       setCashFlowTypes([]);
       openNotice('Kas Masuk / Keluar', `Gagal memuat tipe transaksi: ${error.message}`);
     } finally {
       setIsCashFlowTypesLoading(false);
+    }
+  };
+
+  const loadCashFlowSourceAccounts = async () => {
+    if (!backendReady) {
+      setCashFlowSourceAccounts([]);
+      setCashFlowSourceAccountId(null);
+      return;
+    }
+    try {
+      setIsCashFlowAccountsLoading(true);
+      const rows = await fetchPosBankAccounts({
+        context: 'expense',
+        allowedTypes: ['cash', 'bank_transfer', 'qris', 'e_wallet'],
+      });
+      const options = toDataRows(rows)
+        .map((row) => normalizeBankAccountRow(row))
+        .filter((row) => Number(row?.accountingAccountId || row?.id || 0) > 0);
+      setCashFlowSourceAccounts(options);
+      setCashFlowSourceAccountId((currentId) => {
+        const resolvedCurrentId = Number(currentId || 0);
+        if (resolvedCurrentId > 0 && options.some((row) => Number(row?.accountingAccountId || row?.id || 0) === resolvedCurrentId)) {
+          return resolvedCurrentId;
+        }
+        return Number(options[0]?.accountingAccountId || options[0]?.id || 0) || null;
+      });
+    } catch (error) {
+      setCashFlowSourceAccounts([]);
+      setCashFlowSourceAccountId(null);
+      openNotice('Kas Masuk / Keluar', `Gagal memuat akun kas / bank: ${error.message}`);
+    } finally {
+      setIsCashFlowAccountsLoading(false);
     }
   };
 
@@ -8954,6 +9007,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     if (activeMenu === 'report') {
       loadClosingWorkspace();
       loadCashFlowTypes();
+      loadCashFlowSourceAccounts();
     }
   }, [activeMenu, backendReady]);
 
@@ -8969,6 +9023,11 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     if (activeMenu === 'report') {
       loadCashFlowTypes(cashFlowTransactionType);
       setCashFlowTypeId(null);
+      setExpenseCategoryModalVisible(false);
+      setExpenseCategorySearch('');
+      if (cashFlowTransactionType !== 'expense') {
+        setCashFlowSourceAccountId(null);
+      }
     }
   }, [cashFlowTransactionType]);
 
@@ -12678,6 +12737,26 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     () => availableCashFlowTypes.find((row) => Number(row?.id || 0) === Number(cashFlowTypeId || 0)) || null,
     [availableCashFlowTypes, cashFlowTypeId],
   );
+  const filteredExpenseCashFlowTypes = useMemo(() => {
+    const keyword = normalizeText(expenseCategorySearch);
+    const rows = Array.isArray(availableCashFlowTypes) ? availableCashFlowTypes : [];
+    if (String(cashFlowTransactionType || '').toLowerCase() !== 'expense') {
+      return [];
+    }
+    if (!keyword) {
+      return rows;
+    }
+    return rows.filter((row) => {
+      const name = normalizeText(row?.name || '');
+      const code = normalizeText(row?.purchase_category_code || row?.code || '');
+      return name.includes(keyword) || code.includes(keyword);
+    });
+  }, [availableCashFlowTypes, cashFlowTransactionType, expenseCategorySearch]);
+  const selectedCashFlowSourceAccountRow = useMemo(
+    () => (Array.isArray(cashFlowSourceAccounts) ? cashFlowSourceAccounts : [])
+      .find((row) => Number(row?.accountingAccountId || row?.id || 0) === Number(cashFlowSourceAccountId || 0)) || null,
+    [cashFlowSourceAccountId, cashFlowSourceAccounts],
+  );
   const recentCashFlowCategories = useMemo(
     () => Array.from(new Set(
       (Array.isArray(cashFlowRows) ? cashFlowRows : [])
@@ -12695,6 +12774,9 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       manualCategory: '',
       source: 'backend',
     }));
+    if (cashFlowTransactionType === 'expense') {
+      return backendTypeRows.slice(0, 12);
+    }
     const fallbackRows = (DEFAULT_CASH_FLOW_QUICK_CATEGORIES[cashFlowTransactionType] || []).map((label) => ({
       key: `fallback-${cashFlowTransactionType}-${label}`,
       label,
@@ -12993,6 +13075,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     const amount = parseCurrencyInput(cashFlowAmount);
     const occurredAt = String(closingReportDate || formatIsoDate(new Date())).trim();
     const manualCategory = String(cashFlowCategory || '').trim();
+    const isExpenseFlow = String(cashFlowTransactionType || '').trim().toLowerCase() === 'expense';
     if (!occurredAt) {
       openNotice('Kas Masuk / Keluar', 'Tanggal transaksi wajib diisi.');
       return;
@@ -13001,22 +13084,49 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       openNotice('Kas Masuk / Keluar', 'Nominal transaksi wajib lebih dari nol.');
       return;
     }
-    if (!selectedCashFlowType && !manualCategory) {
+    if (isExpenseFlow && !selectedCashFlowType) {
+      openNotice('Kas Masuk / Keluar', 'Pilih kategori pengeluaran dari backend terlebih dahulu.');
+      return;
+    }
+    if (!isExpenseFlow && !selectedCashFlowType && !manualCategory) {
       openNotice('Kas Masuk / Keluar', 'Pilih kategori transaksi atau isi kategori manual.');
+      return;
+    }
+    if (isExpenseFlow && !selectedCashFlowSourceAccountRow) {
+      openNotice('Kas Masuk / Keluar', 'Pilih akun kas / bank sumber pembayaran terlebih dahulu.');
       return;
     }
 
     try {
       setIsCashFlowSubmitting(true);
-      await createPosCashFlow({
+      const payload = {
         transaction_type: cashFlowTransactionType,
         occurred_at: occurredAt,
         amount,
-        income_expense_type_id: selectedCashFlowType ? Number(selectedCashFlowType.id) : null,
-        category: selectedCashFlowType ? null : manualCategory,
         note: String(cashFlowNote || '').trim() || null,
-      });
+      };
+
+      if (isExpenseFlow) {
+        payload.purchase_category_id = Number(selectedCashFlowType?.purchase_category_id || selectedCashFlowType?.id || 0) || null;
+        payload.purchase_category_code = String(selectedCashFlowType?.purchase_category_code || selectedCashFlowType?.code || '').trim() || null;
+        payload.source_account_id = Number(
+          selectedCashFlowSourceAccountRow?.accountingAccountId
+          || selectedCashFlowSourceAccountRow?.id
+          || 0,
+        ) || null;
+      } else {
+        payload.income_expense_type_id = selectedCashFlowType ? Number(selectedCashFlowType.id) : null;
+        payload.category = selectedCashFlowType ? null : manualCategory;
+      }
+
+      await createPosCashFlow(payload);
       setCashFlowTypeId(null);
+      setCashFlowSourceAccountId((currentId) => {
+        if (!isExpenseFlow) {
+          return null;
+        }
+        return Number(currentId || 0) || null;
+      });
       setCashFlowCategory('');
       setCashFlowAmount('');
       setCashFlowNote('');
@@ -13046,6 +13156,30 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     }
     setCashFlowTypeId(null);
     setCashFlowCategory(String(row?.manualCategory || row?.label || '').trim());
+  };
+
+  const openExpenseCategoryModal = () => {
+    if (String(cashFlowTransactionType || '').toLowerCase() !== 'expense') {
+      return;
+    }
+    setExpenseCategorySearch('');
+    setExpenseCategoryModalVisible(true);
+  };
+
+  const closeExpenseCategoryModal = () => {
+    setExpenseCategoryModalVisible(false);
+    setExpenseCategorySearch('');
+  };
+
+  const handleSelectExpenseCategory = (row) => {
+    const nextTypeId = Number(row?.id || row?.purchase_category_id || 0) || null;
+    if (!nextTypeId) {
+      return;
+    }
+    setCashFlowTypeId(nextTypeId);
+    setCashFlowCategory('');
+    setExpenseCategoryModalVisible(false);
+    setExpenseCategorySearch('');
   };
 
   const buildClosingReportHtml = () => {
@@ -13365,6 +13499,18 @@ const SalesScreen = ({ currentUser, onLogout }) => {
               onPress={() => setActiveMenu('production')}
             >
               <Text style={styles.greenTabText}>Produksi</Text>
+            </Pressable>
+            <Pressable
+              style={[styles.greenTab, activeMenu === 'purchase_material' ? styles.greenTabActive : null]}
+              onPress={() => setActiveMenu('purchase_material')}
+            >
+              <Text style={styles.greenTabText}>Pembelian Bahan</Text>
+            </Pressable>
+            <Pressable
+              style={[styles.greenTab, activeMenu === 'expense' ? styles.greenTabActive : null]}
+              onPress={() => setActiveMenu('expense')}
+            >
+              <Text style={styles.greenTabText}>Pengeluaran</Text>
             </Pressable>
             <Pressable
               style={[styles.greenTab, activeMenu === 'report' ? styles.greenTabActive : null]}
@@ -13769,6 +13915,17 @@ const SalesScreen = ({ currentUser, onLogout }) => {
               onUpdateStatus={handleUpdateProductionStatus}
               updatingItemId={updatingProductionItemId}
             />
+          ) : activeMenu === 'purchase_material' ? (
+            <PurchaseMaterialPanel
+              currentUser={currentUser}
+              isActive={activeMenu === 'purchase_material'}
+              onNotify={openNotice}
+            />
+          ) : activeMenu === 'expense' ? (
+            <ExpensePanel
+              isActive={activeMenu === 'expense'}
+              onNotify={openNotice}
+            />
           ) : activeMenu === 'report' ? (
             <View style={styles.draftPanel}>
               <View style={styles.draftHeaderRow}>
@@ -13848,52 +14005,117 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                     </View>
 
                     <View style={styles.reportSummaryGrid}>
-                      <View style={styles.reportInputGroup}>
-                        <Text style={styles.reportInputLabel}>Kategori Cepat</Text>
-                        <View style={styles.reportChipWrap}>
-                          {isCashFlowTypesLoading ? (
-                            <Text style={styles.debugText}>Memuat kategori...</Text>
-                          ) : quickCashFlowCategories.length > 0 ? quickCashFlowCategories.map((row) => {
-                            const active = row?.typeId
-                              ? Number(row.typeId) === Number(cashFlowTypeId || 0)
-                              : (!selectedCashFlowType && normalizeText(cashFlowCategory) === normalizeText(row?.manualCategory || row?.label));
-                            return (
-                              <Pressable
-                                key={String(row?.key || `cash-flow-type-${row?.label || 'type'}`)}
-                                style={[styles.reportChip, active ? styles.reportChipActive : null]}
-                                onPress={() => handleSelectQuickCashFlowCategory(row)}
-                              >
-                                <View style={styles.reportChipContent}>
+                      {cashFlowTransactionType === 'expense' ? (
+                        <>
+                          <View style={styles.reportInputGroup}>
+                            <Text style={styles.reportInputLabel}>Kategori Pengeluaran Backend</Text>
+                            <Pressable
+                              style={styles.cashFlowCategorySelectButton}
+                              onPress={openExpenseCategoryModal}
+                            >
+                              <Text style={styles.cashFlowCategorySelectLabel}>Pilih kategori dari backend</Text>
+                              <Text style={styles.cashFlowCategorySelectValue}>
+                                {selectedCashFlowType ? String(selectedCashFlowType?.name || '') : 'Belum memilih kategori pengeluaran'}
+                              </Text>
+                              <Text style={styles.cashFlowCategorySelectAction}>Buka Popup</Text>
+                            </Pressable>
+                            {isCashFlowTypesLoading ? (
+                              <Text style={styles.debugText}>Memuat kategori pengeluaran...</Text>
+                            ) : availableCashFlowTypes.length > 0 ? (
+                              <Text style={styles.debugText}>
+                                Kategori backend aktif: {availableCashFlowTypes.map((row) => String(row?.name || '').trim()).filter(Boolean).join(', ')}
+                              </Text>
+                            ) : (
+                              <Text style={styles.debugText}>Belum ada kategori pengeluaran aktif dari backend.</Text>
+                            )}
+                          </View>
+                          <View style={styles.reportInputGroup}>
+                            <Text style={styles.reportInputLabel}>Kategori Backend Terpilih</Text>
+                            <TextInput
+                              value={selectedCashFlowType ? String(selectedCashFlowType?.name || '') : ''}
+                              editable={false}
+                              placeholder="Pilih kategori pengeluaran dari popup backend"
+                              placeholderTextColor="#6c7485"
+                              style={[styles.reportInput, styles.reportInputReadonly]}
+                            />
+                          </View>
+                        </>
+                      ) : (
+                        <>
+                          <View style={styles.reportInputGroup}>
+                            <Text style={styles.reportInputLabel}>Kategori Cepat</Text>
+                            <View style={styles.reportChipWrap}>
+                              {isCashFlowTypesLoading ? (
+                                <Text style={styles.debugText}>Memuat kategori...</Text>
+                              ) : quickCashFlowCategories.length > 0 ? quickCashFlowCategories.map((row) => {
+                                const active = row?.typeId
+                                  ? Number(row.typeId) === Number(cashFlowTypeId || 0)
+                                  : (!selectedCashFlowType && normalizeText(cashFlowCategory) === normalizeText(row?.manualCategory || row?.label));
+                                return (
+                                  <Pressable
+                                    key={String(row?.key || `cash-flow-type-${row?.label || 'type'}`)}
+                                    style={[styles.reportChip, active ? styles.reportChipActive : null]}
+                                    onPress={() => handleSelectQuickCashFlowCategory(row)}
+                                  >
+                                    <View style={styles.reportChipContent}>
+                                      <Text style={[styles.reportChipText, active ? styles.reportChipTextActive : null]}>
+                                        {String(row?.label || '-')}
+                                      </Text>
+                                      <View style={[styles.reportChipBadge, active ? styles.reportChipBadgeActive : null]}>
+                                        <Text style={[styles.reportChipBadgeText, active ? styles.reportChipBadgeTextActive : null]}>
+                                          {formatCashFlowSourceLabel(row?.source)}
+                                        </Text>
+                                      </View>
+                                    </View>
+                                  </Pressable>
+                                );
+                              }) : (
+                                <Text style={styles.debugText}>Belum ada kategori aktif. Isi manual di bawah.</Text>
+                              )}
+                            </View>
+                          </View>
+                          <View style={styles.reportInputGroup}>
+                            <Text style={styles.reportInputLabel}>Kategori Manual</Text>
+                            <TextInput
+                              value={selectedCashFlowType ? String(selectedCashFlowType?.name || '') : cashFlowCategory}
+                              onChangeText={setCashFlowCategory}
+                              editable={!selectedCashFlowType}
+                              placeholder="Contoh: beli galon, ambil kas owner"
+                              placeholderTextColor="#6c7485"
+                              style={[
+                                styles.reportInput,
+                                selectedCashFlowType ? styles.reportInputReadonly : null,
+                              ]}
+                            />
+                          </View>
+                        </>
+                      )}
+                      {cashFlowTransactionType === 'expense' ? (
+                        <View style={styles.reportInputGroup}>
+                          <Text style={styles.reportInputLabel}>Akun Kas / Bank Sumber</Text>
+                          <View style={styles.reportChipWrap}>
+                            {isCashFlowAccountsLoading ? (
+                              <Text style={styles.debugText}>Memuat akun kas / bank...</Text>
+                            ) : cashFlowSourceAccounts.length > 0 ? cashFlowSourceAccounts.map((row) => {
+                              const accountKey = Number(row?.accountingAccountId || row?.id || 0) || 0;
+                              const active = accountKey > 0 && accountKey === Number(cashFlowSourceAccountId || 0);
+                              return (
+                                <Pressable
+                                  key={`cash-flow-account-${accountKey}`}
+                                  style={[styles.reportChip, active ? styles.reportChipActive : null]}
+                                  onPress={() => setCashFlowSourceAccountId(accountKey)}
+                                >
                                   <Text style={[styles.reportChipText, active ? styles.reportChipTextActive : null]}>
-                                    {String(row?.label || '-')}
+                                    {String(row?.displayTitle || row?.displayName || row?.label || '-')}
                                   </Text>
-                                  <View style={[styles.reportChipBadge, active ? styles.reportChipBadgeActive : null]}>
-                                    <Text style={[styles.reportChipBadgeText, active ? styles.reportChipBadgeTextActive : null]}>
-                                      {formatCashFlowSourceLabel(row?.source)}
-                                    </Text>
-                                  </View>
-                                </View>
-                              </Pressable>
-                            );
-                          }) : (
-                            <Text style={styles.debugText}>Belum ada kategori aktif. Isi manual di bawah.</Text>
-                          )}
+                                </Pressable>
+                              );
+                            }) : (
+                              <Text style={styles.debugText}>Belum ada akun kas / bank aktif yang bisa dipakai untuk pengeluaran.</Text>
+                            )}
+                          </View>
                         </View>
-                      </View>
-                      <View style={styles.reportInputGroup}>
-                        <Text style={styles.reportInputLabel}>Kategori Manual</Text>
-                        <TextInput
-                          value={selectedCashFlowType ? String(selectedCashFlowType?.name || '') : cashFlowCategory}
-                          onChangeText={setCashFlowCategory}
-                          editable={!selectedCashFlowType}
-                          placeholder="Contoh: beli galon, ambil kas owner"
-                          placeholderTextColor="#6c7485"
-                          style={[
-                            styles.reportInput,
-                            selectedCashFlowType ? styles.reportInputReadonly : null,
-                          ]}
-                        />
-                      </View>
+                      ) : null}
                       <View style={styles.reportInputGroup}>
                         <Text style={styles.reportInputLabel}>Nominal</Text>
                         <TextInput
@@ -14555,6 +14777,63 @@ const SalesScreen = ({ currentUser, onLogout }) => {
           )}
         </View>
       </ScrollView>
+
+      <Modal
+        visible={expenseCategoryModalVisible}
+        transparent
+        animationType="fade"
+        onRequestClose={closeExpenseCategoryModal}
+      >
+        <View style={styles.popupBackdrop}>
+          <View style={[styles.popupCard, styles.cashFlowCategoryModalCard]}>
+            <Text style={styles.popupTitle}>Pilih Kategori Pengeluaran</Text>
+            <Text style={styles.popupMessage}>
+              Kasir hanya boleh memilih kategori pengeluaran yang dibuat admin di backend.
+            </Text>
+
+            <TextInput
+              value={expenseCategorySearch}
+              onChangeText={setExpenseCategorySearch}
+              placeholder="Cari kategori pengeluaran..."
+              placeholderTextColor="#6c7485"
+              style={styles.pickupInput}
+            />
+
+            <ScrollView style={styles.cashFlowCategoryModalList} contentContainerStyle={styles.cashFlowCategoryModalListContent}>
+              {isCashFlowTypesLoading ? (
+                <Text style={styles.debugText}>Memuat kategori pengeluaran...</Text>
+              ) : filteredExpenseCashFlowTypes.length > 0 ? filteredExpenseCashFlowTypes.map((row) => {
+                const active = Number(row?.id || 0) === Number(cashFlowTypeId || 0);
+                return (
+                  <Pressable
+                    key={`expense-category-${row?.id || row?.purchase_category_code || row?.name}`}
+                    style={[styles.cashFlowCategoryOption, active ? styles.cashFlowCategoryOptionActive : null]}
+                    onPress={() => handleSelectExpenseCategory(row)}
+                  >
+                    <Text style={[styles.cashFlowCategoryOptionTitle, active ? styles.cashFlowCategoryOptionTitleActive : null]}>
+                      {String(row?.name || '-')}
+                    </Text>
+                    <Text style={[styles.cashFlowCategoryOptionMeta, active ? styles.cashFlowCategoryOptionMetaActive : null]}>
+                      {String(row?.purchase_category_code || row?.code || '').trim() || 'Kategori backend'}
+                    </Text>
+                  </Pressable>
+                );
+              }) : (
+                <Text style={styles.debugText}>Belum ada kategori pengeluaran backend yang cocok dengan pencarian.</Text>
+              )}
+            </ScrollView>
+
+            <View style={styles.popupActions}>
+              <Pressable
+                style={[styles.popupButton, styles.popupButtonSecondary]}
+                onPress={closeExpenseCategoryModal}
+              >
+                <Text style={[styles.popupButtonText, styles.popupButtonTextSecondary]}>Tutup</Text>
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      </Modal>
 
       <Modal
         visible={isPreparingApp}
@@ -16324,6 +16603,30 @@ const styles = StyleSheet.create({
     backgroundColor: '#f1f4f9',
     color: '#58627a',
   },
+  cashFlowCategorySelectButton: {
+    borderWidth: 1,
+    borderColor: '#c1cadf',
+    backgroundColor: '#f7f9fd',
+    paddingHorizontal: 10,
+    paddingVertical: 10,
+    gap: 4,
+  },
+  cashFlowCategorySelectLabel: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: '#5d6780',
+    textTransform: 'uppercase',
+  },
+  cashFlowCategorySelectValue: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#1d2433',
+  },
+  cashFlowCategorySelectAction: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#2250c9',
+  },
   reportWarningBox: {
     borderWidth: 1,
     borderColor: '#e0b35d',
@@ -16791,6 +17094,49 @@ const styles = StyleSheet.create({
     backgroundColor: '#f5fcf7',
     paddingVertical: 20,
     paddingHorizontal: 18,
+  },
+  cashFlowCategoryModalCard: {
+    maxWidth: 560,
+    maxHeight: '82%',
+    alignItems: 'stretch',
+    backgroundColor: '#f5f7fb',
+    borderColor: '#c8d0e6',
+  },
+  cashFlowCategoryModalList: {
+    maxHeight: 360,
+    marginTop: 8,
+  },
+  cashFlowCategoryModalListContent: {
+    gap: 8,
+    paddingBottom: 8,
+  },
+  cashFlowCategoryOption: {
+    borderWidth: 1,
+    borderColor: '#c7d2e6',
+    backgroundColor: '#ffffff',
+    paddingHorizontal: 10,
+    paddingVertical: 9,
+  },
+  cashFlowCategoryOptionActive: {
+    borderColor: '#2250c9',
+    backgroundColor: '#eef4ff',
+  },
+  cashFlowCategoryOptionTitle: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#24324f',
+    marginBottom: 2,
+  },
+  cashFlowCategoryOptionTitleActive: {
+    color: '#1848b0',
+  },
+  cashFlowCategoryOptionMeta: {
+    fontSize: 10,
+    color: '#5d6780',
+    textTransform: 'uppercase',
+  },
+  cashFlowCategoryOptionMetaActive: {
+    color: '#2250c9',
   },
   orderPreviewCard: {
     maxWidth: 416,

@@ -5,6 +5,7 @@ import AppLoadingAnimation from '../components/AppLoadingAnimation';
 import {
   fetchAuthMe,
   getDefaultLoginEmail,
+  getApiBaseUrl,
   loginPosUser,
 } from '../services/erpApi';
 import { appEnv } from '../config/appEnv';
@@ -82,6 +83,7 @@ const PasswordEyeIcon = ({ visible }) => (
 
 const LoginScreen = ({ onLoginSuccess }) => {
   const rememberedLogin = useMemo(() => loadRememberedLogin(), []);
+  const runtimeApiBaseUrl = useMemo(() => getApiBaseUrl(), []);
   const [email, setEmail] = useState(rememberedLogin?.email || getDefaultLoginEmail());
   const [password, setPassword] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -201,7 +203,7 @@ const LoginScreen = ({ onLoginSuccess }) => {
             <View style={styles.metaWrap}>
               <Text style={styles.metaText}>©sidomulyoproject</Text>
               <Text style={styles.metaText}>Version {appEnv.appVersion || '-'}</Text>
-              <Text style={styles.metaText}>Server {appEnv.erpApiBaseUrl || '-'}</Text>
+              <Text style={styles.metaText}>Server {runtimeApiBaseUrl || appEnv.erpApiBaseUrl || '-'}</Text>
             </View>
           </View>
         </View>
