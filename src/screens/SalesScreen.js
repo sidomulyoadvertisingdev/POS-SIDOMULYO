@@ -3903,7 +3903,7 @@ const normalizePaymentMethodLabel = (value) => {
 };
 const isCustomerDepositPaymentMethod = (value) => normalizePaymentMethodLabel(value) === CUSTOMER_DEPOSIT_PAYMENT_LABEL;
 const mapReceivablePaymentMethodToBackend = (value) => (
-  isCustomerDepositPaymentMethod(value) ? 'customer_deposit' : mapPaymentMethodToBackend(value)
+  isCustomerDepositPaymentMethod(value) ? 'customer_balance' : mapPaymentMethodToBackend(value)
 );
 const normalizePaymentMethodType = (value) => {
   const text = normalizeText(value);
@@ -10493,10 +10493,10 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         return null;
       }
       const latestBalance = await loadCustomerDepositBalance(customerId).catch(() => roundMoney(Number(customerDepositBalance || 0)));
-      if (roundMoney(Number(latestBalance || 0)) < roundMoney(Number(grandTotal || 0))) {
+      if (roundMoney(Number(latestBalance || 0)) <= 0) {
         openNotice(
           'Saldo Pelanggan',
-          `Saldo pelanggan tidak cukup. Tersedia ${formatRupiah(latestBalance || 0)}, butuh ${formatRupiah(grandTotal || 0)}.`,
+          `Saldo pelanggan tidak tersedia. Saldo saat ini ${formatRupiah(latestBalance || 0)}.`,
         );
         return null;
       }
@@ -10791,14 +10791,10 @@ const SalesScreen = ({ currentUser, onLogout }) => {
 
       const paymentTransactionType = isDraftMode
         ? 'unpaid'
-        : usingCustomerDeposit
-          ? 'unpaid'
-          : transactionType;
+        : transactionType;
       const paymentAmountPayload = isDraftMode
         ? 0
-        : usingCustomerDeposit
-          ? 0
-          : transactionType === 'full'
+        : transactionType === 'full'
             ? grandTotal
             : transactionType === 'dp'
               ? Math.min(paidAmount, grandTotal)
@@ -10947,30 +10943,10 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         };
       }
       const backendOrderId = Number(created?.id || 0) || null;
-      const createdInvoiceId = Number(created?.invoice?.id || 0) || 0;
       const invoiceNo = created?.invoice?.invoice_no || '-';
-      let customerDepositAutoPaid = false;
-      let customerDepositAutoPayWarning = '';
       let customerDepositBalanceAfterPayment = roundMoney(Number(customerDepositBalance || 0));
       if (!isDraftMode && usingCustomerDeposit) {
-        if (!(createdInvoiceId > 0)) {
-          customerDepositAutoPayWarning = 'Order berhasil dibuat, tetapi invoice belum ditemukan untuk dipotong dari saldo pelanggan.';
-        } else {
-          try {
-            await createPosInvoicePayment(createdInvoiceId, {
-              method: 'customer_deposit',
-              payment_method: 'customer_deposit',
-              amount: roundMoney(grandTotal),
-              transaction_type: 'pelunasan',
-              note: paymentNotes || 'Pembayaran order via saldo pelanggan',
-              paid_at: new Date().toISOString(),
-            });
-            customerDepositAutoPaid = true;
-            customerDepositBalanceAfterPayment = await loadCustomerDepositBalance(customerId).catch(() => roundMoney(Number(customerDepositBalance || 0)));
-          } catch (depositPaymentError) {
-            customerDepositAutoPayWarning = formatBackendValidationError(depositPaymentError);
-          }
-        }
+        customerDepositBalanceAfterPayment = await loadCustomerDepositBalance(customerId).catch(() => roundMoney(Number(customerDepositBalance || 0)));
       }
       if (created?.receipt && typeof created.receipt === 'object' && !Array.isArray(created.receipt)) {
         setPosSettings((prev) => ({
@@ -11017,7 +10993,6 @@ const SalesScreen = ({ currentUser, onLogout }) => {
               payment_type: payload.payment.transaction_type,
               payment_method: payload.payment.method,
               bank_account_id: payload.payment.bank_account_id || null,
-              customer_deposit_auto_paid: customerDepositAutoPaid,
           },
         }),
       );
@@ -11026,16 +11001,14 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         mode === 'draft'
           ? 'Draft Berhasil Tersimpan'
           : usingCustomerDeposit
-            ? (customerDepositAutoPaid ? 'Order & Saldo Berhasil Diproses' : 'Order Berhasil Dibuat')
+            ? 'Order Berhasil Diproses'
             : 'Order Berhasil Diproses',
         [
           `Order backend ID: ${backendOrderId}`,
           `Invoice: ${invoiceNo}`,
           `Total: ${formatRupiah(grandTotal)}`,
           usingCustomerDeposit
-            ? (customerDepositAutoPaid
-              ? `Pembayaran saldo customer berhasil. Saldo terbaru: ${formatRupiah(customerDepositBalanceAfterPayment || 0)}.`
-              : `Order dibuat, tetapi pembayaran saldo customer belum berhasil: ${customerDepositAutoPayWarning || 'cek invoice pelanggan.'}`)
+            ? `Saldo customer setelah transaksi: ${formatRupiah(customerDepositBalanceAfterPayment || 0)}.`
             : null,
         ].filter(Boolean).join('\n') + draftStatusWarning,
         mode === 'draft' ? resetTransaction : null,
@@ -11052,8 +11025,6 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         backendOrderId,
         invoiceNo,
         receipt: created?.receipt || null,
-        customerDepositAutoPaid,
-        customerDepositAutoPayWarning,
       };
     } catch (error) {
       const status = Number(error?.status || 0);
@@ -11113,17 +11084,13 @@ const SalesScreen = ({ currentUser, onLogout }) => {
           payment: {
             transaction_type: isDraftMode
               ? 'unpaid'
-              : usingCustomerDeposit
-                ? 'unpaid'
-                : transactionType,
+              : transactionType,
             method,
             ...(!isDraftMode && !usingCustomerDeposit ? { bank_account_id: resolvedPaymentAccountId || null } : {}),
             amount: roundMoney(
               isDraftMode
                 ? 0
-                : usingCustomerDeposit
-                  ? 0
-                  : transactionType === 'full'
+                : transactionType === 'full'
                     ? grandTotal
                     : paidAmount,
             ),
@@ -11659,8 +11626,9 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       openNotice('Piutang Pelanggan', 'Nominal pembayaran melebihi sisa piutang pelanggan.');
       return;
     }
-    if (usingDeposit && roundMoney(Number(receivablePaymentModal.customerDepositBalance || 0)) < dueTotal) {
-      openNotice('Piutang Pelanggan', 'Saldo pelanggan tidak cukup.');
+    const availableDepositBalance = roundMoney(Number(receivablePaymentModal.customerDepositBalance || 0));
+    if (usingDeposit && availableDepositBalance <= 0) {
+      openNotice('Piutang Pelanggan', 'Saldo pelanggan tidak tersedia.');
       return;
     }
     if (!usingDeposit && !(accountId > 0)) {
@@ -11681,12 +11649,15 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         || mapReceivablePaymentMethodToBackend(receivablePaymentModal.method)
         || '',
       ).trim();
+      const effectiveAmount = usingDeposit
+        ? Math.min(amount, dueTotal, availableDepositBalance)
+        : amount;
       const paymentPayload = {
         method: backendMethod,
         payment_method: backendMethod,
         payment_method_id: Number(selectedMethodConfig?.id || 0) || null,
-        amount,
-        transaction_type: amount >= dueTotal ? 'pelunasan' : 'angsuran',
+        amount: effectiveAmount,
+        transaction_type: effectiveAmount >= dueTotal ? 'pelunasan' : 'angsuran',
         paid_at: new Date().toISOString(),
       };
       if (!usingDeposit && accountId > 0) {
@@ -11708,7 +11679,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       }
       openNotice(
         'Piutang Pelanggan',
-        `Pembayaran piutang untuk ${receivablePaymentModal.customerName} sebesar ${formatRupiah(amount)} berhasil dicatat.`,
+        `Pembayaran piutang untuk ${receivablePaymentModal.customerName} sebesar ${formatRupiah(effectiveAmount)} berhasil dicatat.`,
         null,
         { autoCloseMs: 2200 },
       );

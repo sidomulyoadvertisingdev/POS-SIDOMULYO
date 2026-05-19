@@ -36,7 +36,7 @@ export const parseSizeText = (sizeText) => {
 
 export const mapPaymentStatusToTransactionType = (paymentStatus) => {
   const text = normalizeText(paymentStatus);
-  if (['lunas', 'full', 'paid'].includes(text)) {
+  if (['lunas', 'full', 'paid', 'lunas via saldo'].includes(text)) {
     return 'full';
   }
   if (['dp', 'partial', 'partially paid'].includes(text)) {
@@ -47,8 +47,8 @@ export const mapPaymentStatusToTransactionType = (paymentStatus) => {
 
 export const mapPaymentMethodToBackend = (paymentMethod) => {
   const text = normalizeText(paymentMethod);
-  if (['saldo pelanggan', 'deposit customer', 'customer deposit', 'customer_deposit', 'deposit'].includes(text)) {
-    return 'customer_deposit';
+  if (['saldo pelanggan', 'deposit customer', 'customer deposit', 'customer_deposit', 'deposit', 'customer_balance'].includes(text)) {
+    return 'customer_balance';
   }
   if (['cash', 'tunai'].includes(text)) {
     return 'cash';
@@ -67,7 +67,7 @@ export const mapPaymentMethodToBackend = (paymentMethod) => {
 
 export const mapPaymentMethodToBankAccountId = (paymentMethod) => {
   const method = mapPaymentMethodToBackend(paymentMethod);
-  if (method === 'customer_deposit') {
+  if (method === 'customer_balance') {
     return 0;
   }
   const byMethod = {

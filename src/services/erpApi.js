@@ -1,13 +1,25 @@
 import Constants from 'expo-constants';
 
 const DEFAULT_ERP_API_BASE_URL = 'https://dashboard.sidomulyoproject.com/api';
+const FORCE_ONLINE_ERP_API_BASE_URL = 'https://dashboard.sidomulyoproject.com/api';
+const FORCE_ONLINE_ERP_API = true;
 const LOCAL_ERP_HOSTNAMES = new Set(['localhost', '127.0.0.1', '0.0.0.0']);
+const trimString = (value) => String(value || '').trim();
+const extra = Constants.expoConfig?.extra || {};
+const resolvePublicEnv = (key, fallback = '') => {
+  const runtimeValue = trimString(process.env?.[key]);
+  if (runtimeValue) {
+    return runtimeValue;
+  }
 
-const resolveDefaultApiBaseUrl = () => {
-  return DEFAULT_ERP_API_BASE_URL;
+  return trimString(fallback);
 };
 
-const normalizeApiBaseUrl = (url) => String(url || '').trim().replace(/\/+$/, '');
+const resolveDefaultApiBaseUrl = () => {
+  return FORCE_ONLINE_ERP_API ? FORCE_ONLINE_ERP_API_BASE_URL : DEFAULT_ERP_API_BASE_URL;
+};
+
+const normalizeApiBaseUrl = (url) => trimString(url).replace(/\/+$/, '');
 
 const isSupportedApiUrl = (url) => {
   const normalizedUrl = normalizeApiBaseUrl(url);
@@ -38,6 +50,10 @@ const isLocalApiUrl = (url) => {
 };
 
 const resolveRuntimeApiBaseUrl = (configuredUrl, allowLocalApiUrl = false) => {
+  if (FORCE_ONLINE_ERP_API) {
+    return FORCE_ONLINE_ERP_API_BASE_URL;
+  }
+
   const normalizedConfiguredUrl = normalizeApiBaseUrl(configuredUrl);
   if (!normalizedConfiguredUrl) {
     return resolveDefaultApiBaseUrl();
@@ -56,13 +72,15 @@ const resolveRuntimeApiBaseUrl = (configuredUrl, allowLocalApiUrl = false) => {
   );
 };
 
-const extra = Constants.expoConfig?.extra || {};
-const allowLocalApiUrl = ['1', 'true', 'yes'].includes(String(extra.allowLocalErpApi || '').trim().toLowerCase());
+const allowLocalApiUrl = ['1', 'true', 'yes'].includes(resolvePublicEnv('EXPO_PUBLIC_ALLOW_LOCAL_ERP_API', extra.allowLocalErpApi).toLowerCase());
 
-const API_BASE_URL = resolveRuntimeApiBaseUrl(extra.erpApiBaseUrl, allowLocalApiUrl);
-const API_EMAIL = String(extra.erpEmail || '').trim();
-const API_PASSWORD = String(extra.erpPassword || '');
-const API_TOKEN = String(extra.erpToken || '').trim();
+const API_BASE_URL = resolveRuntimeApiBaseUrl(
+  resolvePublicEnv('EXPO_PUBLIC_ERP_API_BASE_URL', extra.erpApiBaseUrl),
+  allowLocalApiUrl,
+);
+const API_EMAIL = resolvePublicEnv('EXPO_PUBLIC_ERP_EMAIL', extra.erpEmail);
+const API_PASSWORD = String(process.env?.EXPO_PUBLIC_ERP_PASSWORD || extra.erpPassword || '');
+const API_TOKEN = resolvePublicEnv('EXPO_PUBLIC_ERP_TOKEN', extra.erpToken);
 const REQUEST_TIMEOUT_MS = 20000;
 const PRODUCTS_REQUEST_TIMEOUT_MS = 45000;
 const PRODUCTS_REQUEST_PER_PAGE = 100;
