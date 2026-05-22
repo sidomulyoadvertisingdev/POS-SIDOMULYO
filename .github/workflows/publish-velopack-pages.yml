@@ -85,6 +85,11 @@ jobs:
           }
 
       - name: Build GitHub Pages site
+        env:
+          EXPO_PUBLIC_FORCE_ONLINE_ERP_API: '1'
+          EXPO_PUBLIC_ERP_API_BASE_URL: 'https://dashboard.sidomulyoproject.com/api'
+          EXPO_PUBLIC_ALLOW_LOCAL_ERP_API: ''
+          EXPO_PUBLIC_PREFER_LOCAL_ERP_API: ''
         run: npm run build:pages
 
       - name: Upload GitHub Pages site

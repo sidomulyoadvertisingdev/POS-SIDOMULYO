@@ -6,6 +6,7 @@ const DEFAULT_ERP_API_BASE_URL = 'https://dashboard.sidomulyoproject.com/api';
 const LOCAL_ERP_HOSTNAMES = new Set(['localhost', '127.0.0.1', '0.0.0.0']);
 const resolveAppVersion = () => trimString(process.env.EXPO_PUBLIC_APP_VERSION) || trimString(packageJson.version);
 const shouldAllowLocalApiUrl = () => ['1', 'true', 'yes'].includes(trimString(process.env.EXPO_PUBLIC_ALLOW_LOCAL_ERP_API).toLowerCase());
+const shouldForceOnlineApiUrl = () => ['1', 'true', 'yes'].includes(trimString(process.env.EXPO_PUBLIC_FORCE_ONLINE_ERP_API).toLowerCase());
 const shouldPreferLocalApiUrl = () => ['1', 'true', 'yes'].includes(trimString(process.env.EXPO_PUBLIC_PREFER_LOCAL_ERP_API).toLowerCase());
 const isLocalApiBaseUrl = (url) => {
   const normalized = trimString(url);
@@ -21,6 +22,10 @@ const isLocalApiBaseUrl = (url) => {
   }
 };
 const resolveApiBaseUrl = () => {
+  if (shouldForceOnlineApiUrl()) {
+    return DEFAULT_ERP_API_BASE_URL;
+  }
+
   const configuredUrl = trimString(process.env.EXPO_PUBLIC_ERP_API_BASE_URL);
   if (!configuredUrl) {
     return DEFAULT_ERP_API_BASE_URL;
@@ -45,6 +50,7 @@ module.exports = () => ({
       erpToken: trimString(process.env.EXPO_PUBLIC_ERP_TOKEN),
       allowLocalErpApi: trimString(process.env.EXPO_PUBLIC_ALLOW_LOCAL_ERP_API),
       preferLocalErpApi: trimString(process.env.EXPO_PUBLIC_PREFER_LOCAL_ERP_API),
+      forceOnlineErpApi: trimString(process.env.EXPO_PUBLIC_FORCE_ONLINE_ERP_API),
       appVersion: resolveAppVersion(),
       bankAccountCashId: trimString(process.env.EXPO_PUBLIC_BANK_ACCOUNT_CASH_ID),
       bankAccountTransferId: trimString(process.env.EXPO_PUBLIC_BANK_ACCOUNT_TRANSFER_ID),
