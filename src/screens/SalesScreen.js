@@ -13236,22 +13236,179 @@ const SalesScreen = ({ currentUser, onLogout }) => {
   <meta charset="utf-8" />
   <title>Laporan Close Order ${escapeHtml(reportDate)}</title>
   <style>
-    body { font-family: "Courier New", monospace; margin: 0; padding: 0; color: #111; }
-    .wrap { width: 80mm; max-width: 80mm; margin: 0 auto; padding: 8px 6px 12px; }
-    .brand { text-align: center; margin-bottom: 8px; }
-    .brand-logo { max-width: 38mm; max-height: 18mm; object-fit: contain; margin: 0 auto 4px; display: block; }
-    .brand-name { font-size: 12px; font-weight: 700; margin-bottom: 2px; }
-    .brand-tagline { font-size: 9px; margin-bottom: 4px; }
-    h1 { margin: 0 0 6px 0; font-size: 15px; text-align: center; }
-    h2 { margin: 12px 0 6px 0; font-size: 12px; text-transform: uppercase; border-top: 1px dashed #444; padding-top: 6px; }
-    .meta { font-size: 10px; margin-bottom: 2px; text-align: center; }
-    .line { display: flex; justify-content: space-between; gap: 8px; font-size: 10px; margin-bottom: 3px; }
-    .line strong { font-size: 10px; }
-    .muted { font-size: 9px; color: #444; margin-bottom: 4px; }
-    .mini-item { font-size: 10px; margin-bottom: 5px; }
-    .signatures { margin-top: 16px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
-    .signature-card { text-align: center; font-size: 10px; }
-    .signature-space { height: 44px; border-bottom: 1px solid #444; margin-bottom: 5px; }
+    @page {
+      size: 80mm auto;
+      margin: 3mm;
+    }
+    :root {
+      --ink: #000;
+      --paper: #fff;
+      --line: #000;
+      --page-width: 80mm;
+      --body-size: 13px;
+      --meta-size: 12px;
+      --detail-size: 11px;
+      --title-size: 18px;
+      --section-size: 13px;
+    }
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0;
+      padding: 0;
+      background: var(--paper);
+    }
+    body {
+      color: var(--ink);
+      font-family: Consolas, "DejaVu Sans Mono", "Roboto Mono", "Courier New", monospace;
+      font-size: var(--body-size);
+      line-height: 1.28;
+      font-weight: 600;
+      color-adjust: exact;
+      -webkit-print-color-adjust: exact;
+      print-color-adjust: exact;
+      display: flex;
+      justify-content: center;
+    }
+    .wrap {
+      width: var(--page-width);
+      max-width: var(--page-width);
+      margin: 0 auto;
+      padding: 2.5mm 2.5mm 3.5mm;
+      background: var(--paper);
+      color: var(--ink);
+      overflow: hidden;
+      flex: 0 0 auto;
+    }
+    .brand {
+      text-align: center;
+      margin-bottom: 8px;
+    }
+    .brand-logo {
+      max-width: min(72%, 140px);
+      max-height: 52px;
+      object-fit: contain;
+      margin: 0 auto 6px;
+      display: block;
+    }
+    .brand-name {
+      margin-bottom: 2px;
+      font-size: 17px;
+      line-height: 1.15;
+      font-weight: 800;
+      color: #000;
+    }
+    .brand-tagline {
+      font-size: var(--detail-size);
+      line-height: 1.2;
+      font-weight: 700;
+      color: #000;
+      margin-bottom: 2px;
+    }
+    h1 {
+      margin: 0 0 6px 0;
+      font-size: var(--title-size);
+      line-height: 1.15;
+      font-weight: 800;
+      text-align: center;
+      text-transform: uppercase;
+      color: #000;
+    }
+    h2 {
+      margin: 10px 0 6px 0;
+      padding-top: 6px;
+      font-size: var(--section-size);
+      line-height: 1.18;
+      font-weight: 800;
+      text-transform: uppercase;
+      border-top: 1px solid var(--line);
+      color: #000;
+      page-break-after: avoid;
+    }
+    .meta {
+      margin-bottom: 2px;
+      font-size: var(--meta-size);
+      line-height: 1.22;
+      font-weight: 700;
+      text-align: center;
+      color: #000;
+    }
+    .line {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 8px;
+      margin-bottom: 3px;
+      font-size: var(--body-size);
+      line-height: 1.24;
+      color: #000;
+      page-break-inside: avoid;
+    }
+    .line span {
+      flex: 1;
+      min-width: 0;
+      word-break: break-word;
+      overflow-wrap: break-word;
+    }
+    .line strong {
+      flex: 0 0 auto;
+      font-size: var(--body-size);
+      font-weight: 800;
+      text-align: right;
+      color: #000;
+    }
+    .muted {
+      margin-bottom: 4px;
+      font-size: var(--detail-size);
+      line-height: 1.22;
+      font-weight: 600;
+      color: #000;
+    }
+    .mini-item {
+      margin-bottom: 6px;
+      font-size: var(--detail-size);
+      line-height: 1.24;
+      color: #000;
+      page-break-inside: avoid;
+    }
+    .mini-item strong {
+      font-weight: 800;
+    }
+    .signatures {
+      margin-top: 14px;
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+      page-break-inside: avoid;
+    }
+    .signature-card {
+      text-align: center;
+      font-size: var(--meta-size);
+      line-height: 1.2;
+      font-weight: 700;
+      color: #000;
+    }
+    .signature-space {
+      height: 44px;
+      border-bottom: 1.5px solid var(--line);
+      margin-bottom: 5px;
+    }
+    @media print {
+      html, body {
+        width: var(--page-width);
+        margin: 0 auto;
+        background: #fff;
+      }
+      body {
+        display: block;
+      }
+      .wrap {
+        width: var(--page-width);
+        max-width: var(--page-width);
+        margin-left: auto;
+        margin-right: auto;
+        padding: 2.5mm 2.5mm 3.5mm;
+      }
+    }
   </style>
 </head>
 <body>
