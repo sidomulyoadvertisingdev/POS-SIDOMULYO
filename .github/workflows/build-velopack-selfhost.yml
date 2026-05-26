@@ -3,8 +3,6 @@ name: Build Velopack Selfhost
 on:
   workflow_dispatch:
   push:
-    branches:
-      - main
     tags:
       - 'v*'
 
@@ -66,7 +64,20 @@ jobs:
             exit 0
           }
 
-          $releaseJson = Get-Content $releaseJsonPath -Raw | ConvertFrom-Json
+          try {
+            $releaseJson = Get-Content $releaseJsonPath -Raw | ConvertFrom-Json
+          } catch {
+            Write-Warning "Existing self-hosted releases.win.json is not valid JSON. Build will continue with fresh release metadata. $($_.Exception.Message)"
+            Remove-Item $releaseJsonPath -Force -ErrorAction SilentlyContinue
+            exit 0
+          }
+
+          if (-not $releaseJson.Assets) {
+            Write-Warning 'Existing self-hosted releases.win.json does not contain Assets. Build will continue with fresh release metadata.'
+            Remove-Item $releaseJsonPath -Force -ErrorAction SilentlyContinue
+            exit 0
+          }
+
           $assetNames = @($releaseJson.Assets | ForEach-Object { $_.FileName } | Where-Object { $_ })
 
           foreach ($fileName in $assetNames) {
