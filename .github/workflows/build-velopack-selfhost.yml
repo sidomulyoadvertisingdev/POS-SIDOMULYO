@@ -1,0 +1,156 @@
+name: Build Velopack Selfhost
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Setup .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Install Velopack CLI
+        run: dotnet tool install -g vpk --version 0.0.1589-ga2c5a97
+
+      - name: Add .NET tools to PATH
+        shell: pwsh
+        run: |
+          "$env:USERPROFILE\.dotnet\tools" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Restore previous self-hosted Velopack releases
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $baseUrl = 'https://pos.sidomulyoproject.com'
+          $outputDir = Join-Path $PWD 'release/velopack'
+          New-Item -ItemType Directory -Force -Path $outputDir | Out-Null
+
+          $metadataFiles = @('releases.win.json', 'RELEASES', 'assets.win.json')
+          foreach ($name in $metadataFiles) {
+            $url = "$baseUrl/$name"
+            try {
+              Invoke-WebRequest -Uri $url -OutFile (Join-Path $outputDir $name) -TimeoutSec 120
+              Write-Host "Restored $name"
+            } catch {
+              Write-Warning "Skip restore ${name}: $($_.Exception.Message)"
+            }
+          }
+
+          $releaseJsonPath = Join-Path $outputDir 'releases.win.json'
+          if (-not (Test-Path $releaseJsonPath)) {
+            Write-Host 'No existing self-hosted releases.win.json found. Build will continue with fresh release metadata.'
+            exit 0
+          }
+
+          $releaseJson = Get-Content $releaseJsonPath -Raw | ConvertFrom-Json
+          $assetNames = @($releaseJson.Assets | ForEach-Object { $_.FileName } | Where-Object { $_ })
+
+          foreach ($fileName in $assetNames) {
+            $url = "$baseUrl/$fileName"
+            $destination = Join-Path $outputDir $fileName
+            try {
+              Invoke-WebRequest -Uri $url -OutFile $destination -TimeoutSec 600
+              Write-Host "Restored $fileName"
+            } catch {
+              Write-Warning "Skip restore ${fileName}: $($_.Exception.Message)"
+            }
+          }
+
+      - name: Build self-hosted site
+        env:
+          EXPO_PUBLIC_FORCE_ONLINE_ERP_API: '1'
+          EXPO_PUBLIC_ERP_API_BASE_URL: 'https://dashboard.sidomulyoproject.com/api'
+          EXPO_PUBLIC_ALLOW_LOCAL_ERP_API: ''
+          EXPO_PUBLIC_PREFER_LOCAL_ERP_API: ''
+        run: npm run build:selfhost
+
+      - name: Create ZIP bundle for manual server upload
+        shell: pwsh
+        run: |
+          $sourceDir = Join-Path $PWD 'release/selfhost-site'
+          $zipPath = Join-Path $PWD 'release/velopack-selfhost-site.zip'
+          if (Test-Path $zipPath) {
+            Remove-Item $zipPath -Force
+          }
+          Compress-Archive -Path (Join-Path $sourceDir '*') -DestinationPath $zipPath
+
+      - name: Upload self-hosted site artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: velopack-selfhost-site
+          path: release/selfhost-site
+          if-no-files-found: error
+
+      - name: Upload self-hosted ZIP artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: velopack-selfhost-zip
+          path: release/velopack-selfhost-site.zip
+          if-no-files-found: error
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    if: ${{ secrets.SELFHOST_SSH_HOST != '' && secrets.SELFHOST_SSH_USER != '' && secrets.SELFHOST_SSH_KEY != '' && secrets.SELFHOST_DEPLOY_PATH != '' }}
+
+    steps:
+      - name: Download self-hosted site artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: velopack-selfhost-site
+          path: ./release-site
+
+      - name: Start SSH agent
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.SELFHOST_SSH_KEY }}
+
+      - name: Add server to known_hosts
+        env:
+          SELFHOST_SSH_HOST: ${{ secrets.SELFHOST_SSH_HOST }}
+          SELFHOST_SSH_PORT: ${{ secrets.SELFHOST_SSH_PORT }}
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -p "${SELFHOST_SSH_PORT:-22}" "$SELFHOST_SSH_HOST" >> ~/.ssh/known_hosts
+
+      - name: Deploy self-hosted bundle via rsync
+        env:
+          SELFHOST_DEPLOY_PATH: ${{ secrets.SELFHOST_DEPLOY_PATH }}
+          SELFHOST_SSH_HOST: ${{ secrets.SELFHOST_SSH_HOST }}
+          SELFHOST_SSH_PORT: ${{ secrets.SELFHOST_SSH_PORT }}
+          SELFHOST_SSH_USER: ${{ secrets.SELFHOST_SSH_USER }}
+        run: |
+          rsync -av --delete -e "ssh -p ${SELFHOST_SSH_PORT:-22}" ./release-site/ "${SELFHOST_SSH_USER}@${SELFHOST_SSH_HOST}:${SELFHOST_DEPLOY_PATH}/"
+
+      - name: Verify remote Velopack files
+        env:
+          SELFHOST_DEPLOY_PATH: ${{ secrets.SELFHOST_DEPLOY_PATH }}
+          SELFHOST_SSH_HOST: ${{ secrets.SELFHOST_SSH_HOST }}
+          SELFHOST_SSH_PORT: ${{ secrets.SELFHOST_SSH_PORT }}
+          SELFHOST_SSH_USER: ${{ secrets.SELFHOST_SSH_USER }}
+        run: |
+          ssh -p "${SELFHOST_SSH_PORT:-22}" "${SELFHOST_SSH_USER}@${SELFHOST_SSH_HOST}" "test -f '${SELFHOST_DEPLOY_PATH}/releases.win.json' && test -f '${SELFHOST_DEPLOY_PATH}/RELEASES'"

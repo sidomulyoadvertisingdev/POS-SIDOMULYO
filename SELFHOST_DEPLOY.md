@@ -39,6 +39,29 @@ Project ini sudah menyiapkan 2 contoh:
 1. Nginx: [deploy/nginx/pos.sidomulyoproject.com.conf](/c:/laragon/www/POS-SIDOMULYO/deploy/nginx/pos.sidomulyoproject.com.conf:1)
 2. Apache: [deploy/apache/.htaccess](/c:/laragon/www/POS-SIDOMULYO/deploy/apache/.htaccess:1)
 
+## Workflow GitHub Actions
+
+Project ini sekarang punya workflow self-hosted berikut:
+
+1. [build-velopack-selfhost.yml](/c:/laragon/www/POS-SIDOMULYO/.github/workflows/build-velopack-selfhost.yml:1)
+
+Fungsinya:
+
+1. restore metadata Velopack terbaru dari `https://pos.sidomulyoproject.com`
+2. build `release/selfhost-site`
+3. upload artifact hasil build
+4. opsional deploy otomatis ke server sendiri lewat SSH + `rsync`
+
+Kalau ingin deploy otomatis dari GitHub Actions, isi secrets repo:
+
+1. `SELFHOST_SSH_HOST`
+2. `SELFHOST_SSH_PORT`
+3. `SELFHOST_SSH_USER`
+4. `SELFHOST_SSH_KEY`
+5. `SELFHOST_DEPLOY_PATH`
+
+Kalau secrets itu belum diisi, workflow tetap build dan upload artifact ZIP supaya bisa di-download lalu di-upload manual ke server.
+
 ## Catatan migrasi
 
 Client lama masih mengecek feed lama GitHub Pages. Karena itu release `1.6.22` harus dipublish ke 2 tempat:
