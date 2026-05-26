@@ -22,25 +22,25 @@ Sesudah itu tutup dan buka terminal baru, lalu cek:
 dnx --version
 ```
 
-## 3. Atur URL feed update GitHub Pages
+## 3. Atur URL feed update Velopack
 
 Edit file [electron/update-config.js](/c:/laragon/www/pos-kasir-expo/electron/update-config.js) lalu ganti:
 
 ```js
-https://sidomulyoadvertisingdev.github.io/POS-SIDOMULYO
+https://pos.sidomulyoproject.com
 ```
 
-dengan URL GitHub Pages repo ini. URL default project sekarang sudah diarahkan ke:
+dengan URL publish release updater Anda. URL default project sekarang sudah diarahkan ke:
 
 ```text
-https://sidomulyoadvertisingdev.github.io/POS-SIDOMULYO
+https://pos.sidomulyoproject.com
 ```
 
 Catatan:
 
 1. Folder URL itu nanti harus berisi file seperti `releases.win.json`, paket `.nupkg`, dan installer `.exe`.
 2. Kalau URL placeholder belum diganti, auto update akan otomatis nonaktif.
-3. Project ini sekarang disiapkan untuk memakai repo yang sama sebagai source code dan source release GitHub Pages.
+3. Project ini sekarang default ke self-hosted release server di `pos.sidomulyoproject.com`.
 
 ## 4. Jalankan aplikasi desktop lokal
 
@@ -83,26 +83,25 @@ Catatan versi:
 2. Label versi di UI sekarang otomatis ikut `package.json` jika `EXPO_PUBLIC_APP_VERSION` dikosongkan.
 3. Jadi sebelum rilis, cukup naikkan versi di `package.json`.
 
-## 6. Build site GitHub Pages
+## 6. Build site self-hosted
 
-Kalau Anda ingin menyiapkan hasil yang siap dipublish ke GitHub Pages, gunakan:
+Kalau Anda ingin menyiapkan hasil yang siap dipublish ke server sendiri pada root domain `pos.sidomulyoproject.com`, gunakan:
 
 ```powershell
-npm run build:pages
+npm run build:selfhost
 ```
 
 Perintah ini akan:
 
 1. build web Expo ke `dist-web`
 2. build release Windows ke `release/velopack`
-3. menggabungkan web app + file Velopack ke `release/pages-site`
-4. menambahkan file `.nojekyll` dan `404.html` untuk GitHub Pages
-5. menyesuaikan asset web ke base path repo `POS-SIDOMULYO`
+3. menggabungkan web app + file Velopack ke `release/selfhost-site`
+4. menyesuaikan asset web ke root domain `/`
 
-Output publish GitHub Pages akan ada di:
+Output publish self-hosted akan ada di:
 
 ```text
-release/pages-site
+release/selfhost-site
 ```
 
 Isi pentingnya biasanya:
@@ -112,7 +111,34 @@ Isi pentingnya biasanya:
 3. paket `.nupkg`
 4. installer `.exe`
 
-## 7. Publish file release ke GitHub Pages
+## 7. Upload ke server sendiri
+
+Upload seluruh isi folder `release/selfhost-site` ke document root web `pos.sidomulyoproject.com`.
+
+File penting yang wajib bisa diakses publik:
+
+1. `https://pos.sidomulyoproject.com/`
+2. `https://pos.sidomulyoproject.com/releases.win.json`
+3. `https://pos.sidomulyoproject.com/POS Kasir-Setup-<version>.exe`
+4. file `.nupkg` yang dirujuk di `releases.win.json`
+
+## 8. Opsi legacy GitHub Pages
+
+Kalau Anda masih ingin menyiapkan hasil yang siap dipublish ke GitHub Pages, gunakan:
+
+```powershell
+npm run build:pages
+```
+
+Perintah ini akan tetap menghasilkan output di:
+
+```text
+release/pages-site
+```
+
+dan otomatis menyesuaikan asset web ke base path repo `POS-SIDOMULYO`.
+
+## 9. Publish file release ke GitHub Pages
 
 Ada 2 cara:
 
@@ -153,22 +179,22 @@ https://sidomulyoadvertisingdev.github.io/POS-SIDOMULYO/releases.win.json
 
 File itu harus bisa diakses langsung dari komputer client.
 
-## 8. Checklist rilis singkat
+## 10. Checklist rilis singkat
 
 Sebelum push:
 
 1. pastikan `.env` sudah mengarah ke backend produksi
 2. naikkan `version` di `package.json`
 3. jalankan `npm ci`
-4. jalankan `npm run build:pages`
-5. cek folder `release/pages-site` terisi `index.html` dan `releases.win.json`
+4. jalankan `npm run build:selfhost`
+5. cek folder `release/selfhost-site` terisi `index.html` dan `releases.win.json`
 
 Sesudah push:
 
-1. buka `Actions` repo
-2. pastikan workflow `Publish Velopack Pages` status hijau
-3. buka `https://sidomulyoadvertisingdev.github.io/POS-SIDOMULYO/`
-4. cek `https://sidomulyoadvertisingdev.github.io/POS-SIDOMULYO/releases.win.json`
+1. upload isi `release/selfhost-site` ke server
+2. buka `https://pos.sidomulyoproject.com/`
+3. cek `https://pos.sidomulyoproject.com/releases.win.json`
+4. pastikan file installer dan `.nupkg` bisa diakses publik
 
 Kalau gagal di `npm ci`:
 
@@ -178,11 +204,20 @@ Kalau gagal di `npm ci`:
 
 Kalau web tampil `404`:
 
-1. cek `Settings > Pages`
-2. pastikan `Source` memakai `GitHub Actions`
-3. pastikan workflow terbaru sudah selesai dan bukan run lama
+1. cek document root domain `pos.sidomulyoproject.com`
+2. pastikan file `index.html` sudah ter-upload
+3. pastikan asset `_expo` dan `assets` ikut ter-upload
 
-## 9. Cara kerja update otomatis di client
+## 11. Catatan migrasi dari GitHub Pages ke server sendiri
+
+Kalau aplikasi client lama sebelumnya mengecek update ke GitHub Pages, client itu belum otomatis tahu URL baru. Supaya migrasi aman, lakukan salah satu:
+
+1. publish satu release transisi ke feed lama GitHub Pages yang berisi build baru dengan `update-config.js` sudah menunjuk ke `https://pos.sidomulyoproject.com`
+2. atau mirror file release terbaru yang sama ke GitHub Pages dan server baru selama masa transisi
+
+Sesudah client sudah naik ke build yang memakai URL baru, update berikutnya cukup di `pos.sidomulyoproject.com`.
+
+## 12. Cara kerja update otomatis di client
 
 Setelah aplikasi versi baru dirilis dan file release baru diupload:
 
@@ -191,7 +226,7 @@ Setelah aplikasi versi baru dirilis dan file release baru diupload:
 3. setelah selesai, user akan melihat prompt restart
 4. kalau user pilih `Nanti`, update tetap akan terpasang saat aplikasi dibuka ulang berikutnya
 
-## 10. Build installer lama tanpa Velopack
+## 13. Build installer lama tanpa Velopack
 
 Kalau Anda masih butuh installer NSIS lama:
 
@@ -199,7 +234,7 @@ Kalau Anda masih butuh installer NSIS lama:
 npm run build:win:legacy
 ```
 
-## 11. Supaya installer tidak mudah dicurigai Windows
+## 14. Supaya installer tidak mudah dicurigai Windows
 
 Hal yang paling menentukan tetap `code signing certificate`.
 
@@ -210,6 +245,6 @@ Hal yang paling menentukan tetap `code signing certificate`.
 
 Tanpa code signing, Windows tetap bisa menampilkan `Unknown Publisher` walaupun metadata aplikasi sudah rapi.
 
-## 12. Catatan backend
+## 15. Catatan backend
 
 Nilai `EXPO_PUBLIC_*` ikut dibake saat `build:web`, jadi sebelum build release pastikan `.env` sudah mengarah ke endpoint produksi yang benar.

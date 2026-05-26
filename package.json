@@ -1,6 +1,6 @@
 {
   "name": "pos-kasir-expo",
-  "version": "1.6.21",
+  "version": "1.6.22",
   "description": "Aplikasi desktop POS Kasir untuk operasional penjualan dan closing harian.",
   "author": "Sidomulyo",
   "main": "index.js",
@@ -17,7 +17,8 @@
     "build:web": "set NODE_OPTIONS=--max-old-space-size=4096 && npx expo export --platform web --output-dir dist-web --max-workers 1 --clear",
     "desktop": "npm run build:web && electron electron/main.js",
     "build:win": "npm run build:web && set NODE_OPTIONS=--max-old-space-size=8192 && node scripts/build-velopack.js",
-    "build:pages": "npm run build:win && node scripts/prepare-pages-site.js",
+    "build:pages": "npm run build:win && node scripts/prepare-pages-site.js --base-path POS-SIDOMULYO --output-dir release/pages-site",
+    "build:selfhost": "npm run build:win && node scripts/prepare-pages-site.js --base-path / --output-dir release/selfhost-site",
     "build:win:dir": "npm run build:web && set NODE_OPTIONS=--max-old-space-size=8192 && electron-builder --win dir",
     "build:win:legacy": "npm run build:web && set NODE_OPTIONS=--max-old-space-size=8192 && electron-builder --win nsis"
   },

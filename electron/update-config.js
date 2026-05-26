@@ -1,5 +1,5 @@
 const updateSourceUrl = String(
-  process.env.VELOPACK_UPDATE_URL || 'https://sidomulyoadvertisingdev.github.io/POS-SIDOMULYO'
+  process.env.VELOPACK_UPDATE_URL || 'https://pos.sidomulyoproject.com'
 )
   .trim()
   .replace(/\/+$/, '');

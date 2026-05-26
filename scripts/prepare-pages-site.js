@@ -4,7 +4,33 @@ const path = require('path');
 const projectRoot = path.resolve(__dirname, '..');
 const distWebDir = path.join(projectRoot, 'dist-web');
 const velopackDir = path.join(projectRoot, 'release', 'velopack');
-const outputDir = path.join(projectRoot, 'release', 'pages-site');
+
+const parseArgs = (argv) => {
+  const result = {};
+
+  for (let index = 0; index < argv.length; index += 1) {
+    const token = String(argv[index] || '').trim();
+    if (!token.startsWith('--')) {
+      continue;
+    }
+
+    const key = token.slice(2);
+    const nextValue = argv[index + 1];
+    if (!key) {
+      continue;
+    }
+
+    if (typeof nextValue === 'string' && !nextValue.startsWith('--')) {
+      result[key] = nextValue;
+      index += 1;
+      continue;
+    }
+
+    result[key] = 'true';
+  }
+
+  return result;
+};
 
 const normalizeBasePath = (value) => {
   const trimmed = String(value || '').trim();
@@ -15,8 +41,16 @@ const normalizeBasePath = (value) => {
   return `/${trimmed.replace(/^\/+|\/+$/g, '')}`;
 };
 
+const cliArgs = parseArgs(process.argv.slice(2));
 const basePath = normalizeBasePath(
-  process.env.GITHUB_PAGES_BASE_PATH || 'POS-SIDOMULYO'
+  cliArgs['base-path']
+  || process.env.SITE_BASE_PATH
+  || process.env.GITHUB_PAGES_BASE_PATH
+  || ''
+);
+const outputDir = path.resolve(
+  projectRoot,
+  String(cliArgs['output-dir'] || path.join('release', 'site')).trim()
 );
 
 const ensureDir = (dirPath) => {
@@ -111,8 +145,8 @@ const main = () => {
   fs.copyFileSync(outputIndexHtml, output404Html);
   fs.writeFileSync(noJekyllPath, '', 'utf8');
 
-  console.log(`GitHub Pages site siap di: ${outputDir}`);
-  console.log(`Base path GitHub Pages: ${basePath || '/'}`);
+  console.log(`Site release siap di: ${outputDir}`);
+  console.log(`Base path asset: ${basePath || '/'}`);
 };
 
 main();
