@@ -262,10 +262,18 @@ const authenticateWithCredentials = async (email, password) => {
   const loginUrl = `${API_BASE_URL}/auth/login`;
   const login = await fetchWithTimeout(loginUrl, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      Accept: 'application/json',
+    },
     body: JSON.stringify({ email: resolvedEmail, password: resolvedPassword }),
   });
   const body = await parseJsonSafe(login);
+  const responseContentType = String(login.headers?.get?.('content-type') || '').toLowerCase();
+
+  if (login.redirected || (responseContentType && !responseContentType.includes('application/json'))) {
+    throw new Error('Login backend tidak mengembalikan JSON API. Pastikan frontend terhubung ke backend online yang benar.');
+  }
 
   if (!login.ok) {
     throw new Error(body?.message || 'Login backend gagal.');
