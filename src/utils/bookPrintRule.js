@@ -65,7 +65,6 @@ const DEFAULT_FIELD_OPTIONS = {
     { value: 'A4', label: 'A4' },
     { value: 'A5', label: 'A5' },
     { value: 'A6', label: 'A6' },
-    { value: 'A7', label: 'A7' },
     { value: 'CUSTOM', label: 'Custom' },
   ],
   print_model: [
@@ -391,7 +390,7 @@ const isBookSalesProduct = (product, productDetail = null) => {
 };
 
 const normalizeOptionRows = (rows, fallbackRows = []) => {
-  const sourceRows = Array.isArray(rows) && rows.length > 0 ? rows : fallbackRows;
+  const sourceRows = Array.isArray(rows) ? rows : fallbackRows;
   return sourceRows
     .map((row) => {
       const value = String(row?.value || row?.label || '').trim();
@@ -465,7 +464,7 @@ const getBookPrintRuleConfig = (product, productDetail = null) => {
       ...config,
       wizard_steps: normalizeWizardSteps(config?.wizard_steps, DEFAULT_WIZARD_STEPS),
       field_options: {
-        book_type: mergeOptionRows(config?.field_options?.book_type, DEFAULT_FIELD_OPTIONS.book_type),
+        book_type: normalizeOptionRows(config?.field_options?.book_type, DEFAULT_FIELD_OPTIONS.book_type),
         finished_size: normalizeOptionRows(config?.field_options?.finished_size, DEFAULT_FIELD_OPTIONS.finished_size),
         material_inside: normalizeOptionRows(config?.field_options?.material_inside, DEFAULT_FIELD_OPTIONS.material_inside),
       material_cover: normalizeOptionRows(config?.field_options?.material_cover, DEFAULT_FIELD_OPTIONS.material_cover),

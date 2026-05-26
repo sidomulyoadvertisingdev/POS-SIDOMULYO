@@ -62,6 +62,8 @@ const ProductForm = ({
   materialWarning,
   showBookPrintRuleSection,
   bookProductLabel,
+  bookConfigStatus,
+  bookConfigMessage,
   bookDisplayPrimary,
   bookDisplaySecondary,
   bookType,
@@ -646,6 +648,8 @@ const ProductForm = ({
         fixedSizeHint={fixedSizeHint}
         showBookPrintRuleSection={showBookPrintRuleSection}
         bookProductLabel={bookProductLabel}
+        bookConfigStatus={bookConfigStatus}
+        bookConfigMessage={bookConfigMessage}
         bookType={bookType}
         bookTypeOptions={bookTypeOptions}
         bookWizardSteps={bookWizardSteps}

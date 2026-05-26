@@ -56,6 +56,9 @@ export const mapPaymentMethodToBackend = (paymentMethod) => {
   if (['transfer', 'bank transfer', 'transfer bank'].includes(text)) {
     return 'transfer';
   }
+  if (['dana_gateway', 'dana payment gateway', 'payment gateway dana', 'gateway_dana'].includes(text)) {
+    return 'dana_gateway';
+  }
   if (['qris', 'qr', 'qris payment'].includes(text)) {
     return 'qris';
   }

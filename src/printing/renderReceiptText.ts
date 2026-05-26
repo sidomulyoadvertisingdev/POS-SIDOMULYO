@@ -169,6 +169,17 @@ export const renderReceiptText = (receipt: ReceiptData, printerProfile: PrinterP
     lines.push('');
   }
 
+  const proofingNotes = Array.isArray(detail.proofingNotes)
+    ? detail.proofingNotes.filter((item) => hasValue(item))
+    : [];
+  if (proofingNotes.length > 0) {
+    lines.push('Proofing :');
+    proofingNotes.forEach((item) => {
+      wrapText(`- ${String(item || '').trim()}`, width).forEach((line) => lines.push(line));
+    });
+    lines.push('');
+  }
+
   if (hasValue(receipt.transaction.notes)) {
     lines.push('Catatan :');
     wrapText(String(receipt.transaction.notes || '').trim(), width).forEach((line) => lines.push(line));

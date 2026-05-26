@@ -92,6 +92,7 @@ export interface ReceiptLayout {
 export interface ReceiptDetailSection {
   deadline?: string;
   orderDetails?: string[];
+  proofingNotes?: string[];
   footerNotes?: string[];
   thankYouText?: string;
 }

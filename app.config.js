@@ -57,6 +57,10 @@ module.exports = () => ({
       bankAccountQrisId: trimString(process.env.EXPO_PUBLIC_BANK_ACCOUNT_QRIS_ID),
       bankAccountCardId: trimString(process.env.EXPO_PUBLIC_BANK_ACCOUNT_CARD_ID),
       bankAccountDefaultId: trimString(process.env.EXPO_PUBLIC_BANK_ACCOUNT_DEFAULT_ID),
+      reverbAppKey: trimString(process.env.EXPO_PUBLIC_REVERB_APP_KEY),
+      reverbHost: trimString(process.env.EXPO_PUBLIC_REVERB_HOST),
+      reverbPort: trimString(process.env.EXPO_PUBLIC_REVERB_PORT),
+      reverbScheme: trimString(process.env.EXPO_PUBLIC_REVERB_SCHEME),
     },
   },
 });

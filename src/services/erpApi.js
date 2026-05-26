@@ -7,8 +7,6 @@ import {
 } from '../utils/purchaseExpenseStore';
 
 const DEFAULT_ERP_API_BASE_URL = 'https://dashboard.sidomulyoproject.com/api';
-const FORCE_ONLINE_ERP_API_BASE_URL = 'https://dashboard.sidomulyoproject.com/api';
-const FORCE_ONLINE_ERP_API = true;
 const LOCAL_DEV_ERP_API_BASE_URL = 'http://127.0.0.1:8000/api';
 const LOCAL_ERP_HOSTNAMES = new Set(['localhost', '127.0.0.1', '0.0.0.0']);
 const trimString = (value) => String(value || '').trim();
@@ -62,14 +60,17 @@ const isLocalRuntimeHost = () => {
 };
 
 const toBooleanFlag = (value) => ['1', 'true', 'yes'].includes(String(value || '').trim().toLowerCase());
+const forceOnlineApiUrl = toBooleanFlag(
+  resolvePublicEnv('EXPO_PUBLIC_FORCE_ONLINE_ERP_API', extra.forceOnlineErpApi),
+);
 
 const resolveDefaultApiBaseUrl = (preferLocalApiUrl = false) => (
   preferLocalApiUrl ? LOCAL_DEV_ERP_API_BASE_URL : DEFAULT_ERP_API_BASE_URL
 );
 
 const resolveRuntimeApiBaseUrl = (configuredUrl, allowLocalApiUrl = false, preferLocalApiUrl = false) => {
-  if (FORCE_ONLINE_ERP_API) {
-    return FORCE_ONLINE_ERP_API_BASE_URL;
+  if (forceOnlineApiUrl) {
+    return DEFAULT_ERP_API_BASE_URL;
   }
 
   const normalizedConfiguredUrl = normalizeApiBaseUrl(configuredUrl);
@@ -209,6 +210,19 @@ const buildHeaders = (extra = {}) => {
   return headers;
 };
 
+const buildAuthHeaders = (extra = {}) => {
+  const headers = {
+    Accept: 'application/json',
+    ...extra,
+  };
+
+  if (authToken) {
+    headers.Authorization = `Bearer ${authToken}`;
+  }
+
+  return headers;
+};
+
 const parseJsonSafe = async (response) => {
   try {
     return await response.json();
@@ -272,13 +286,14 @@ const request = async (path, options = {}, retryOnAuth = true) => {
   const {
     headers: extraHeaders = {},
     timeoutMs,
+    isFormData = false,
     ...requestOptions
   } = options || {};
   const requestUrl = `${API_BASE_URL}${path}`;
   const response = await fetchWithTimeout(requestUrl, {
     ...requestOptions,
     timeoutMs,
-    headers: buildHeaders(extraHeaders),
+    headers: isFormData ? buildAuthHeaders(extraHeaders) : buildHeaders(extraHeaders),
   });
 
   if (response.redirected && typeof response.url === 'string') {
@@ -1058,6 +1073,10 @@ export const createPembelianBahanRequest = async (payload = {}) => {
       warehouse_id: payload?.warehouse_id ?? null,
       request_date: payload?.request_date ?? new Date().toISOString().slice(0, 10),
       note: payload?.note ?? '',
+      payment_status: payload?.payment_status,
+      payment_method_id: payload?.payment_method_id ?? null,
+      payment_account_id: payload?.payment_account_id ?? null,
+      source_account_id: payload?.source_account_id ?? null,
       items: normalizedItems.map((item) => ({
         warehouse_product_id: item.warehouse_product_id || null,
         purchase_category_item_id: item.purchase_category_item_id || null,
@@ -1428,6 +1447,44 @@ export const createPosInvoicePayment = async (invoiceId, payload) => {
   });
 };
 
+export const createDanaQrisPayment = async (invoiceId, payload = {}) => {
+  await ensureAuthenticated();
+  return request(`/pos/invoices/${invoiceId}/payments/qris/dana`, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+    timeoutMs: 45000,
+  });
+};
+
+export const createDanaGatewayPayment = async (invoiceId, payload = {}) => {
+  await ensureAuthenticated();
+  return request(`/pos/invoices/${invoiceId}/payments/gateway/dana`, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+    timeoutMs: 45000,
+  });
+};
+
+export const fetchDanaQrisPaymentStatus = async (paymentTransactionId, options = {}) => {
+  await ensureAuthenticated();
+  const params = new URLSearchParams();
+  if (options?.syncProvider === true) {
+    params.set('sync_provider', '1');
+  }
+  const query = params.toString();
+  return request(`/pos/payment-transactions/${paymentTransactionId}/status${query ? `?${query}` : ''}`, {
+    timeoutMs: 30000,
+  });
+};
+
+export const cancelDanaQrisPayment = async (paymentTransactionId, payload = {}) => {
+  await ensureAuthenticated();
+  return request(`/pos/payment-transactions/${paymentTransactionId}/cancel`, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+};
+
 export const createPosCustomer = async (payload) => {
   await ensureAuthenticated();
   const body = await requestWithEndpointCandidates(
@@ -1486,6 +1543,89 @@ export const updatePosProductionItemStatus = async (itemId, productionStatus) =>
   return request(`/pos/production/items/${itemId}/status`, {
     method: 'PUT',
     body: JSON.stringify({ production_status: productionStatus }),
+  });
+};
+
+export const fetchPosProofings = async (params = {}) => {
+  await ensureAuthenticated();
+  const query = new URLSearchParams();
+  if (params?.status) {
+    query.set('status', String(params.status));
+  }
+  if (params?.search) {
+    query.set('search', String(params.search));
+  }
+  const suffix = query.toString() ? `?${query.toString()}` : '';
+  return request(`/pos/proofings${suffix}`);
+};
+
+export const fetchPosProofingDetail = async (proofingId) => {
+  await ensureAuthenticated();
+  return request(`/pos/proofings/${proofingId}`);
+};
+
+export const fetchPosProofingHistory = async (proofingId) => {
+  await ensureAuthenticated();
+  return request(`/pos/proofings/${proofingId}/history`);
+};
+
+export const createPosProofing = async (payload) => {
+  await ensureAuthenticated();
+  return request('/pos/proofings', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+};
+
+export const uploadPosProofingPreview = async (proofingId, file, payload = {}) => {
+  await ensureAuthenticated();
+  const formData = new FormData();
+  formData.append('preview_file', file);
+  if (payload?.notes_from_designer) {
+    formData.append('notes_from_designer', String(payload.notes_from_designer));
+  }
+  if (payload?.designer_id) {
+    formData.append('designer_id', String(payload.designer_id));
+  }
+  return request(`/pos/proofings/${proofingId}/preview`, {
+    method: 'POST',
+    body: formData,
+    isFormData: true,
+    timeoutMs: 45000,
+  });
+};
+
+export const uploadPosProofingFinalFile = async (proofingId, file, payload = {}) => {
+  await ensureAuthenticated();
+  const formData = new FormData();
+  formData.append('final_file', file);
+  if (payload?.notes_from_designer) {
+    formData.append('notes_from_designer', String(payload.notes_from_designer));
+  }
+  if (payload?.designer_id) {
+    formData.append('designer_id', String(payload.designer_id));
+  }
+  return request(`/pos/proofings/${proofingId}/final-file`, {
+    method: 'POST',
+    body: formData,
+    isFormData: true,
+    timeoutMs: 45000,
+  });
+};
+
+export const sendPosProofingWhatsapp = async (proofingId, payload = {}) => {
+  await ensureAuthenticated();
+  return request(`/pos/proofings/${proofingId}/send-whatsapp`, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+};
+
+export const releasePosProofingToProduction = async (proofingId) => {
+  await ensureAuthenticated();
+  return request(`/pos/proofings/${proofingId}/release-production`, {
+    method: 'POST',
+    body: JSON.stringify({}),
   });
 };
 
@@ -1891,6 +2031,156 @@ export const createPosCashFlow = async (payload) => {
   });
 };
 
+export const fetchStoreDailyClosing = async (date = '') => {
+  await ensureAuthenticated();
+  const query = new URLSearchParams();
+  if (toSafeText(date)) {
+    query.set('date', toSafeText(date));
+  }
+  const suffix = query.toString() ? `?${query.toString()}` : '';
+  return request(`/pos/store-closings/today${suffix}`);
+};
+
+export const evaluateStoreDailyClosing = async (closingId) => {
+  await ensureAuthenticated();
+  return request(`/pos/store-closings/${closingId}/evaluate`, {
+    method: 'POST',
+    body: JSON.stringify({}),
+  });
+};
+
+export const saveStoreClosingChecklist = async (closingId, items) => {
+  await ensureAuthenticated();
+  return request(`/pos/store-closings/${closingId}/checklist`, {
+    method: 'PUT',
+    body: JSON.stringify({ items }),
+  });
+};
+
+export const saveStoreClosingCashValidation = async (closingId, payload = {}) => {
+  await ensureAuthenticated();
+  if (payload?.evidence) {
+    const formData = new FormData();
+    formData.append('opening_cash', String(payload.opening_cash || 0));
+    formData.append('physical_cash', String(payload.physical_cash || 0));
+    if (payload.reason) formData.append('reason', String(payload.reason));
+    if (payload.responsible_user_id) formData.append('responsible_user_id', String(payload.responsible_user_id));
+    formData.append('evidence', payload.evidence);
+    return request(`/pos/store-closings/${closingId}/cash-validation`, {
+      method: 'POST',
+      body: formData,
+      isFormData: true,
+      timeoutMs: 45000,
+    });
+  }
+  return request(`/pos/store-closings/${closingId}/cash-validation`, {
+    method: 'PUT',
+    body: JSON.stringify(payload),
+  });
+};
+
+export const saveStoreClosingOrderIssue = async (closingId, issueId, payload = {}) => {
+  await ensureAuthenticated();
+  return request(`/pos/store-closings/${closingId}/open-orders/${issueId}`, {
+    method: 'PUT',
+    body: JSON.stringify(payload),
+  });
+};
+
+export const saveStoreClosingOrderIssuesBulk = async (closingId, payload = {}) => {
+  await ensureAuthenticated();
+  return request(`/pos/store-closings/${closingId}/open-orders/bulk`, {
+    method: 'PUT',
+    body: JSON.stringify(payload),
+  });
+};
+
+const uploadStoreClosingEvidence = async (path, file) => {
+  await ensureAuthenticated();
+  const formData = new FormData();
+  formData.append('evidence', file);
+  return request(path, {
+    method: 'POST',
+    body: formData,
+    isFormData: true,
+    timeoutMs: 45000,
+  });
+};
+
+export const uploadStoreClosingExpenseEvidence = async (closingId, transactionId, file) => (
+  uploadStoreClosingEvidence(`/pos/store-closings/${closingId}/expenses/${transactionId}/evidence`, file)
+);
+
+export const uploadStoreClosingPurchaseEvidence = async (closingId, purchaseId, file) => (
+  uploadStoreClosingEvidence(`/pos/store-closings/${closingId}/purchases/${purchaseId}/evidence`, file)
+);
+
+export const finalizeStoreDailyClosing = async (closingId) => {
+  await ensureAuthenticated();
+  return request(`/pos/store-closings/${closingId}/finalize`, {
+    method: 'POST',
+    body: JSON.stringify({}),
+  });
+};
+
+export const fetchStoreClosingArchive = async ({ date_from = '', date_to = '', limit = 60 } = {}) => {
+  await ensureAuthenticated();
+  const query = new URLSearchParams();
+  if (toSafeText(date_from)) query.set('date_from', toSafeText(date_from));
+  if (toSafeText(date_to)) query.set('date_to', toSafeText(date_to));
+  if (Number(limit) > 0) query.set('limit', String(Number(limit)));
+  const suffix = query.toString() ? `?${query.toString()}` : '';
+  return request(`/pos/store-closings/archive${suffix}`);
+};
+
+export const fetchStoreClosingReviewQueue = async (limit = 60) => {
+  await ensureAuthenticated();
+  return request(`/pos/store-closings/review-queue?limit=${Number(limit) || 60}`);
+};
+
+export const fetchStoreClosingDetail = async (closingId) => {
+  await ensureAuthenticated();
+  return request(`/pos/store-closings/${closingId}`);
+};
+
+export const decideStoreClosingCashDifference = async (closingId, payload = {}) => {
+  await ensureAuthenticated();
+  return request(`/pos/store-closings/${closingId}/cash-decision`, {
+    method: 'PUT',
+    body: JSON.stringify(payload),
+  });
+};
+
+export const createStoreClosingCorrection = async (closingId, payload = {}) => {
+  await ensureAuthenticated();
+  if (payload?.evidence) {
+    const formData = new FormData();
+    formData.append('issue_type', String(payload.issue_type || 'klarifikasi_lain'));
+    formData.append('amount', String(payload.amount || 0));
+    formData.append('description', String(payload.description || ''));
+    if (payload.related_user_id) formData.append('related_user_id', String(payload.related_user_id));
+    formData.append('evidence', payload.evidence);
+    return request(`/pos/store-closings/${closingId}/corrections`, {
+      method: 'POST',
+      body: formData,
+      isFormData: true,
+      timeoutMs: 45000,
+    });
+  }
+  return request(`/pos/store-closings/${closingId}/corrections`, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+};
+
+export const decideStoreClosingCorrection = async (closingId, correctionId, payload = {}) => {
+  await ensureAuthenticated();
+  return request(`/pos/store-closings/${closingId}/corrections/${correctionId}/decision`, {
+    method: 'PUT',
+    body: JSON.stringify(payload),
+  });
+};
+
 export const fetchPosOrderDetail = async (orderId) => {
   await ensureAuthenticated();
   return request(`/pos/orders/${orderId}`);
@@ -1902,3 +2192,5 @@ export const fetchAuthMe = async () => {
 };
 
 export const getApiBaseUrl = () => API_BASE_URL;
+
+export const getAuthToken = () => authToken;

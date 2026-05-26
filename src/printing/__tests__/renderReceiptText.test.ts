@@ -156,6 +156,35 @@ test('renderReceiptText keeps payment summary lines consistent with discount and
   assert.match(output, /Sisa/);
 });
 
+test('renderReceiptText can render proofing approval section on thermal layout', () => {
+  const profile = createPrinterProfile({
+    id: 'test-proofing',
+    name: 'Thermal Proofing',
+    type: 'thermal_escpos',
+    connection: 'qz_tray',
+    paperWidth: '58mm',
+    charsPerLine: 32,
+  });
+  const proofingReceipt: ReceiptData = {
+    ...receipt,
+    detail: {
+      ...receipt.detail,
+      proofingNotes: [
+        'PRF-001 | Banner Depan | Approved 02/05/2026 21.10 | Designer Rina',
+        'PRF-002 | Sticker Kaca | Revisi 02/05/2026 21.30 | Designer Dwi',
+      ],
+    },
+  };
+
+  const output = renderReceiptText(proofingReceipt, profile);
+  output.trimEnd().split('\n').forEach((line) => {
+    assert.ok(line.length <= 32);
+  });
+  assert.match(output, /Proofing/);
+  assert.match(output, /PRF-001/);
+  assert.match(output, /PRF-002/);
+});
+
 test('renderReceiptText can render production work order without payment section', () => {
   const profile = createPrinterProfile({
     id: 'test-spk',

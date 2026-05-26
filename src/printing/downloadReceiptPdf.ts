@@ -110,7 +110,7 @@ const addWrappedLines = (
   });
 };
 
-const buildReceiptPdfLines = (receipt: ReceiptData, profile: PrinterProfile): PdfLine[] => {
+export const buildReceiptPdfLines = (receipt: ReceiptData, profile: PrinterProfile): PdfLine[] => {
   const lines: PdfLine[] = [];
   const widthChars = Math.max(Number(profile.charsPerLine || 32), 24);
   const detailChars = Math.max(widthChars - 2, 20);
@@ -177,6 +177,45 @@ const buildReceiptPdfLines = (receipt: ReceiptData, profile: PrinterProfile): Pd
   }
   if (typeof receipt.summary.remainingDue === 'number' && receipt.summary.remainingDue > 0) {
     lines.push({ text: `Sisa\t${formatReceiptAmount(receipt.summary.remainingDue)}` });
+  }
+
+  if (hasValue(receipt.detail?.deadline)) {
+    lines.push({ text: '', gapAfter: 2 });
+    lines.push({ text: 'Deadline :', bold: true });
+    addWrappedLines(lines, String(receipt.detail?.deadline || '').trim(), detailChars);
+  }
+
+  const orderDetails = Array.isArray(receipt.detail?.orderDetails)
+    ? receipt.detail.orderDetails.filter((item) => hasValue(item))
+    : [];
+  if (orderDetails.length > 0) {
+    lines.push({ text: '', gapAfter: 2 });
+    lines.push({ text: 'Rincian :', bold: true });
+    orderDetails.forEach((item) => addWrappedLines(lines, String(item || '').trim(), detailChars));
+  }
+
+  const proofingNotes = Array.isArray(receipt.detail?.proofingNotes)
+    ? receipt.detail.proofingNotes.filter((item) => hasValue(item))
+    : [];
+  if (proofingNotes.length > 0) {
+    lines.push({ text: '', gapAfter: 2 });
+    lines.push({ text: 'Proofing :', bold: true });
+    proofingNotes.forEach((item) => addWrappedLines(lines, `- ${String(item || '').trim()}`, detailChars));
+  }
+
+  if (hasValue(receipt.transaction.notes)) {
+    lines.push({ text: '', gapAfter: 2 });
+    lines.push({ text: 'Catatan :', bold: true });
+    addWrappedLines(lines, String(receipt.transaction.notes || '').trim(), detailChars);
+  }
+
+  const footerNotes = Array.isArray(receipt.detail?.footerNotes)
+    ? receipt.detail.footerNotes.filter((item) => hasValue(item))
+    : [];
+  if (footerNotes.length > 0) {
+    lines.push({ text: '', gapAfter: 2 });
+    lines.push({ text: 'NB :', bold: true });
+    footerNotes.forEach((item) => addWrappedLines(lines, `- ${String(item || '').trim()}`, detailChars));
   }
 
   const thankYouText = String(receipt.detail?.thankYouText || '').trim();

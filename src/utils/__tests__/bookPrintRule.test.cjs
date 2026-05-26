@@ -48,8 +48,31 @@ test('getBookPrintRuleConfig falls back to default field options', () => {
   const config = getBookPrintRuleConfig({}, null);
 
   assert.deepEqual(config.field_options.finished_size, DEFAULT_BOOK_PRINT_RULE_FIELD_OPTIONS.finished_size);
+  assert.deepEqual(config.field_options.finished_size.map((row) => row.value), ['A4', 'A5', 'A6', 'CUSTOM']);
   assert.equal(config.messages.blank_pages_not_needed, 'Jumlah halaman sudah sesuai kelipatan produksi.');
   assert.deepEqual(config.wizard_steps, DEFAULT_BOOK_PRINT_RULE_WIZARD_STEPS);
+});
+
+test('getBookPrintRuleConfig respects empty backend option mappings', () => {
+  const config = getBookPrintRuleConfig({
+    book_print_rule_config: {
+      field_options: {
+        binding_type: [],
+        extra_finishings: [],
+      },
+      material_bindings: {
+        inside_candidate_rows: [],
+        cover_candidate_rows: [],
+        inside_candidate_ids: [],
+        cover_candidate_ids: [],
+      },
+    },
+  }, null);
+
+  assert.deepEqual(config.field_options.binding_type, []);
+  assert.deepEqual(config.field_options.extra_finishings, []);
+  assert.deepEqual(config.material_bindings.inside_candidate_rows, []);
+  assert.deepEqual(config.material_bindings.cover_candidate_rows, []);
 });
 
 test('getBookPrintRuleConfig normalizes backend wizard steps safely', () => {

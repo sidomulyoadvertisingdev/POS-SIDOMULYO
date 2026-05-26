@@ -169,6 +169,9 @@ const renderStructuredReceipt = (
   const orderDetails = Array.isArray(receipt.detail?.orderDetails)
     ? receipt.detail.orderDetails.filter((item) => hasValue(item))
     : [];
+  const proofingLines = Array.isArray(receipt.detail?.proofingNotes)
+    ? receipt.detail.proofingNotes.filter((item) => hasValue(item))
+    : [];
   const summaryRows = [
     renderSummaryRow('Sub Total', receipt.summary.subtotal, true),
     renderSummaryRow('Diskon', receipt.summary.discount || 0),
@@ -565,6 +568,12 @@ const renderStructuredReceipt = (
       <div class="receipt-detail-block">
         <div class="receipt-detail-title">Rincian :</div>
         ${orderDetails.map((item) => `<div class="receipt-detail-line">${escapeHtml(String(item || '').trim())}</div>`).join('')}
+      </div>
+    ` : ''}
+    ${proofingLines.length > 0 ? `
+      <div class="receipt-detail-block">
+        <div class="receipt-detail-title">Proofing :</div>
+        ${proofingLines.map((item) => `<div class="receipt-detail-line">${escapeHtml(String(item || '').trim())}</div>`).join('')}
       </div>
     ` : ''}
     ${hasValue(receipt.transaction.notes) ? `

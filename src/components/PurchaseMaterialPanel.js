@@ -6,6 +6,7 @@ import {
   getPembelianBahanList,
   getPembelianBahanMaterialOptions,
   getPembelianCategoryOptions,
+  fetchPosBankAccounts,
 } from '../services/erpApi';
 import { formatRupiah } from '../utils/currency';
 
@@ -117,6 +118,16 @@ const buildManualDraftItem = (categoryCode = 'manual') => ({
   is_manual: true,
 });
 
+const normalizePaymentAccountRow = (row) => ({
+  ...row,
+  id: Number(row?.payment_account_id || row?.id || 0) || 0,
+  payment_method_id: Number(row?.payment_method_id || 0) || null,
+  accounting_account_id: Number(row?.accounting_account_id || row?.accountingAccountId || 0) || null,
+  payment_method_code: String(row?.payment_method_code || row?.type || '').trim(),
+  payment_method_name: String(row?.payment_method_name || row?.payment_method_code || row?.type || '').trim(),
+  display_label: String(row?.label || row?.name || '').trim() || 'Akun pembayaran',
+});
+
 const PurchaseMaterialPanel = ({ currentUser, isActive, onNotify }) => {
   const [purchaseCategories, setPurchaseCategories] = useState([]);
   const [selectedCategoryCode, setSelectedCategoryCode] = useState('');
@@ -138,6 +149,10 @@ const PurchaseMaterialPanel = ({ currentUser, isActive, onNotify }) => {
   const [draftItems, setDraftItems] = useState([]);
   const [selectedRequestId, setSelectedRequestId] = useState('');
   const [selectedDetail, setSelectedDetail] = useState(null);
+  const [paymentStatus, setPaymentStatus] = useState('paid');
+  const [paymentAccounts, setPaymentAccounts] = useState([]);
+  const [selectedPaymentAccountId, setSelectedPaymentAccountId] = useState(null);
+  const [isPaymentAccountsLoading, setIsPaymentAccountsLoading] = useState(false);
 
   const selectedCategory = useMemo(() => (
     purchaseCategories.find((row) => String(row?.code || '') === String(selectedCategoryCode || ''))
@@ -150,6 +165,9 @@ const PurchaseMaterialPanel = ({ currentUser, isActive, onNotify }) => {
     [selectedCategory],
   );
   const hasCategoryItemOptions = !isMaterialFlow && categoryItemRows.length > 0;
+  const selectedPaymentAccount = useMemo(() => (
+    paymentAccounts.find((row) => Number(row?.id || 0) === Number(selectedPaymentAccountId || 0)) || null
+  ), [paymentAccounts, selectedPaymentAccountId]);
 
   const filteredMaterials = useMemo(() => {
     const keyword = String(materialSearch || '').trim().toLowerCase();
@@ -228,6 +246,31 @@ const PurchaseMaterialPanel = ({ currentUser, isActive, onNotify }) => {
     }
   };
 
+  const loadPaymentAccounts = async () => {
+    try {
+      setIsPaymentAccountsLoading(true);
+      const rows = await fetchPosBankAccounts({
+        context: 'expense',
+        allowedTypes: ['cash', 'bank_transfer', 'qris', 'e_wallet'],
+      });
+      const nextRows = (Array.isArray(rows) ? rows : [])
+        .map((row) => normalizePaymentAccountRow(row))
+        .filter((row) => row.id > 0 && Number(row.accounting_account_id || 0) > 0);
+      setPaymentAccounts(nextRows);
+      setSelectedPaymentAccountId((currentId) => (
+        nextRows.some((row) => Number(row.id) === Number(currentId || 0))
+          ? currentId
+          : (nextRows[0]?.id || null)
+      ));
+    } catch (error) {
+      setPaymentAccounts([]);
+      setSelectedPaymentAccountId(null);
+      onNotify?.('Belanja Toko', `Gagal memuat akun pembayaran: ${error.message}`);
+    } finally {
+      setIsPaymentAccountsLoading(false);
+    }
+  };
+
   const loadRequests = async () => {
     try {
       setIsRequestsLoading(true);
@@ -251,6 +294,7 @@ const PurchaseMaterialPanel = ({ currentUser, isActive, onNotify }) => {
     loadCategories();
     loadMaterials();
     loadRequests();
+    loadPaymentAccounts();
   }, [isActive]);
 
   useEffect(() => {
@@ -518,6 +562,11 @@ const PurchaseMaterialPanel = ({ currentUser, isActive, onNotify }) => {
       return;
     }
 
+    if (!isMaterialFlow && paymentStatus === 'paid' && !selectedPaymentAccount) {
+      onNotify?.('Belanja Toko', 'Pilih akun pembayaran untuk belanja yang sudah dibayar.');
+      return;
+    }
+
     try {
       setIsSubmitting(true);
       const created = await createPembelianBahanRequest({
@@ -525,6 +574,10 @@ const PurchaseMaterialPanel = ({ currentUser, isActive, onNotify }) => {
         note: noteInput,
         items: draftItems,
         purchase_category: selectedCategory,
+        payment_status: isMaterialFlow ? undefined : paymentStatus,
+        payment_method_id: !isMaterialFlow && paymentStatus === 'paid' ? selectedPaymentAccount?.payment_method_id : null,
+        payment_account_id: !isMaterialFlow && paymentStatus === 'paid' ? selectedPaymentAccount?.id : null,
+        source_account_id: !isMaterialFlow && paymentStatus === 'paid' ? selectedPaymentAccount?.accounting_account_id : null,
       });
       setDraftItems([]);
       setNoteInput('');
@@ -606,6 +659,63 @@ const PurchaseMaterialPanel = ({ currentUser, isActive, onNotify }) => {
             ) : null}
           </View>
         </View>
+
+        {selectedCategory && !isMaterialFlow ? (
+          <View style={styles.paymentCard}>
+            <Text style={styles.sectionLabel}>Status & Sumber Pembayaran</Text>
+            <View style={styles.paymentStatusRow}>
+              <Pressable
+                style={[styles.paymentStatusChip, paymentStatus === 'paid' ? styles.paymentStatusChipActive : null]}
+                onPress={() => setPaymentStatus('paid')}
+                disabled={isSubmitting}
+              >
+                <Text style={[styles.paymentStatusText, paymentStatus === 'paid' ? styles.paymentStatusTextActive : null]}>
+                  Sudah Dibayar
+                </Text>
+              </Pressable>
+              <Pressable
+                style={[styles.paymentStatusChip, paymentStatus === 'unpaid' ? styles.paymentStatusChipActive : null]}
+                onPress={() => setPaymentStatus('unpaid')}
+                disabled={isSubmitting}
+              >
+                <Text style={[styles.paymentStatusText, paymentStatus === 'unpaid' ? styles.paymentStatusTextActive : null]}>
+                  Tempo / Hutang
+                </Text>
+              </Pressable>
+            </View>
+            {paymentStatus === 'paid' ? (
+              <>
+                <Text style={styles.paymentHelper}>Pilih sumber pembayaran yang benar. Akun ini akan dikredit pada jurnal belanja.</Text>
+                <View style={styles.paymentAccountWrap}>
+                  {isPaymentAccountsLoading ? (
+                    <Text style={styles.helperText}>Sedang memuat akun pembayaran...</Text>
+                  ) : paymentAccounts.length > 0 ? paymentAccounts.map((row) => {
+                    const active = Number(row.id) === Number(selectedPaymentAccountId || 0);
+                    return (
+                      <Pressable
+                        key={`purchase-payment-${row.id}`}
+                        style={[styles.paymentAccountChip, active ? styles.paymentAccountChipActive : null]}
+                        onPress={() => setSelectedPaymentAccountId(row.id)}
+                        disabled={isSubmitting}
+                      >
+                        <Text style={[styles.paymentAccountTitle, active ? styles.paymentAccountTitleActive : null]}>
+                          {row.display_label}
+                        </Text>
+                        <Text style={[styles.paymentAccountMeta, active ? styles.paymentAccountMetaActive : null]}>
+                          {row.payment_method_name || row.payment_method_code || 'Metode pembayaran'}
+                        </Text>
+                      </Pressable>
+                    );
+                  }) : (
+                    <Text style={styles.helperText}>Belum ada akun pembayaran aktif yang terhubung ke accounting.</Text>
+                  )}
+                </View>
+              </>
+            ) : (
+              <Text style={styles.paymentHelper}>Belanja akan dicatat sebagai hutang dan tidak mengurangi kas/bank saat ini.</Text>
+            )}
+          </View>
+        ) : null}
 
         <View style={styles.selectorToolbar}>
           {isMaterialFlow ? (
@@ -1222,6 +1332,81 @@ const styles = StyleSheet.create({
     fontSize: 11,
     lineHeight: 16,
     color: '#52606d',
+  },
+  paymentCard: {
+    borderWidth: 1,
+    borderColor: '#d6e3f7',
+    backgroundColor: '#f8fbff',
+    borderRadius: 12,
+    padding: 12,
+    marginTop: 10,
+  },
+  paymentStatusRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+    marginTop: 8,
+    marginBottom: 8,
+  },
+  paymentStatusChip: {
+    borderWidth: 1,
+    borderColor: '#cbd2d9',
+    backgroundColor: '#ffffff',
+    borderRadius: 999,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+  },
+  paymentStatusChipActive: {
+    borderColor: '#146c55',
+    backgroundColor: '#def7ec',
+  },
+  paymentStatusText: {
+    fontSize: 11,
+    fontWeight: '800',
+    color: '#52606d',
+  },
+  paymentStatusTextActive: {
+    color: '#0f5132',
+  },
+  paymentHelper: {
+    fontSize: 11,
+    lineHeight: 16,
+    color: '#52606d',
+    marginBottom: 8,
+  },
+  paymentAccountWrap: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+  paymentAccountChip: {
+    minWidth: 180,
+    borderWidth: 1,
+    borderColor: '#d9e2ec',
+    backgroundColor: '#ffffff',
+    borderRadius: 10,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+  },
+  paymentAccountChipActive: {
+    borderColor: '#2250c9',
+    backgroundColor: '#eef4ff',
+  },
+  paymentAccountTitle: {
+    fontSize: 11,
+    fontWeight: '800',
+    color: '#243b53',
+  },
+  paymentAccountTitleActive: {
+    color: '#133ea3',
+  },
+  paymentAccountMeta: {
+    fontSize: 10,
+    color: '#627d98',
+    marginTop: 2,
+  },
+  paymentAccountMetaActive: {
+    color: '#335c9b',
   },
   selectorToolbar: {
     flexDirection: 'row',

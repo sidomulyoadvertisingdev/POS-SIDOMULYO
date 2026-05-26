@@ -34,6 +34,8 @@ const InvoiceWorkspaceRowCard = ({
   invoiceStatusColor,
   isDraftRow,
   paymentLifecycle,
+  providerPaymentSummary,
+  providerPaymentCountdownLabel,
   approvalInfo,
   approvalLabelPrefix,
   approvalStatusText,
@@ -42,6 +44,10 @@ const InvoiceWorkspaceRowCard = ({
   productionLabel,
   productionColor,
   productionStageCount,
+  proofingSummarySectionLabel,
+  proofingSummaryLabel,
+  proofingSummaryColor,
+  proofingSummaryNote,
   paymentMethodLabel,
   paymentTargetLabel,
   paymentBadgeVariant,
@@ -58,9 +64,11 @@ const InvoiceWorkspaceRowCard = ({
   canApproveManualApprovalRow,
   canResolveManualApprovalRow,
   canPayReceivable,
+  canOpenProviderPayment,
   onContinueDraft,
   onDeleteDraft,
   onViewDetail,
+  onOpenProviderPayment,
   onCreateManualApproval,
   onApproveManualApproval,
   onRejectManualApproval,
@@ -98,6 +106,25 @@ const InvoiceWorkspaceRowCard = ({
           </Text>
         </View>
       ) : null}
+      {!isDraftRow && providerPaymentSummary ? (
+        <>
+          <View style={styles.invoiceStatusRow}>
+            <Text style={styles.draftMeta}>Monitor Online: </Text>
+            <Text style={[styles.draftMeta, styles.invoiceStatusText, { color: providerPaymentSummary.statusColor || '#1849a9' }]}>
+              {providerPaymentSummary.methodLabel} | {providerPaymentSummary.statusLabel}
+            </Text>
+          </View>
+          {providerPaymentCountdownLabel ? (
+            <Text style={styles.draftMeta}>Sisa waktu bayar: {providerPaymentCountdownLabel}</Text>
+          ) : null}
+          {providerPaymentSummary.providerMessage ? (
+            <Text style={styles.draftMeta}>
+              Provider: {providerPaymentSummary.providerStatusCode ? `${providerPaymentSummary.providerStatusCode} - ` : ''}
+              {providerPaymentSummary.providerMessage}
+            </Text>
+          ) : null}
+        </>
+      ) : null}
       {approvalInfo ? (
         <View style={styles.invoiceStatusRow}>
           <Text style={styles.draftMeta}>{approvalLabelPrefix}</Text>
@@ -119,6 +146,17 @@ const InvoiceWorkspaceRowCard = ({
           {productionStageCount > 0 ? ` (${productionStageCount} item)` : ''}
         </Text>
       </View>
+      {String(proofingSummaryLabel || '').trim() ? (
+        <View style={styles.productionCurrentRow}>
+          <Text style={styles.draftMeta}>{String(proofingSummarySectionLabel || 'Proofing')}: </Text>
+          <Text style={[styles.draftMeta, styles.productionCurrentText, { color: proofingSummaryColor || '#6b7280' }]}>
+            {proofingSummaryLabel}
+          </Text>
+        </View>
+      ) : null}
+      {String(proofingSummaryNote || '').trim() ? (
+        <Text style={styles.draftMeta}>{proofingSummaryNote}</Text>
+      ) : null}
       <View style={styles.invoicePaymentBadgeRow}>
         <View style={resolvePaymentBadgeStyle(styles, paymentBadgeVariant)}>
           <Text style={resolvePaymentBadgeTextStyle(styles, paymentBadgeVariant)}>
@@ -219,6 +257,11 @@ const InvoiceWorkspaceRowCard = ({
           <Pressable style={styles.continueDraftButton} onPress={onViewDetail}>
             <Text style={styles.continueDraftButtonText}>Detail</Text>
           </Pressable>
+          {canOpenProviderPayment ? (
+            <Pressable style={styles.approvalResolveButton} onPress={onOpenProviderPayment}>
+              <Text style={styles.approvalResolveButtonText}>Lihat Pembayaran</Text>
+            </Pressable>
+          ) : null}
           {canCreateManualApproval ? (
             <Pressable style={styles.approvalCreateButton} onPress={onCreateManualApproval}>
               <Text style={styles.approvalCreateButtonText}>Buat Approval</Text>

@@ -144,6 +144,8 @@ const findOptionLabel = (rows, selectedValue, fallback = '-') => {
 const BookRulePanel = ({
   styles,
   bookProductLabel,
+  bookConfigStatus,
+  bookConfigMessage,
   bookType,
   bookTypeOptions,
   bookWizardSteps,
@@ -196,17 +198,22 @@ const BookRulePanel = ({
     [wizardStep, wizardSteps],
   );
   const currentStepCode = String(currentStepMeta?.code || '').trim();
+  const normalizedConfigStatus = String(bookConfigStatus || '').trim().toLowerCase();
+  const configNotReady = normalizedConfigStatus === 'not_configured';
+  const configStatusMessage = configNotReady
+    ? String(bookConfigMessage || 'Produk Book ini belum punya mapping backend yang lengkap.').trim()
+    : '';
   const hasBookType = String(bookType || '').trim() !== '';
   const hasFinishedSize = String(bookFinishedSize || '').trim() !== '';
   const hasPrintModel = String(bookPrintModel || '').trim() !== '';
   const hasPrintSide = String(bookPrintSide || '').trim() !== '';
   const hasPages = Math.max(Math.floor(Number(pages) || 0), 0) > 0;
-  const hasInsideMaterial = Array.isArray(bookMaterialInsideOptions) && bookMaterialInsideOptions.length > 0
-    ? String(bookMaterialInsideProductId || '').trim() !== ''
-    : true;
-  const hasCoverMaterial = Array.isArray(bookMaterialCoverOptions) && bookMaterialCoverOptions.length > 0
-    ? String(bookMaterialCoverProductId || '').trim() !== ''
-    : true;
+  const hasInsideMaterial = Array.isArray(bookMaterialInsideOptions)
+    && bookMaterialInsideOptions.length > 0
+    && String(bookMaterialInsideProductId || '').trim() !== '';
+  const hasCoverMaterial = Array.isArray(bookMaterialCoverOptions)
+    && bookMaterialCoverOptions.length > 0
+    && String(bookMaterialCoverProductId || '').trim() !== '';
   const hasInsidePrint = Array.isArray(bookInsidePrintOptions) && bookInsidePrintOptions.length > 0
     ? String(bookInsidePrint || '').trim() !== ''
     : true;
@@ -217,6 +224,10 @@ const BookRulePanel = ({
     ? String(bookBindingType || '').trim() !== ''
     : true;
   const canGoNext = useMemo(() => {
+    if (configNotReady) {
+      return false;
+    }
+
     switch (currentStepCode) {
       case 'book_type':
         return hasBookType;
@@ -241,6 +252,7 @@ const BookRulePanel = ({
     }
   }, [
     currentStepCode,
+    configNotReady,
     hasBindingType,
     hasBookType,
     hasCoverMaterial,
@@ -322,6 +334,13 @@ const BookRulePanel = ({
         <Text style={styles.bookReadOnlyValue}>{String(bookProductLabel || '-')}</Text>
       </View>
 
+      {configStatusMessage ? (
+        <View style={styles.bookRuleResultCard}>
+          <Text style={styles.bookOptionLabel}>Status Mapping Backend</Text>
+          <Text style={styles.bookRuleMessage}>{configStatusMessage}</Text>
+        </View>
+      ) : null}
+
       <View style={styles.bookRuleResultCard}>
         <Text style={styles.bookOptionLabel}>Ringkasan Konfigurasi</Text>
         <Text style={styles.bookRuleResultLine}>Jenis Buku: {typeLabel}</Text>
@@ -376,6 +395,13 @@ const BookRulePanel = ({
             <Text style={styles.modalSubTitle}>
               Langkah {wizardStep} dari {totalWizardSteps}. Kasir wajib mengikuti urutan aturan Buku dari awal sampai akhir.
             </Text>
+
+            {configStatusMessage ? (
+              <View style={styles.bookRuleResultCard}>
+                <Text style={styles.bookOptionLabel}>Status Mapping Backend</Text>
+                <Text style={styles.bookRuleMessage}>{configStatusMessage}</Text>
+              </View>
+            ) : null}
 
             <View style={styles.bookWizardStepRow}>
               {wizardSteps.map((item, index) => {

@@ -204,7 +204,7 @@ const ExpensePanel = ({ isActive, onNotify }) => {
 
   const selectedSourceAccount = useMemo(() => (
     sourceAccounts.find((row) => {
-      const rowId = Number(row?.accountingAccountId || row?.id || 0) || 0;
+      const rowId = Number(row?.id || 0) || 0;
       return rowId > 0 && rowId === Number(selectedSourceAccountId || 0);
     }) || null
   ), [selectedSourceAccountId, sourceAccounts]);
@@ -314,10 +314,10 @@ const ExpensePanel = ({ isActive, onNotify }) => {
       setSourceAccounts(nextAccounts);
       setSelectedSourceAccountId((currentId) => {
         const resolvedCurrentId = Number(currentId || 0) || 0;
-        if (resolvedCurrentId > 0 && nextAccounts.some((row) => Number(row?.accountingAccountId || row?.id || 0) === resolvedCurrentId)) {
+        if (resolvedCurrentId > 0 && nextAccounts.some((row) => Number(row?.id || 0) === resolvedCurrentId)) {
           return resolvedCurrentId;
         }
-        return Number(nextAccounts[0]?.accountingAccountId || nextAccounts[0]?.id || 0) || null;
+        return Number(nextAccounts[0]?.id || 0) || null;
       });
     } else {
       setSourceAccounts([]);
@@ -425,6 +425,8 @@ const ExpensePanel = ({ isActive, onNotify }) => {
         purchase_category_id: Number(selectedCategory.id || 0) || null,
         purchase_category_code: toSafeText(selectedCategory.code) || null,
         purchase_category_item_id: Number(selectedCategoryItem?.id || 0) || null,
+        payment_method_id: Number(selectedSourceAccount?.payment_method_id || 0) || null,
+        payment_account_id: Number(selectedSourceAccount?.id || 0) || null,
         source_account_id: Number(
           selectedSourceAccount?.accountingAccountId
           || selectedSourceAccount?.id
@@ -643,7 +645,7 @@ const ExpensePanel = ({ isActive, onNotify }) => {
           {isAccountsLoading ? (
             <Text style={styles.helperText}>Sedang memuat akun kas / bank...</Text>
           ) : sourceAccounts.length > 0 ? sourceAccounts.map((row) => {
-            const accountKey = Number(row?.accountingAccountId || row?.id || 0) || 0;
+            const accountKey = Number(row?.id || 0) || 0;
             const active = accountKey > 0 && accountKey === Number(selectedSourceAccountId || 0);
             return (
               <Pressable

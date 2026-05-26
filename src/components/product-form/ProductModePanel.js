@@ -7,6 +7,8 @@ const ProductModePanel = ({
   fixedSizeHint,
   showBookPrintRuleSection,
   bookProductLabel,
+  bookConfigStatus,
+  bookConfigMessage,
   bookType,
   bookTypeOptions,
   bookWizardSteps,
@@ -57,6 +59,8 @@ const ProductModePanel = ({
       <BookRulePanel
         styles={styles}
         bookProductLabel={bookProductLabel}
+        bookConfigStatus={bookConfigStatus}
+        bookConfigMessage={bookConfigMessage}
         bookType={bookType}
         bookTypeOptions={bookTypeOptions}
         bookWizardSteps={bookWizardSteps}

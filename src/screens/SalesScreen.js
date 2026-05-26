@@ -1,7 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Alert, AppState, Image, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, Vibration, View, useWindowDimensions } from 'react-native';
+import { Alert, AppState, Image, Linking, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, Vibration, View, useWindowDimensions } from 'react-native';
 import { Asset } from 'expo-asset';
+import QRCode from 'react-native-qrcode-svg';
 import CartList from '../components/CartList';
+import ClosingArchivePanel from '../components/ClosingArchivePanel';
+import ClosingStorePanel from '../components/ClosingStorePanel';
 import ExpensePanel from '../components/ExpensePanel';
 import InvoiceWorkspaceContent from '../components/InvoiceWorkspaceContent';
 import InvoiceWorkspaceHeader from '../components/InvoiceWorkspaceHeader';
@@ -10,6 +13,7 @@ import PaymentSummary from '../components/PaymentSummary';
 import PurchaseMaterialPanel from '../components/PurchaseMaterialPanel';
 import ProductForm from '../components/ProductForm';
 import ProductionPanel from '../components/ProductionPanel';
+import ProofingPanel from '../components/ProofingPanel';
 import SuccessAnimation from '../components/SuccessAnimation';
 import SyncLoadingAnimation from '../components/SyncLoadingAnimation';
 import TransactionHeader from '../components/TransactionHeader';
@@ -23,6 +27,8 @@ import {
 import {
   createPosCustomer,
   createPosCashFlow,
+  createDanaGatewayPayment,
+  createDanaQrisPayment,
   createPosInvoicePayment,
   createPosManualApproval,
   createPosOrder,
@@ -47,6 +53,9 @@ import {
   fetchPosProductionItems,
   fetchPosProductionMaterials,
   fetchPosProductDetail,
+  fetchPosProofingDetail,
+  fetchPosProofingHistory,
+  fetchPosProofings,
   fetchPosProducts,
   fetchPosReceivableApprovals,
   getPengeluaranCategoryOptions,
@@ -54,7 +63,10 @@ import {
   fetchPosSettings,
   fetchPosSyncChanges,
   fetchPosSyncStatus,
+  fetchDanaQrisPaymentStatus,
   pickupPosOrder,
+  releasePosProofingToProduction,
+  sendPosProofingWhatsapp,
   fetchAuthMe,
   getCustomerDepositBalance,
   getCustomerReceivableSummary,
@@ -62,9 +74,12 @@ import {
   previewPosPricing,
   submitPosCloserOrder,
   topUpCustomerDeposit,
+  uploadPosProofingFinalFile,
+  uploadPosProofingPreview,
   updatePosProductionItemStatus,
   updatePosOrderStatus,
 } from '../services/erpApi';
+import { subscribeToInvoicePaymentUpdates } from '../services/posRealtime';
 import { appEnv } from '../config/appEnv';
 import { enqueueOrderPayload, loadOrderQueue, setOrderQueue } from '../utils/orderQueue';
 import { appendOrderAuditLog, loadOrderAuditLogs } from '../utils/orderAuditLog';
@@ -94,6 +109,7 @@ const {
   isReceivableInvoiceRow,
   isSuccessfulInvoiceRow,
 } = require('../utils/invoiceVisibility');
+const { resolveProofingReleaseState } = require('../utils/proofingReleaseGate');
 const {
   CUSTOMER_PHONE_CONFLICT_MESSAGE,
   isCustomerPhoneConflictError,
@@ -1751,6 +1767,23 @@ const buildCartItemFromDraftSource = (sourceItem, itemKey, materialMapById, fini
         ?? mergedSource?.requires_design
         ?? true,
       ),
+      proofing_required: Boolean(
+        originalFlow?.proofing_required
+        ?? draftForm?.proofing_required
+        ?? mergedSource?.proofing_required
+        ?? false,
+      ),
+      proofing_flow: normalizeProofingFlow(
+        originalFlow?.proofing_flow
+        ?? draftForm?.proofing_flow
+        ?? mergedSource?.proofing_flow,
+        Boolean(
+          originalFlow?.proofing_required
+          ?? draftForm?.proofing_required
+          ?? mergedSource?.proofing_required
+          ?? false,
+        ),
+      ),
       material_usage_qty: materialUsageMeta.usageQty > 0 ? materialUsageMeta.usageQty : null,
       material_usage_plan: materialUsageMeta.plan || null,
       material_product_id: materialId > 0 ? materialId : null,
@@ -1838,14 +1871,315 @@ const resolveItemGrandTotal = (item, pricingSummaryInput = null) => {
   const expressFee = Number(item?.express_fee || 0) || 0;
   return roundMoney(subtotal + finishingTotal + expressFee);
 };
+const PROOFING_FLOW_NONE = 'none';
+const PROOFING_FLOW_PROOFING_FIRST = 'proofing_first';
+const PROOFING_FLOW_PAY_FIRST = 'pay_first';
+const normalizeProofingFlow = (value, proofingRequired = false) => {
+  const normalized = String(value || '').trim().toLowerCase();
+  if ([PROOFING_FLOW_PROOFING_FIRST, PROOFING_FLOW_PAY_FIRST].includes(normalized)) {
+    return normalized;
+  }
+  return proofingRequired ? PROOFING_FLOW_PROOFING_FIRST : PROOFING_FLOW_NONE;
+};
+const proofingFlowToLabel = (value) => {
+  const key = normalizeProofingFlow(value);
+  if (key === PROOFING_FLOW_PROOFING_FIRST) return 'Proofing dulu';
+  if (key === PROOFING_FLOW_PAY_FIRST) return 'Bayar dulu';
+  return 'Tanpa proofing design';
+};
+const normalizeProofingStatusKey = (value) => {
+  const key = String(value || '').trim().toLowerCase();
+  if (!key) return '';
+  if (['sent', 'terkirim'].includes(key)) return 'sent';
+  if (['approved', 'disetujui'].includes(key)) return 'approved';
+  if (['revision', 'revisi'].includes(key)) return 'revision';
+  if (['cancelled', 'dibatalkan'].includes(key)) return 'cancelled';
+  if (['draft'].includes(key)) return 'draft';
+  return key;
+};
+const proofingStatusToLabel = (value) => {
+  const key = normalizeProofingStatusKey(value);
+  if (key === 'draft') return 'Draft';
+  if (key === 'sent') return 'Sudah Dikirim';
+  if (key === 'approved') return 'Approved';
+  if (key === 'revision') return 'Revisi';
+  if (key === 'cancelled') return 'Dibatalkan';
+  return key ? key.replace(/_/g, ' ') : '-';
+};
+const getProofingStatusTextColor = (value) => {
+  const key = normalizeProofingStatusKey(value);
+  if (key === 'approved') return '#166534';
+  if (key === 'sent') return '#1d4ed8';
+  if (key === 'revision') return '#b45309';
+  if (key === 'cancelled') return '#b91c1c';
+  return '#6b7280';
+};
+const formatProofingEventDateTime = (value) => {
+  const text = String(value || '').trim();
+  if (!text) return '-';
+  const parsed = new Date(text);
+  if (Number.isNaN(parsed.getTime())) {
+    return text;
+  }
+  return parsed.toLocaleString('id-ID');
+};
+const resolveProofingHistoryActorName = (row = {}) => {
+  const actorName = String(row?.actor?.name || '').trim();
+  if (actorName) return actorName;
+  const designerName = String(row?.designer?.name || '').trim();
+  if (designerName) return designerName;
+  const customerName = String(row?.customer?.name || '').trim();
+  if (customerName) return customerName;
+  return '-';
+};
+const buildProofingHistoryNoticeMessage = (proofingRow, historyRows = []) => {
+  const rows = Array.isArray(historyRows) ? historyRows : [];
+  const header = [
+    `Proofing: ${String(proofingRow?.proofing_code || `#${Number(proofingRow?.id || 0)}`).trim()}`,
+    `Order: #${Number(proofingRow?.order?.id || 0)} | Item: ${String(proofingRow?.item?.name || '-').trim() || '-'}`,
+  ];
+  if (rows.length === 0) {
+    return [...header, '', 'Belum ada history proofing.'].join('\n');
+  }
+
+  const eventLines = rows.slice(0, 8).map((eventRow, index) => {
+    const label = String(eventRow?.event_label || eventRow?.event_type || `Event ${index + 1}`).trim() || `Event ${index + 1}`;
+    const actorName = resolveProofingHistoryActorName(eventRow);
+    const createdAt = formatProofingEventDateTime(eventRow?.created_at);
+    const eventNote = String(eventRow?.event_note || '').trim();
+    return [
+      `${index + 1}. ${label}`,
+      `   Oleh: ${actorName} | Waktu: ${createdAt}`,
+      eventNote ? `   Catatan: ${eventNote}` : '',
+    ].filter(Boolean).join('\n');
+  });
+
+  return [...header, '', ...eventLines].join('\n');
+};
+const buildOrderProofingSummary = (proofingSummary) => {
+  const summary = proofingSummary && typeof proofingSummary === 'object' ? proofingSummary : null;
+  if (!summary || summary.enabled !== true) {
+    return { label: '', color: '#6b7280', note: '' };
+  }
+
+  const total = Math.max(Number(summary?.item_count || 0) || 0, 0);
+  const draft = Math.max(Number(summary?.draft || 0) || 0, 0);
+  const sent = Math.max(Number(summary?.sent || 0) || 0, 0);
+  const approved = Math.max(Number(summary?.approved || 0) || 0, 0);
+  const revision = Math.max(Number(summary?.revision || 0) || 0, 0);
+  const cancelled = Math.max(Number(summary?.cancelled || 0) || 0, 0);
+
+  let label = total > 0 ? `Proofing aktif (${total} item)` : 'Proofing aktif';
+  let color = '#475569';
+
+  if (revision > 0) {
+    label = `Perlu revisi (${revision}/${Math.max(total, revision)})`;
+    color = '#b45309';
+  } else if (sent > 0) {
+    label = `Menunggu approval (${sent}/${Math.max(total, sent)})`;
+    color = '#1d4ed8';
+  } else if (draft > 0) {
+    label = `Draft (${draft}/${Math.max(total, draft)})`;
+    color = '#6b7280';
+  } else if (total > 0 && approved >= total) {
+    label = `Approved (${approved}/${total})`;
+    color = '#166534';
+  } else if (approved > 0) {
+    label = `Approved sebagian (${approved}/${Math.max(total, approved)})`;
+    color = '#0f766e';
+  } else if (total > 0 && cancelled >= total) {
+    label = `Dibatalkan (${cancelled}/${total})`;
+    color = '#b91c1c';
+  }
+
+  const noteParts = [];
+  if (draft > 0) noteParts.push(`Draft ${draft}`);
+  if (sent > 0) noteParts.push(`Terkirim ${sent}`);
+  if (approved > 0) noteParts.push(`Approved ${approved}`);
+  if (revision > 0) noteParts.push(`Revisi ${revision}`);
+  if (cancelled > 0) noteParts.push(`Batal ${cancelled}`);
+  if (String(summary?.latest_approved_at || '').trim()) {
+    noteParts.push(`Approve terakhir ${formatProofingEventDateTime(summary.latest_approved_at)}`);
+  }
+
+  return {
+    label,
+    color,
+    note: noteParts.join(' | '),
+  };
+};
+const buildProofingLatestLogSummary = (logRow) => {
+  if (!logRow || typeof logRow !== 'object') {
+    return '';
+  }
+
+  const label = String(logRow?.event_label || logRow?.event_type || '').trim();
+  if (!label) {
+    return '';
+  }
+
+  const actorName = resolveProofingHistoryActorName(logRow);
+  const createdAt = formatProofingEventDateTime(logRow?.created_at);
+  return [
+    label,
+    actorName && actorName !== '-' ? `oleh ${actorName}` : '',
+    createdAt !== '-' ? createdAt : '',
+  ].filter(Boolean).join(' | ');
+};
+const truncateReceiptProofingLabel = (value, maxLength = 22) => {
+  const text = String(value || '').trim();
+  if (!text) return '';
+  if (text.length <= maxLength) return text;
+  return `${text.slice(0, Math.max(0, maxLength - 1)).trimEnd()}…`;
+};
+const formatProofingReceiptTimestamp = (value) => {
+  const text = String(value || '').trim();
+  if (!text) return '';
+  const parsed = new Date(text);
+  if (Number.isNaN(parsed.getTime())) {
+    return text;
+  }
+  const day = String(parsed.getDate()).padStart(2, '0');
+  const month = String(parsed.getMonth() + 1).padStart(2, '0');
+  const year = String(parsed.getFullYear()).slice(-2);
+  const hour = String(parsed.getHours()).padStart(2, '0');
+  const minute = String(parsed.getMinutes()).padStart(2, '0');
+  return `${day}/${month}/${year} ${hour}:${minute}`;
+};
+const buildReceiptProofingNotes = (items = []) => {
+  const rows = Array.isArray(items) ? items : [];
+  const visibleRows = rows
+    .map((item, index) => {
+      const proofing = item?.proofing && typeof item.proofing === 'object' ? item.proofing : null;
+      if (!proofing) {
+        return '';
+      }
+
+      const productLabel = String(
+        resolveReceiptProductName(item, item?.product_name || item?.product?.name || `Item #${index + 1}`) || `Item #${index + 1}`,
+      ).trim() || `Item #${index + 1}`;
+      const proofingCode = String(proofing?.proofing_code || '').trim();
+      const statusLabel = proofingStatusToLabel(proofing?.status);
+      const designerName = String(proofing?.designer?.name || '').trim();
+      const approvedAt = String(proofing?.approved_at || '').trim();
+      const revisedAt = String(proofing?.revised_at || '').trim();
+      const whatsappSentAt = String(proofing?.whatsapp_sent_at || '').trim();
+      const proofingFlow = normalizeProofingFlow(item?.proofing_flow, Boolean(item?.proofing_required) || Boolean(proofing));
+      const timeLabel = approvedAt
+        ? formatProofingReceiptTimestamp(approvedAt)
+        : (revisedAt
+          ? formatProofingReceiptTimestamp(revisedAt)
+          : (whatsappSentAt
+            ? formatProofingReceiptTimestamp(whatsappSentAt)
+            : ''));
+      const revisionNote = String(proofing?.revision_note_from_customer || '').trim();
+
+      return [
+        proofingCode || 'Proofing',
+        statusLabel,
+        truncateReceiptProofingLabel(productLabel, 24),
+        timeLabel,
+        proofingFlow === PROOFING_FLOW_PAY_FIRST ? 'Flow bayar dulu' : '',
+        designerName ? `Des. ${truncateReceiptProofingLabel(designerName, 16)}` : '',
+        statusLabel === 'Revisi' && revisionNote ? `Rev: ${truncateReceiptProofingLabel(revisionNote, 28)}` : '',
+      ].filter(Boolean).join(' | ');
+    })
+    .filter(Boolean);
+
+  const maxVisibleRows = 6;
+  if (visibleRows.length <= maxVisibleRows) {
+    return visibleRows;
+  }
+
+  return [
+    ...visibleRows.slice(0, maxVisibleRows),
+    `+${visibleRows.length - maxVisibleRows} item proofing lain`,
+  ];
+};
+const buildPreviewReceiptProofingNotes = (snapshot = {}) => {
+  const flowLabel = String(snapshot?.proofingFlowLabel || '').trim();
+  if (!flowLabel || flowLabel === 'Tidak perlu proofing') {
+    return [];
+  }
+
+  const proofingItems = Array.isArray(snapshot?.items)
+    ? snapshot.items.filter((item) => Boolean(item?.proofingRequired))
+    : [];
+  const itemLabels = proofingItems
+    .map((item, index) => truncateReceiptProofingLabel(
+      resolveReceiptProductName(item, item?.product || `Item #${index + 1}`),
+      24,
+    ))
+    .filter(Boolean);
+
+  const notes = [
+    `Flow ${flowLabel}`,
+    'Status awal: Menunggu proofing designer',
+  ];
+
+  if (itemLabels.length > 0) {
+    notes.push(`Item: ${itemLabels.slice(0, 4).join(', ')}`);
+    if (itemLabels.length > 4) {
+      notes.push(`+${itemLabels.length - 4} item proofing lain`);
+    }
+  }
+
+  return notes;
+};
+const isProofingEligibleBackendItem = (backendItem = {}) => {
+  return Boolean(
+    backendItem?.requires_design
+    || backendItem?.requires_production
+    || String(backendItem?.production_status || '').trim().toLowerCase() !== 'not_required',
+  );
+};
+const deriveProofingFlowFromCartItems = (items = []) => {
+  const rows = Array.isArray(items) ? items : [];
+  const matched = rows.find((item) => {
+    const backendItem = item?.backendItem || item || {};
+    return normalizeProofingFlow(
+      backendItem?.proofing_flow,
+      Boolean(backendItem?.proofing_required),
+    ) !== PROOFING_FLOW_NONE;
+  });
+  if (!matched) {
+    return PROOFING_FLOW_NONE;
+  }
+  const backendItem = matched?.backendItem || matched || {};
+  return normalizeProofingFlow(
+    backendItem?.proofing_flow,
+    Boolean(backendItem?.proofing_required),
+  );
+};
+const pickBrowserFile = ({ accept = '' } = {}) => new Promise((resolve, reject) => {
+  if (Platform.OS !== 'web' || typeof document === 'undefined') {
+    reject(new Error('Upload file proofing saat ini hanya tersedia di POS web/desktop.'));
+    return;
+  }
+
+  const input = document.createElement('input');
+  input.type = 'file';
+  if (accept) {
+    input.accept = accept;
+  }
+  input.onchange = () => {
+    const selectedFile = input.files && input.files.length > 0 ? input.files[0] : null;
+    resolve(selectedFile || null);
+  };
+  input.onerror = () => reject(new Error('Gagal membuka pemilih file.'));
+  input.click();
+});
 const enforceDesignFirstFlow = (backendItem = {}) => {
   const requiresProduction = String(backendItem?.production_status || '').toLowerCase() !== 'not_required'
     ? Boolean(backendItem?.requires_production ?? true)
     : false;
+  const proofingRequired = requiresProduction ? Boolean(backendItem?.proofing_required ?? false) : false;
   return {
     ...backendItem,
     requires_production: requiresProduction,
     requires_design: requiresProduction ? true : Boolean(backendItem?.requires_design ?? false),
+    proofing_required: proofingRequired,
+    proofing_flow: normalizeProofingFlow(backendItem?.proofing_flow, proofingRequired),
   };
 };
 const PREPARE_LOADING_TEXT = 'tunggu dulu ya kaka BosLeonardo lagi kirim data';
@@ -2313,6 +2647,26 @@ const resolveInvoicePaymentLifecycle = (row) => {
     return { key: 'draft', label: '-', color: '#6b7280' };
   }
 
+  const providerPaymentStatus = normalizeDanaQrisStatus(
+    row?.provider_payment?.status
+    || row?.providerPayment?.status
+    || '',
+  );
+  if (providerPaymentStatus === 'pending') {
+    const providerPaymentLabel = String(
+      row?.provider_payment?.methodLabel
+      || row?.provider_payment?.payment_method_label
+      || row?.providerPayment?.methodLabel
+      || row?.providerPayment?.payment_method_label
+      || 'Pembayaran Online',
+    ).trim();
+    return {
+      key: 'provider_pending',
+      label: `Menunggu ${providerPaymentLabel}`,
+      color: '#1849a9',
+    };
+  }
+
   const total = roundMoney(Number(
     row?.invoice?.total
     || row?.total
@@ -2350,6 +2704,27 @@ const resolveInvoiceProductionLifecycle = (row) => {
   return { key: 'not_required', label: 'Tidak Perlu Produksi', color: '#475467' };
 };
 const getProductionCountsForInvoice = (row) => {
+  const resolveProofingFallbackCounts = () => {
+    const proofingSummary = row?.proofing && typeof row.proofing === 'object' ? row.proofing : null;
+    if (proofingSummary?.enabled === true) {
+      const total = Math.max(Number(proofingSummary?.item_count || 0) || 0, 0);
+      const draft = Math.max(Number(proofingSummary?.draft || 0) || 0, 0);
+      const sent = Math.max(Number(proofingSummary?.sent || 0) || 0, 0);
+      const approved = Math.max(Number(proofingSummary?.approved || 0) || 0, 0);
+      const revision = Math.max(Number(proofingSummary?.revision || 0) || 0, 0);
+      const fallbackCount = Math.max(total, approved);
+      if (fallbackCount > 0 && draft <= 0 && sent <= 0 && revision <= 0 && approved > 0) {
+        return {
+          waiting_design: 0,
+          waiting_production: fallbackCount,
+          in_batch: 0,
+          printed: 0,
+        };
+      }
+    }
+    return null;
+  };
+
   const summarizedProduction = row?.production && typeof row.production === 'object' ? row.production : null;
   if (summarizedProduction) {
     const counts = {
@@ -2366,7 +2741,7 @@ const getProductionCountsForInvoice = (row) => {
 
   const items = Array.isArray(row?.items) ? row.items : [];
   if (items.length === 0) {
-    return null;
+    return resolveProofingFallbackCounts();
   }
   const counts = {
     waiting_design: 0,
@@ -2382,7 +2757,7 @@ const getProductionCountsForInvoice = (row) => {
   });
   const totalTracked = Object.values(counts).reduce((sum, val) => sum + Number(val || 0), 0);
   if (totalTracked <= 0) {
-    return null;
+    return resolveProofingFallbackCounts();
   }
   return counts;
 };
@@ -2434,6 +2809,118 @@ const getCurrentProductionStageForInvoice = (row) => {
     };
   }
   return { key: '', label: '-', count: 0 };
+};
+const buildCustomerTrackingSummary = (row) => {
+  const proofingSummary = row?.proofing && typeof row.proofing === 'object' ? row.proofing : null;
+  const baseProofingSummary = buildOrderProofingSummary(proofingSummary);
+  const counts = getProductionCountsForInvoice(row);
+  const stage = getCurrentProductionStageForInvoice(row);
+
+  if (!proofingSummary || proofingSummary.enabled !== true) {
+    return {
+      sectionLabel: 'Proofing',
+      label: baseProofingSummary.label,
+      color: baseProofingSummary.color,
+      note: baseProofingSummary.note,
+      mode: 'proofing',
+    };
+  }
+
+  const total = Math.max(Number(proofingSummary?.item_count || 0) || 0, 0);
+  const draft = Math.max(Number(proofingSummary?.draft || 0) || 0, 0);
+  const sent = Math.max(Number(proofingSummary?.sent || 0) || 0, 0);
+  const approved = Math.max(Number(proofingSummary?.approved || 0) || 0, 0);
+  const revision = Math.max(Number(proofingSummary?.revision || 0) || 0, 0);
+  const allApproved = total > 0 && approved >= total && draft <= 0 && sent <= 0 && revision <= 0;
+  const productionStarted = Boolean(
+    counts
+    && (Number(counts.waiting_design || 0) > 0
+      || Number(counts.waiting_production || 0) > 0
+      || Number(counts.in_batch || 0) > 0
+      || Number(counts.printed || 0) > 0)
+  );
+
+  if (!allApproved && !productionStarted) {
+    return {
+      sectionLabel: 'Proofing',
+      label: baseProofingSummary.label,
+      color: baseProofingSummary.color,
+      note: baseProofingSummary.note,
+      mode: 'proofing',
+    };
+  }
+
+  const stageKey = stage.key || (allApproved ? 'waiting_production' : '');
+  const stageColor = stageKey ? getProductionStatusTextColor(stageKey) : '#1849a9';
+  const stageCount = Number(stage.count || 0) || 0;
+  const stageLabel = stage.label && stage.label !== '-'
+    ? `${stage.label}${stageCount > 0 ? ` (${stageCount} item)` : ''}`
+    : (allApproved ? 'Menunggu Produksi' : 'Tracking Produksi');
+  const noteParts = [];
+  if (String(proofingSummary?.latest_approved_at || '').trim()) {
+    noteParts.push(`Proofing selesai ${formatProofingEventDateTime(proofingSummary.latest_approved_at)}`);
+  }
+  if (counts) {
+    noteParts.push(summarizeProductionStatusForInvoice(row));
+  } else if (allApproved) {
+    noteParts.push('Customer sudah approve proofing. Tim produksi bisa mulai menindaklanjuti order ini.');
+  }
+
+  return {
+    sectionLabel: 'Status Produksi',
+    label: stageLabel,
+    color: stageColor,
+    note: noteParts.filter(Boolean).join(' | '),
+    mode: 'production',
+  };
+};
+const buildInvoiceItemTrackingState = (item, proofingRequired, proofingRow, proofingReleaseState) => {
+  if (!proofingRequired) {
+    return {
+      mode: 'production',
+      sectionLabel: 'Status Produksi',
+      label: formatProductionStatusLabel(item?.production_status),
+      color: getProductionStatusTextColor(item?.production_status),
+      note: '',
+    };
+  }
+
+  const productionStatusKey = resolveProductionStatusKey(item?.production_status);
+  if (productionStatusKey && productionStatusKey !== 'not_required') {
+    return {
+      mode: 'production',
+      sectionLabel: 'Status Produksi',
+      label: formatProductionStatusLabel(productionStatusKey),
+      color: getProductionStatusTextColor(productionStatusKey),
+      note: proofingReleaseState?.releasedToProduction
+        ? 'Proofing customer sudah selesai dan item ini sedang diproses produksi.'
+        : '',
+    };
+  }
+
+  if (proofingReleaseState?.proofingApproved) {
+    const waitingLabel = proofingReleaseState?.paymentReady
+      ? 'Menunggu Produksi'
+      : 'Menunggu Gate Produksi';
+    const waitingNote = proofingReleaseState?.paymentReady
+      ? 'Customer sudah approve proofing. Item menunggu tim produksi mulai bekerja.'
+      : 'Customer sudah approve proofing, tetapi item masih menunggu syarat pembayaran/gate produksi.';
+    return {
+      mode: 'production',
+      sectionLabel: 'Status Produksi',
+      label: waitingLabel,
+      color: getProductionStatusTextColor('waiting_production'),
+      note: waitingNote,
+    };
+  }
+
+  return {
+    mode: 'proofing',
+    sectionLabel: 'Proofing',
+    label: proofingRow ? proofingStatusToLabel(proofingRow?.status) : 'Belum dibuat',
+    color: proofingRow ? getProofingStatusTextColor(proofingRow?.status) : '#92400e',
+    note: '',
+  };
 };
 const resolveProductionStatusKey = (value) => {
   const raw = String(value || '').trim().toLowerCase();
@@ -3776,6 +4263,7 @@ const resolveSelectedMaterialWarning = (usedMaterialInfo, productName = '') => {
 const PAYMENT_METHOD_LABELS = ['Cash', 'Transfer Bank', 'QRIS', 'Card / Debit / Credit'];
 const CUSTOMER_DEPOSIT_PAYMENT_LABEL = 'Saldo Pelanggan';
 const CUSTOMER_DEPOSIT_TOP_UP_TITLE = 'Top Up Saldo Customer';
+const DANA_GATEWAY_PAYMENT_LABEL = 'DANA Payment Gateway';
 const DEFAULT_PAYMENT_METHOD_CONFIGS = [
   {
     id: 0,
@@ -3802,6 +4290,16 @@ const DEFAULT_PAYMENT_METHOD_CONFIGS = [
     code: 'qris',
     type: 'qris',
     name: 'QRIS',
+    isDefault: false,
+    requiresPaymentAccount: true,
+    isAvailable: true,
+    accounts: [],
+  },
+  {
+    id: 0,
+    code: 'dana_gateway',
+    type: 'e_wallet',
+    name: DANA_GATEWAY_PAYMENT_LABEL,
     isDefault: false,
     requiresPaymentAccount: true,
     isAvailable: true,
@@ -3900,6 +4398,7 @@ const normalizePaymentMethodLabel = (value) => {
   if (['cash', 'tunai'].includes(text)) return 'Cash';
   if (['transfer', 'bank transfer', 'transfer bank', 'bank_transfer'].includes(text)) return 'Transfer Bank';
   if (['qris', 'qr'].includes(text)) return 'QRIS';
+  if (['dana_gateway', 'payment gateway dana', 'dana payment gateway', 'gateway_dana'].includes(text)) return DANA_GATEWAY_PAYMENT_LABEL;
   if (['card', 'kartu', 'debit', 'credit card', 'edc'].includes(text)) return 'Card / Debit / Credit';
   if (['saldo pelanggan', 'deposit customer', 'customer deposit', 'customer_deposit', 'deposit'].includes(text)) return CUSTOMER_DEPOSIT_PAYMENT_LABEL;
   return value;
@@ -3913,9 +4412,20 @@ const normalizePaymentMethodType = (value) => {
   if (['cash', 'tunai'].includes(text)) return 'cash';
   if (['transfer', 'bank transfer', 'transfer bank', 'bank_transfer'].includes(text)) return 'bank_transfer';
   if (['qris', 'qr'].includes(text)) return 'qris';
+  if (['dana_gateway', 'payment gateway dana', 'dana payment gateway', 'gateway_dana'].includes(text)) return 'dana_gateway';
   if (['card', 'kartu', 'debit', 'credit card', 'edc'].includes(text)) return 'card';
   if (['saldo pelanggan', 'deposit customer', 'customer deposit', 'customer_deposit', 'deposit', 'customer_balance'].includes(text)) return 'customer_balance';
   return text || 'custom';
+};
+const isDanaGatewayPaymentMethodConfig = (config, fallbackValue = '') => {
+  const candidates = [
+    config?.code,
+    config?.name,
+    config?.type,
+    fallbackValue,
+  ];
+
+  return candidates.some((candidate) => normalizePaymentMethodType(candidate) === 'dana_gateway');
 };
 const normalizePosPaymentMethodRow = (row) => {
   const normalizedName = normalizePaymentMethodLabel(
@@ -4102,7 +4612,9 @@ const formatClosingBreakdownLabel = (row, accountRows = []) => {
   return targetLabel ? `${methodLabel} -> ${targetLabel}` : methodLabel;
 };
 const resolveOrderPaymentMethodLabel = (row) => humanizePaymentMethod(
-  row?.payment?.method
+  row?.provider_payment?.payment_method_label
+  || row?.provider_payment?.methodLabel
+  || row?.payment?.method
   || row?.payment_method
   || row?.invoice?.payment_method
   || row?.payment?.payment_method
@@ -4126,6 +4638,12 @@ const resolveOrderPaymentTargetLabel = (row, accountRows = []) => {
   )) || null;
   const fallbackPaymentTargetName = [(
     directTarget?.label
+    || ''
+  ), (
+    row?.provider_payment?.route_label
+    || row?.provider_payment?.routeLabel
+    || row?.provider_payment?.payment_account_name
+    || row?.provider_payment?.paymentAccountName
     || ''
   ), (
     [directTarget?.code, directTarget?.name]
@@ -4542,6 +5060,14 @@ const normalizeBankAccountRow = (row) => {
     paymentMethodName: toLabel(row?.payment_method_name),
   };
 };
+const resolveAccountingSelectionId = (row) => Number(
+  row?.accountingAccountId
+  || row?.accounting_account_id
+  || row?.bank_account_id
+  || row?.account_id
+  || row?.id
+  || 0
+);
 const isDraftCandidate = (row) => {
   const status = String(row?.status || '').trim().toLowerCase();
   if (status === 'draft') {
@@ -4766,6 +5292,339 @@ const INVOICE_AREA_FILTER_MENU_MAP = Object.freeze({
   receivable: 'receivable',
 });
 
+const DANA_QRIS_TERMINAL_STATUSES = new Set(['paid', 'failed', 'expired', 'cancelled', 'refund_required']);
+
+const createDanaQrisModalState = () => ({
+  visible: false,
+  isGenerating: false,
+  isFinalizing: false,
+  realtimeAvailable: false,
+  realtimeMessage: '',
+  paymentTransactionId: 0,
+  invoiceId: 0,
+  invoiceNo: '',
+  backendOrderId: 0,
+  amount: 0,
+  currency: 'IDR',
+  status: 'idle',
+  message: '',
+  providerStatusCode: '',
+  providerMessage: '',
+  qrContent: '',
+  qrUrl: '',
+  qrImage: '',
+  expiresAt: '',
+  paidAt: '',
+  orderResult: null,
+  receiptSnapshot: null,
+});
+
+const createDanaGatewayModalState = () => ({
+  visible: false,
+  isGenerating: false,
+  isFinalizing: false,
+  realtimeAvailable: false,
+  realtimeMessage: '',
+  paymentTransactionId: 0,
+  invoiceId: 0,
+  invoiceNo: '',
+  backendOrderId: 0,
+  amount: 0,
+  currency: 'IDR',
+  status: 'idle',
+  message: '',
+  providerStatusCode: '',
+  providerMessage: '',
+  checkoutUrl: '',
+  expiresAt: '',
+  paidAt: '',
+  orderResult: null,
+  receiptSnapshot: null,
+});
+
+const normalizeDanaQrisStatus = (value) => {
+  const status = normalizeText(value).replace(/\s+/g, '_');
+  return status || 'idle';
+};
+
+const isDanaQrisTerminalStatus = (status) => DANA_QRIS_TERMINAL_STATUSES.has(normalizeDanaQrisStatus(status));
+
+const extractDanaPaymentTransaction = (payload) => {
+  const source = payload && typeof payload === 'object' && !Array.isArray(payload)
+    ? (payload.data && typeof payload.data === 'object' && !Array.isArray(payload.data) ? payload.data : payload)
+    : null;
+  if (!source) {
+    return null;
+  }
+
+  const invoice = source.invoice && typeof source.invoice === 'object' && !Array.isArray(source.invoice)
+    ? source.invoice
+    : {};
+  const providerMessage = String(
+    source.provider_status_message
+    || source.message
+    || payload?.message
+    || source.reason
+    || ''
+  ).trim();
+
+  return {
+    id: Number(source.id || source.payment_transaction_id || source.paymentTransactionId || 0) || 0,
+    invoiceId: Number(invoice.id || source.invoice_id || source.invoiceId || 0) || 0,
+    invoiceNo: String(invoice.invoice_no || source.invoice_no || source.invoiceNo || '').trim(),
+    paymentMethodLabel: String(source.payment_method_label || source.paymentMethodLabel || '').trim(),
+    paymentAccountName: String(source.payment_account_name || source.paymentAccountName || '').trim(),
+    routeLabel: String(source.route_label || source.routeLabel || '').trim(),
+    amount: Number(source.amount || source.invoice_total || 0) || 0,
+    currency: String(source.currency || 'IDR').trim() || 'IDR',
+    status: normalizeDanaQrisStatus(source.status),
+    providerStatusCode: String(source.provider_status_code || source.providerStatusCode || '').trim(),
+    providerMessage,
+    checkoutUrl: String(source.checkout_url || source.checkoutUrl || '').trim(),
+    qrContent: String(source.qr_content || source.qrContent || '').trim(),
+    qrUrl: String(source.qr_url || source.qrUrl || '').trim(),
+    qrImage: String(source.qr_image || source.qrImage || '').trim(),
+    expiresAt: String(source.expires_at || source.expiresAt || '').trim(),
+    paidAt: String(source.paid_at || source.paidAt || '').trim(),
+    reason: String(source.reason || '').trim(),
+    invoiceStatus: String(source.invoice_status || invoice.status || '').trim(),
+    invoiceTotal: Number(source.invoice_total || invoice.total || 0) || 0,
+    invoicePaidTotal: Number(source.invoice_paid_total || invoice.paid_total || 0) || 0,
+    invoiceDueTotal: Number(source.invoice_due_total || invoice.due_total || 0) || 0,
+  };
+};
+
+const extractDanaQrisTransaction = (payload) => extractDanaPaymentTransaction(payload);
+const extractDanaGatewayTransaction = (payload) => extractDanaPaymentTransaction(payload);
+
+const buildDanaStatusUpdateMessage = (transaction, source = 'poll', paymentLabel = 'DANA') => {
+  if (!transaction) {
+    return '';
+  }
+
+  const normalizedStatus = normalizeDanaQrisStatus(transaction.status);
+  const statusParts = [
+    String(transaction.providerStatusCode || '').trim(),
+    String(transaction.providerMessage || '').trim(),
+  ].filter(Boolean);
+  const statusText = statusParts.join(' - ');
+
+  if (normalizedStatus === 'paid') {
+    return `Pembayaran ${paymentLabel} berhasil diterima. Nota sedang diproses.`;
+  }
+
+  if (['failed', 'expired', 'cancelled', 'refund_required'].includes(normalizedStatus)) {
+    return [
+      `Status ${paymentLabel}: ${getDanaGatewayStatusLabel(normalizedStatus)}.`,
+      statusText ? `Detail provider: ${statusText}` : null,
+    ].filter(Boolean).join('\n');
+  }
+
+  const intro = source === 'provider' || source === 'manual'
+    ? 'Cek status selesai.'
+    : source === 'poll'
+      ? 'Status pembayaran diperbarui otomatis.'
+      : '';
+
+  return [
+    intro,
+    statusText ? `Status provider: ${statusText}` : `Status ${paymentLabel} masih menunggu update provider.`,
+    transaction.checkoutUrl
+      ? 'Checkout masih aktif. Lanjutkan pembayaran pelanggan lalu cek status lagi.'
+      : (transaction.qrContent || transaction.qrUrl || transaction.qrImage)
+        ? 'QRIS masih aktif. Arahkan pelanggan scan lalu cek status lagi.'
+      : 'Checkout belum tersedia. Coba cek status lagi beberapa saat.',
+  ].filter(Boolean).join('\n');
+};
+
+const resolveDanaQrisImageUri = (state) => {
+  const rawImage = String(state?.qrImage || '').trim();
+  if (rawImage) {
+    if (/^(data:image\/|https?:\/\/)/i.test(rawImage)) {
+      return rawImage;
+    }
+
+    return `data:image/png;base64,${rawImage}`;
+  }
+
+  const rawUrl = String(state?.qrUrl || '').trim();
+  if (/^(data:image\/|https?:\/\/)/i.test(rawUrl)) {
+    return rawUrl;
+  }
+
+  return '';
+};
+
+const formatDanaQrisCountdown = (remainingMs) => {
+  const totalSeconds = Math.max(0, Math.floor(Number(remainingMs || 0) / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+};
+
+const getDanaQrisStatusLabel = (status) => {
+  switch (normalizeDanaQrisStatus(status)) {
+    case 'pending':
+      return 'Menunggu pembayaran';
+    case 'paid':
+      return 'Paid';
+    case 'failed':
+      return 'Gagal';
+    case 'expired':
+      return 'Expired';
+    case 'cancelled':
+      return 'Dibatalkan';
+    case 'refund_required':
+      return 'Butuh review refund';
+    default:
+      return 'Menyiapkan QRIS';
+  }
+};
+
+const getDanaGatewayStatusLabel = (status) => {
+  switch (normalizeDanaQrisStatus(status)) {
+    case 'pending':
+      return 'Menunggu pembayaran';
+    case 'paid':
+      return 'Paid';
+    case 'failed':
+      return 'Gagal';
+    case 'expired':
+      return 'Expired';
+    case 'cancelled':
+      return 'Dibatalkan';
+    case 'refund_required':
+      return 'Butuh review refund';
+    default:
+      return 'Menyiapkan checkout DANA';
+  }
+};
+
+const getDanaProviderPaymentStatusColor = (status) => {
+  switch (normalizeDanaQrisStatus(status)) {
+    case 'paid':
+      return '#067647';
+    case 'failed':
+    case 'cancelled':
+    case 'refund_required':
+      return '#b42318';
+    case 'expired':
+      return '#b54708';
+    case 'pending':
+      return '#1849a9';
+    default:
+      return '#475467';
+  }
+};
+
+const getDanaProviderPaymentMethodLabel = (transaction) => {
+  const directLabel = String(transaction?.paymentMethodLabel || transaction?.payment_method_label || '').trim();
+  if (directLabel) {
+    return directLabel;
+  }
+
+  return normalizeDanaQrisStatus(transaction?.paymentMethod || transaction?.payment_method) === 'gateway'
+    ? 'DANA Payment Gateway'
+    : 'QRIS DANA';
+};
+
+const buildDanaProviderPaymentSummary = (transaction, overrides = {}) => {
+  if (!transaction || typeof transaction !== 'object') {
+    return null;
+  }
+
+  const invoiceId = Number(overrides.invoiceId || transaction.invoiceId || transaction.invoice_id || 0) || 0;
+  const paymentTransactionId = Number(overrides.paymentTransactionId || transaction.id || transaction.payment_transaction_id || 0) || 0;
+  if (!(invoiceId > 0) && !(paymentTransactionId > 0)) {
+    return null;
+  }
+
+  const status = normalizeDanaQrisStatus(transaction.status);
+  const methodKey = normalizeDanaQrisStatus(transaction.payment_method || transaction.paymentMethod) === 'gateway'
+    ? 'gateway'
+    : 'qris';
+  const methodLabel = getDanaProviderPaymentMethodLabel(transaction);
+  const invoiceTotal = Number(transaction.invoiceTotal || transaction.invoice_total || 0) || 0;
+  const invoicePaidTotal = Number(transaction.invoicePaidTotal || transaction.invoice_paid_total || 0) || 0;
+  const explicitDue = Number(transaction.invoiceDueTotal || transaction.invoice_due_total || 0) || 0;
+
+  return {
+    id: paymentTransactionId,
+    invoiceId,
+    orderId: Number(overrides.orderId || transaction.orderId || transaction.order_id || 0) || 0,
+    invoiceNo: String(overrides.invoiceNo || transaction.invoiceNo || transaction.invoice_no || '').trim(),
+    methodKey,
+    methodLabel,
+    status,
+    statusLabel: methodKey === 'gateway'
+      ? getDanaGatewayStatusLabel(status)
+      : getDanaQrisStatusLabel(status),
+    statusColor: getDanaProviderPaymentStatusColor(status),
+    providerStatusCode: String(transaction.providerStatusCode || transaction.provider_status_code || '').trim(),
+    providerMessage: String(transaction.providerMessage || transaction.provider_status_message || transaction.reason || '').trim(),
+    paymentAccountName: String(transaction.paymentAccountName || transaction.payment_account_name || '').trim(),
+    routeLabel: String(transaction.routeLabel || transaction.route_label || '').trim(),
+    amount: Number(transaction.amount || 0) || 0,
+    currency: String(transaction.currency || 'IDR').trim() || 'IDR',
+    checkoutUrl: String(transaction.checkoutUrl || transaction.checkout_url || '').trim(),
+    qrContent: String(transaction.qrContent || transaction.qr_content || '').trim(),
+    qrUrl: String(transaction.qrUrl || transaction.qr_url || '').trim(),
+    qrImage: String(transaction.qrImage || transaction.qr_image || '').trim(),
+    expiresAt: String(transaction.expiresAt || transaction.expires_at || '').trim(),
+    paidAt: String(transaction.paidAt || transaction.paid_at || '').trim(),
+    invoiceStatus: String(transaction.invoiceStatus || transaction.invoice_status || '').trim(),
+    invoiceTotal,
+    invoicePaidTotal,
+    invoiceDueTotal: explicitDue > 0 ? explicitDue : Math.max(0, roundMoney(invoiceTotal - invoicePaidTotal)),
+    isActive: status === 'pending',
+    orderResult: overrides.orderResult || transaction.orderResult || null,
+    receiptSnapshot: overrides.receiptSnapshot || transaction.receiptSnapshot || null,
+    lastSyncedAt: String(overrides.lastSyncedAt || transaction.lastSyncedAt || new Date().toISOString()).trim(),
+  };
+};
+
+const formatDanaProviderPaymentCountdownLabel = (summary, nowTick = Date.now()) => {
+  const expiresAtMs = Number.isFinite(Date.parse(summary?.expiresAt || ''))
+    ? Date.parse(summary?.expiresAt || '')
+    : 0;
+  if (!(expiresAtMs > 0)) {
+    return '';
+  }
+
+  return formatDanaQrisCountdown(Math.max(0, expiresAtMs - Number(nowTick || Date.now())));
+};
+
+const openExternalUrl = async (targetUrl) => {
+  const url = String(targetUrl || '').trim();
+  if (!url) {
+    return false;
+  }
+
+  try {
+    if (typeof globalThis?.open === 'function') {
+      const openedWindow = globalThis.open(url, '_blank', 'noopener,noreferrer');
+      if (openedWindow) {
+        return true;
+      }
+    }
+  } catch (_error) {
+    // Fallback ke Linking.
+  }
+
+  try {
+    const canOpen = typeof Linking?.canOpenURL === 'function'
+      ? await Linking.canOpenURL(url)
+      : true;
+    if (!canOpen) {
+      return false;
+    }
+    await Linking.openURL(url);
+    return true;
+  } catch (_error) {
+    return false;
+  }
+};
+
 const SalesScreen = ({ currentUser, onLogout }) => {
   const { width, height } = useWindowDimensions();
   const isDesktop = Platform.OS === 'web' && width >= 1200;
@@ -4801,6 +5660,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
   const [selectedPaymentMethod, setSelectedPaymentMethod] = useState('');
   const [paymentAmount, setPaymentAmount] = useState('');
   const [paymentNotes, setPaymentNotes] = useState('');
+  const [selectedProofingFlow, setSelectedProofingFlow] = useState(PROOFING_FLOW_NONE);
   const [activeMenu, setActiveMenu] = useState('pos');
   const [currentDraftSourceId, setCurrentDraftSourceId] = useState(null);
   const [currentQueuedDraftQueueId, setCurrentQueuedDraftQueueId] = useState(null);
@@ -4814,10 +5674,15 @@ const SalesScreen = ({ currentUser, onLogout }) => {
   const [isDraftLoading, setIsDraftLoading] = useState(false);
   const [isDeletingDraftId, setIsDeletingDraftId] = useState(null);
   const [productionRows, setProductionRows] = useState([]);
+  const [proofingRows, setProofingRows] = useState([]);
   const [isProductionLoading, setIsProductionLoading] = useState(false);
+  const [isProofingLoading, setIsProofingLoading] = useState(false);
   const [productionStatusFilter, setProductionStatusFilter] = useState('all');
+  const [proofingStatusFilter, setProofingStatusFilter] = useState('all');
   const [productionSearch, setProductionSearch] = useState('');
+  const [proofingSearch, setProofingSearch] = useState('');
   const [updatingProductionItemId, setUpdatingProductionItemId] = useState(null);
+  const [processingProofingId, setProcessingProofingId] = useState(null);
   const [closingReportDate, setClosingReportDate] = useState(formatIsoDate(new Date()));
   const [closingReport, setClosingReport] = useState(null);
   const [closingRecord, setClosingRecord] = useState(null);
@@ -4882,6 +5747,15 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     visible: false,
     message: '',
   });
+  const cartHasProofingEligibleItems = useMemo(
+    () => cartItems.some((item) => isProofingEligibleBackendItem(item?.backendItem || item || {})),
+    [cartItems],
+  );
+  useEffect(() => {
+    if (!cartHasProofingEligibleItems && selectedProofingFlow !== PROOFING_FLOW_NONE) {
+      setSelectedProofingFlow(PROOFING_FLOW_NONE);
+    }
+  }, [cartHasProofingEligibleItems, selectedProofingFlow]);
   const isInvoiceAreaMenu = (menu) => Object.prototype.hasOwnProperty.call(INVOICE_AREA_MENU_FILTER_MAP, menu);
   const resolveInvoiceFilterForMenu = (menu) => INVOICE_AREA_MENU_FILTER_MAP[menu] || 'success';
   const resolveInvoiceMenuForFilter = (filter) => INVOICE_AREA_FILTER_MENU_MAP[filter] || 'invoice_success';
@@ -4934,6 +5808,12 @@ const SalesScreen = ({ currentUser, onLogout }) => {
   const [isOrderPreviewSubmitting, setIsOrderPreviewSubmitting] = useState(false);
   const [modalDetailPesanan, setModalDetailPesanan] = useState(false);
   const [modalPilihPembayaran, setModalPilihPembayaran] = useState(false);
+  const [danaQrisModal, setDanaQrisModal] = useState(() => createDanaQrisModalState());
+  const [danaQrisTick, setDanaQrisTick] = useState(() => Date.now());
+  const [danaGatewayModal, setDanaGatewayModal] = useState(() => createDanaGatewayModalState());
+  const [danaGatewayTick, setDanaGatewayTick] = useState(() => Date.now());
+  const [activeDanaInvoiceMonitors, setActiveDanaInvoiceMonitors] = useState({});
+  const [providerPaymentTick, setProviderPaymentTick] = useState(() => Date.now());
   const [posSettings, setPosSettings] = useState(DEFAULT_RECEIPT_SETTINGS);
   const [paymentMethodConfigs, setPaymentMethodConfigs] = useState(() => getDefaultPaymentMethodConfigs());
   const [printerProfile, setPrinterProfile] = useState(() => loadStoredPrinterProfile() || getDefaultPrinterProfile());
@@ -4954,6 +5834,354 @@ const SalesScreen = ({ currentUser, onLogout }) => {
   const [loadingDepositAccounts, setLoadingDepositAccounts] = useState(false);
   const paymentMethod = selectedPaymentMethod;
   const setPaymentMethod = setSelectedPaymentMethod;
+  const danaQrisModalRef = useRef(danaQrisModal);
+  const danaQrisPaidHandledRef = useRef(false);
+  const danaQrisLastProviderSyncRef = useRef(0);
+  const danaGatewayModalRef = useRef(danaGatewayModal);
+  const danaGatewayPaidHandledRef = useRef(false);
+  const danaGatewayLastProviderSyncRef = useRef(0);
+  const activeDanaInvoiceMonitorsRef = useRef(activeDanaInvoiceMonitors);
+  const danaInvoiceMonitorProviderSyncRef = useRef({});
+  const danaInvoiceMonitorPaidNoticeRef = useRef({});
+  const updateDanaInvoiceMonitors = (updater) => {
+    setActiveDanaInvoiceMonitors((prev) => {
+      const baseState = prev && typeof prev === 'object' ? prev : {};
+      const next = typeof updater === 'function' ? updater(baseState) : updater;
+      const resolved = next && typeof next === 'object' && !Array.isArray(next) ? next : {};
+      activeDanaInvoiceMonitorsRef.current = resolved;
+      return resolved;
+    });
+  };
+  const mergeProviderPaymentIntoInvoiceRow = (row, summary) => {
+    if (!row || typeof row !== 'object' || !summary || typeof summary !== 'object') {
+      return row;
+    }
+
+    const currentInvoice = row?.invoice && typeof row.invoice === 'object' ? row.invoice : null;
+    const nextInvoice = currentInvoice ? {
+      ...currentInvoice,
+      ...(summary.invoiceStatus ? { status: summary.invoiceStatus } : {}),
+      ...(summary.invoiceTotal > 0 ? { total: summary.invoiceTotal } : {}),
+      ...(summary.invoicePaidTotal >= 0 ? { paid_total: summary.invoicePaidTotal } : {}),
+      ...(summary.invoiceDueTotal >= 0 ? { due_total: summary.invoiceDueTotal } : {}),
+      ...(summary.invoiceDueTotal > 0 ? { can_pay: true } : {}),
+    } : currentInvoice;
+
+    const nextPayment = row?.payment && typeof row.payment === 'object'
+      ? {
+        ...row.payment,
+        ...(summary.methodKey === 'gateway'
+          ? { method: row?.payment?.method || 'dana_gateway' }
+          : { method: row?.payment?.method || 'qris' }),
+        ...(summary.paymentAccountName
+          ? { route_label: row?.payment?.route_label || summary.paymentAccountName }
+          : {}),
+      }
+      : row?.payment;
+
+    return {
+      ...row,
+      ...(nextInvoice ? { invoice: nextInvoice } : {}),
+      ...(nextPayment ? { payment: nextPayment } : {}),
+      provider_payment: {
+        ...(row?.provider_payment && typeof row.provider_payment === 'object' ? row.provider_payment : {}),
+        ...summary,
+      },
+    };
+  };
+  const syncDraftInvoiceProviderPayment = (summary) => {
+    if (!summary || !(Number(summary.invoiceId || 0) > 0)) {
+      return;
+    }
+
+    setDraftInvoices((prevRows) => (Array.isArray(prevRows) ? prevRows : []).map((row) => {
+      const rowInvoiceId = Number(row?.invoice?.id || row?.approval?.invoiceId || 0) || 0;
+      if (rowInvoiceId !== Number(summary.invoiceId || 0)) {
+        return row;
+      }
+      return mergeProviderPaymentIntoInvoiceRow(row, summary);
+    }));
+  };
+  const upsertDanaInvoiceMonitor = (transaction, options = {}) => {
+    const summary = buildDanaProviderPaymentSummary(transaction, options);
+    if (!summary || !(Number(summary.invoiceId || 0) > 0)) {
+      return null;
+    }
+
+    updateDanaInvoiceMonitors((prev) => {
+      const existing = prev?.[summary.invoiceId] && typeof prev[summary.invoiceId] === 'object'
+        ? prev[summary.invoiceId]
+        : null;
+      return {
+        ...prev,
+        [summary.invoiceId]: {
+          ...(existing || {}),
+          ...summary,
+          orderResult: options.orderResult !== undefined
+            ? options.orderResult
+            : (existing?.orderResult || summary.orderResult || null),
+          receiptSnapshot: options.receiptSnapshot !== undefined
+            ? options.receiptSnapshot
+            : (existing?.receiptSnapshot || summary.receiptSnapshot || null),
+        },
+      };
+    });
+    syncDraftInvoiceProviderPayment(summary);
+    return summary;
+  };
+  const removeDanaInvoiceMonitor = (invoiceId) => {
+    const normalizedInvoiceId = Number(invoiceId || 0) || 0;
+    if (!(normalizedInvoiceId > 0)) {
+      return;
+    }
+
+    updateDanaInvoiceMonitors((prev) => {
+      if (!Object.prototype.hasOwnProperty.call(prev || {}, normalizedInvoiceId)) {
+        return prev;
+      }
+
+      const next = { ...(prev || {}) };
+      delete next[normalizedInvoiceId];
+      return next;
+    });
+  };
+  const hydrateDanaInvoiceMonitorsFromRows = (rows = []) => {
+    if (!Array.isArray(rows) || rows.length === 0) {
+      return;
+    }
+
+    rows.forEach((row) => {
+      const providerPayment = row?.provider_payment && typeof row.provider_payment === 'object'
+        ? row.provider_payment
+        : null;
+      const invoiceId = Number(row?.invoice?.id || providerPayment?.invoice_id || 0) || 0;
+      if (!(invoiceId > 0) || !providerPayment) {
+        return;
+      }
+
+      if (normalizeDanaQrisStatus(providerPayment?.status) !== 'pending') {
+        return;
+      }
+
+      const transaction = extractDanaPaymentTransaction({ data: providerPayment });
+      if (!transaction) {
+        return;
+      }
+
+      upsertDanaInvoiceMonitor(transaction, {
+        invoiceId,
+        orderId: Number(row?.id || row?.order?.id || 0) || 0,
+        invoiceNo: String(row?.invoice?.invoice_no || providerPayment?.invoice_no || '').trim(),
+      });
+    });
+  };
+  const resolveInvoiceProviderPaymentSummary = (row) => {
+    const invoiceId = Number(row?.invoice?.id || row?.provider_payment?.invoice_id || 0) || 0;
+    const monitorSummary = invoiceId > 0
+      ? activeDanaInvoiceMonitorsRef.current?.[invoiceId]
+      : null;
+    if (monitorSummary && typeof monitorSummary === 'object') {
+      return monitorSummary;
+    }
+
+    const providerPayment = row?.provider_payment && typeof row.provider_payment === 'object'
+      ? row.provider_payment
+      : null;
+    if (!providerPayment) {
+      return null;
+    }
+
+    return buildDanaProviderPaymentSummary(providerPayment, {
+      invoiceId,
+      orderId: Number(row?.id || row?.order?.id || 0) || 0,
+      invoiceNo: String(row?.invoice?.invoice_no || providerPayment?.invoice_no || '').trim(),
+    });
+  };
+  const resolveDanaProviderMonitorOrderId = (summary) => {
+    const directOrderId = Number(summary?.orderId || 0) || 0;
+    if (directOrderId > 0) {
+      return directOrderId;
+    }
+
+    const targetInvoiceId = Number(summary?.invoiceId || 0) || 0;
+    if (!(targetInvoiceId > 0)) {
+      return 0;
+    }
+
+    const draftRows = Array.isArray(draftInvoices) ? draftInvoices : [];
+    const matchedRow = draftRows.find((row) => Number(row?.invoice?.id || 0) === targetInvoiceId) || null;
+    return Number(matchedRow?.id || matchedRow?.order?.id || 0) || 0;
+  };
+  const refreshInvoiceRowAfterProviderPayment = async (summary, options = {}) => {
+    const normalizedInvoiceId = Number(summary?.invoiceId || 0) || 0;
+    if (!(normalizedInvoiceId > 0)) {
+      return null;
+    }
+
+    const targetOrderId = resolveDanaProviderMonitorOrderId(summary);
+    if (!(targetOrderId > 0)) {
+      if (options?.reloadList !== false) {
+        await loadDraftInvoices().catch(() => {});
+      }
+      return null;
+    }
+
+    try {
+      const detailPayload = await fetchPosOrderDetail(targetOrderId);
+      const currentRows = Array.isArray(draftInvoices) ? draftInvoices : [];
+      const fallbackRow = currentRows.find((row) => Number(row?.id || row?.order?.id || 0) === targetOrderId) || null;
+      const normalizedRow = normalizeOrderDetailRow(detailPayload, fallbackRow) || fallbackRow;
+      if (!normalizedRow) {
+        return null;
+      }
+
+      setDraftInvoices((prevRows) => (Array.isArray(prevRows) ? prevRows : []).map((row) => {
+        const rowOrderId = Number(row?.id || row?.order?.id || 0) || 0;
+        if (rowOrderId !== targetOrderId) {
+          return row;
+        }
+        return mergeProviderPaymentIntoInvoiceRow(normalizedRow, summary);
+      }));
+      return normalizedRow;
+    } catch (_error) {
+      if (options?.reloadList !== false) {
+        await loadDraftInvoices().catch(() => {});
+      }
+      return null;
+    }
+  };
+  const openDanaMonitorFromSummary = (summary) => {
+    const normalizedSummary = summary && typeof summary === 'object' ? summary : null;
+    if (!normalizedSummary || !(Number(normalizedSummary.invoiceId || 0) > 0)) {
+      openNotice('Pembayaran Online', 'Detail pembayaran online belum tersedia untuk invoice ini.');
+      return;
+    }
+
+    if (normalizedSummary.methodKey === 'gateway') {
+      updateDanaGatewayModalState((prev) => ({
+        ...createDanaGatewayModalState(),
+        ...prev,
+        visible: true,
+        paymentTransactionId: normalizedSummary.id || prev.paymentTransactionId,
+        invoiceId: normalizedSummary.invoiceId,
+        invoiceNo: normalizedSummary.invoiceNo || prev.invoiceNo,
+        backendOrderId: normalizedSummary.orderId || prev.backendOrderId,
+        amount: normalizedSummary.amount || prev.amount,
+        currency: normalizedSummary.currency || prev.currency || 'IDR',
+        status: normalizedSummary.status || prev.status,
+        providerStatusCode: normalizedSummary.providerStatusCode || prev.providerStatusCode,
+        providerMessage: normalizedSummary.providerMessage || prev.providerMessage,
+        message: buildDanaStatusUpdateMessage(normalizedSummary, 'manual', normalizedSummary.methodLabel || 'DANA Payment Gateway'),
+        checkoutUrl: normalizedSummary.checkoutUrl || prev.checkoutUrl,
+        expiresAt: normalizedSummary.expiresAt || prev.expiresAt,
+        paidAt: normalizedSummary.paidAt || prev.paidAt,
+        orderResult: normalizedSummary.orderResult || prev.orderResult || null,
+        receiptSnapshot: normalizedSummary.receiptSnapshot || prev.receiptSnapshot || null,
+      }));
+      setDanaGatewayTick(Date.now());
+      return;
+    }
+
+    updateDanaQrisModalState((prev) => ({
+      ...createDanaQrisModalState(),
+      ...prev,
+      visible: true,
+      paymentTransactionId: normalizedSummary.id || prev.paymentTransactionId,
+      invoiceId: normalizedSummary.invoiceId,
+      invoiceNo: normalizedSummary.invoiceNo || prev.invoiceNo,
+      backendOrderId: normalizedSummary.orderId || prev.backendOrderId,
+      amount: normalizedSummary.amount || prev.amount,
+      currency: normalizedSummary.currency || prev.currency || 'IDR',
+      status: normalizedSummary.status || prev.status,
+      providerStatusCode: normalizedSummary.providerStatusCode || prev.providerStatusCode,
+      providerMessage: normalizedSummary.providerMessage || prev.providerMessage,
+      message: buildDanaStatusUpdateMessage(normalizedSummary, 'manual', normalizedSummary.methodLabel || 'QRIS DANA'),
+      qrContent: normalizedSummary.qrContent || prev.qrContent,
+      qrUrl: normalizedSummary.qrUrl || prev.qrUrl,
+      qrImage: normalizedSummary.qrImage || prev.qrImage,
+      expiresAt: normalizedSummary.expiresAt || prev.expiresAt,
+      paidAt: normalizedSummary.paidAt || prev.paidAt,
+      orderResult: normalizedSummary.orderResult || prev.orderResult || null,
+      receiptSnapshot: normalizedSummary.receiptSnapshot || prev.receiptSnapshot || null,
+    }));
+    setDanaQrisTick(Date.now());
+  };
+  const handleOpenProviderPaymentMonitor = (row) => {
+    const summary = resolveInvoiceProviderPaymentSummary(row);
+    if (!summary) {
+      openNotice('Pembayaran Online', 'Belum ada detail pembayaran online yang bisa dibuka dari invoice ini.');
+      return;
+    }
+    openDanaMonitorFromSummary(summary);
+  };
+  const handleDanaProviderPaymentSettledInBackground = async (summary) => {
+    if (!summary || !(Number(summary.invoiceId || 0) > 0)) {
+      return;
+    }
+
+    await refreshInvoiceRowAfterProviderPayment(summary, { reloadList: false });
+
+    if (summary.status === 'paid') {
+      const noticeKey = String(summary.invoiceId || '');
+      if (!danaInvoiceMonitorPaidNoticeRef.current[noticeKey]) {
+        danaInvoiceMonitorPaidNoticeRef.current[noticeKey] = true;
+        openNotice(
+          'Pembayaran Berhasil',
+          `Invoice ${summary.invoiceNo || '-'} sudah lunas. Nota sekarang bisa dicetak dari daftar invoice.`,
+          null,
+          {
+            showDefaultAction: false,
+            autoCloseMs: 2200,
+            visual: 'success',
+          },
+        );
+      }
+      removeDanaInvoiceMonitor(summary.invoiceId);
+      return;
+    }
+
+    if (isDanaQrisTerminalStatus(summary.status)) {
+      removeDanaInvoiceMonitor(summary.invoiceId);
+    }
+  };
+  const applyDanaProviderPaymentPayloadInBackground = async (payload, source = 'poll') => {
+    const transaction = extractDanaPaymentTransaction(payload);
+    if (!transaction) {
+      return null;
+    }
+
+    const existing = activeDanaInvoiceMonitorsRef.current?.[transaction.invoiceId] || null;
+    const summary = upsertDanaInvoiceMonitor(transaction, {
+      orderId: Number(existing?.orderId || 0) || 0,
+      invoiceNo: String(transaction.invoiceNo || existing?.invoiceNo || '').trim(),
+      orderResult: existing?.orderResult || null,
+      receiptSnapshot: existing?.receiptSnapshot || null,
+      lastSyncedAt: new Date().toISOString(),
+    });
+    if (!summary) {
+      return null;
+    }
+
+    const invoicePaid = normalizeDanaQrisStatus(summary.invoiceStatus) === 'paid';
+    const resolvedSummary = invoicePaid && summary.status !== 'paid'
+      ? {
+        ...summary,
+        status: 'paid',
+        statusLabel: summary.methodKey === 'gateway'
+          ? getDanaGatewayStatusLabel('paid')
+          : getDanaQrisStatusLabel('paid'),
+        statusColor: getDanaProviderPaymentStatusColor('paid'),
+      }
+      : summary;
+
+    syncDraftInvoiceProviderPayment(resolvedSummary);
+
+    if (resolvedSummary.status === 'paid' || isDanaQrisTerminalStatus(resolvedSummary.status)) {
+      await handleDanaProviderPaymentSettledInBackground(resolvedSummary);
+    }
+
+    return resolvedSummary;
+  };
   const checkoutPaymentMethodOptions = useMemo(
     () => {
       const labels = getPaymentMethodLabels(paymentMethodConfigs, { includeUnavailable: true });
@@ -4972,10 +6200,43 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     () => findPaymentMethodConfig(paymentMethodConfigs, paymentMethod),
     [paymentMethodConfigs, paymentMethod],
   );
+  const selectedPaymentMethodType = normalizePaymentMethodType(
+    selectedPaymentMethodConfig?.type
+    || selectedPaymentMethodConfig?.code
+    || paymentMethod,
+  );
+  const isDanaQrisPaymentMethod = selectedPaymentMethodType === 'qris';
+  const isDanaGatewayPaymentMethod = isDanaGatewayPaymentMethodConfig(selectedPaymentMethodConfig, paymentMethod);
   const selectedBankAccountRow = useMemo(
     () => bankAccounts.find((row) => Number(row?.id || 0) === Number(selectedBankAccountId || 0)) || null,
     [bankAccounts, selectedBankAccountId],
   );
+  const danaQrisImageUri = useMemo(
+    () => resolveDanaQrisImageUri(danaQrisModal),
+    [danaQrisModal.qrImage, danaQrisModal.qrUrl],
+  );
+  const danaQrisExpiresAtMs = Number.isFinite(Date.parse(danaQrisModal.expiresAt || ''))
+    ? Date.parse(danaQrisModal.expiresAt || '')
+    : 0;
+  const danaQrisRemainingMs = danaQrisExpiresAtMs > 0
+    ? Math.max(0, danaQrisExpiresAtMs - danaQrisTick)
+    : 0;
+  const danaQrisCountdownLabel = formatDanaQrisCountdown(danaQrisRemainingMs);
+  const danaQrisStatus = normalizeDanaQrisStatus(danaQrisModal.status);
+  const danaQrisCanRetry = ['failed', 'expired', 'cancelled'].includes(danaQrisStatus)
+    && Boolean(danaQrisModal.orderResult)
+    && Number(danaQrisModal.invoiceId || 0) > 0;
+  const danaGatewayExpiresAtMs = Number.isFinite(Date.parse(danaGatewayModal.expiresAt || ''))
+    ? Date.parse(danaGatewayModal.expiresAt || '')
+    : 0;
+  const danaGatewayRemainingMs = danaGatewayExpiresAtMs > 0
+    ? Math.max(0, danaGatewayExpiresAtMs - danaGatewayTick)
+    : 0;
+  const danaGatewayCountdownLabel = formatDanaQrisCountdown(danaGatewayRemainingMs);
+  const danaGatewayStatus = normalizeDanaQrisStatus(danaGatewayModal.status);
+  const danaGatewayCanRetry = ['failed', 'expired', 'cancelled'].includes(danaGatewayStatus)
+    && Boolean(danaGatewayModal.orderResult)
+    && Number(danaGatewayModal.invoiceId || 0) > 0;
   const checkoutSubtotalPreview = cartItems.reduce((total, item) => total + Number(item?.lineTotal || 0), 0);
   const checkoutDiscountPercentPreview = Math.min(Math.max(Number(discountPercent) || 0, 0), 100);
   const checkoutDiscountAmountPreview = Math.min(
@@ -5018,8 +6279,14 @@ const SalesScreen = ({ currentUser, onLogout }) => {
 
     if (method === 'qris') {
       return selectedAccountName
-        ? `Pembayaran QRIS akan otomatis dicatat ke rekening/akun tujuan: ${selectedAccountName}.`
-        : 'Pembayaran QRIS akan otomatis dicatat ke rekening/akun tujuan sesuai mapping backend.';
+        ? `QRIS DANA akan dibuat full sisa invoice dan otomatis dicatat ke rekening/akun tujuan setelah callback paid: ${selectedAccountName}.`
+        : 'QRIS DANA akan dibuat full sisa invoice. Pembayaran baru dicatat setelah callback paid dari DANA.';
+    }
+
+    if (isDanaGatewayPaymentMethod) {
+      return selectedAccountName
+        ? `DANA Payment Gateway akan membuat checkout online untuk full sisa invoice dan otomatis dicatat ke akun tujuan setelah callback paid: ${selectedAccountName}.`
+        : 'DANA Payment Gateway akan membuat checkout online untuk full sisa invoice. Pembayaran baru dicatat setelah callback paid dari DANA.';
     }
 
     if (method === 'card') {
@@ -5031,7 +6298,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     return selectedAccountName
       ? `Pembayaran transfer akan otomatis dicatat ke rekening tujuan: ${selectedAccountName}.`
       : 'Pembayaran transfer akan otomatis dicatat ke rekening tujuan sesuai mapping backend.';
-  }, [checkoutGrandTotalPreview, customerDepositBalance, paymentMethod, selectedBankAccountRow, selectedCustomerId, selectedPaymentMethodConfig]);
+  }, [checkoutGrandTotalPreview, customerDepositBalance, isDanaGatewayPaymentMethod, paymentMethod, selectedBankAccountRow, selectedCustomerId, selectedPaymentMethodConfig]);
   const processOrderSelectedMethodLabel = String(paymentMethod || '').trim() || 'Belum dipilih';
   const processOrderSelectedAccountLabel = isCustomerDepositPaymentMethod(paymentMethod)
     ? 'Saldo Customer'
@@ -5099,7 +6366,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       : 'Pelunasan transfer akan dicatat ke rekening tujuan yang dipilih.';
   }, [paymentMethodConfigs, receivablePaymentModal.method, selectedReceivableAccountRow]);
   const depositTopUpHelperText = useMemo(() => {
-    const selectedAccount = depositAccountOptions.find((row) => Number(row?.id || 0) === Number(depositAccountId || 0)) || null;
+    const selectedAccount = depositAccountOptions.find((row) => resolveAccountingSelectionId(row) === Number(depositAccountId || 0)) || null;
     const selectedAccountName = String(
       selectedAccount?.displayTitle
       || selectedAccount?.displayName
@@ -5160,11 +6427,16 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     note: '',
     orderStatus: '-',
     productionSummary: '-',
+    proofingSummarySectionLabel: 'Proofing',
+    proofingSummary: '',
+    proofingSummaryColor: '#6b7280',
+    proofingSummaryNote: '',
     itemCount: 0,
     total: 0,
     createdAt: '-',
     pickedUpText: 'Belum diambil',
     cancellationText: '',
+    providerPaymentSummary: null,
     items: [],
     canPickup: false,
   });
@@ -6584,42 +7856,65 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       paymentTargetName,
       paymentStatus,
       paymentAmount: isCustomerDepositPaymentMethod(paymentMethod) ? grandTotal : paidAmount,
+      proofingFlowLabel: cartHasProofingEligibleItems ? proofingFlowToLabel(selectedProofingFlow) : 'Tidak perlu proofing',
       discountAmount: finalDiscount,
       taxAmount: 0,
       extraChargeAmount: 0,
       subtotal,
       grandTotal,
       notes: paymentNotes || '-',
-      items: cartItems.map((item, index) => ({
-        no: index + 1,
-        product: String(resolveReceiptProductName(item, item?.product || '-') || '-'),
-        qty: Number(item?.qty || 0),
-        price: Number(
-          item?.pricingSummary?.grandTotal
-          || item?.pricingSummary?.printSubtotal
-          || item?.lineTotal
-          || item?.total
-          || 0,
-        ) / Math.max(Number(item?.qty || 0) || 1, 1),
-        size: String(item?.size || '-'),
-        finishing: String(item?.finishing || '-'),
-        lbMax: String(item?.lbMax || '-'),
-        material: String(item?.material || '-'),
-        pages: Math.max(Number(item?.pages || 1) || 1, 1),
-        note: String(item?.note || item?.notes || '-'),
-        total: Number(item?.total || item?.lineTotal || 0),
-      })),
+      items: cartItems.map((item, index) => {
+        const proofingEligible = isProofingEligibleBackendItem(item?.backendItem || item);
+        const proofingRequired = Boolean(
+          item?.proofing_required
+          ?? item?.backendItem?.proofing_required
+          ?? (proofingEligible && selectedProofingFlow !== PROOFING_FLOW_NONE),
+        );
+        return {
+          proofingRequired,
+          proofingFlow: normalizeProofingFlow(
+            item?.proofing_flow
+            ?? item?.backendItem?.proofing_flow
+            ?? selectedProofingFlow,
+            proofingRequired,
+          ),
+          no: index + 1,
+          product: String(resolveReceiptProductName(item, item?.product || '-') || '-'),
+          qty: Number(item?.qty || 0),
+          price: Number(
+            item?.pricingSummary?.grandTotal
+            || item?.pricingSummary?.printSubtotal
+            || item?.lineTotal
+            || item?.total
+            || 0,
+          ) / Math.max(Number(item?.qty || 0) || 1, 1),
+          size: String(item?.size || '-'),
+          finishing: String(item?.finishing || '-'),
+          lbMax: String(item?.lbMax || '-'),
+          material: String(item?.material || '-'),
+          pages: Math.max(Number(item?.pages || 1) || 1, 1),
+          note: String(item?.note || item?.notes || '-'),
+          total: Number(item?.total || item?.lineTotal || 0),
+        };
+      }),
     };
   };
 
-  const buildReceiptDetailSection = ({ deadline = '', orderDetails = [] } = {}) => {
+  const buildReceiptDetailSection = ({ deadline = '', orderDetails = [], proofingNotes = [], footerNotes = [] } = {}) => {
     const detailLines = Array.isArray(orderDetails)
       ? orderDetails.map((item) => String(item || '').trim()).filter(Boolean)
+      : [];
+    const proofingLines = Array.isArray(proofingNotes)
+      ? proofingNotes.map((item) => String(item || '').trim()).filter(Boolean)
+      : [];
+    const footerLines = Array.isArray(footerNotes)
+      ? footerNotes.map((item) => String(item || '').trim()).filter(Boolean)
       : [];
     return {
       deadline: String(deadline || '').trim(),
       orderDetails: detailLines,
-      footerNotes: [],
+      proofingNotes: proofingLines,
+      footerNotes: footerLines,
       thankYouText: 'TERIMA KASIH',
     };
   };
@@ -6637,6 +7932,12 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     const customerPhone = String(options?.customerPhone || '-').trim() || '-';
     const items = Array.isArray(receiptData?.items) ? receiptData.items : [];
     const orderNotes = String(receiptData?.transaction?.notes || '').trim();
+    const proofingNotes = Array.isArray(receiptData?.detail?.proofingNotes)
+      ? receiptData.detail.proofingNotes.map((item) => String(item || '').trim()).filter(Boolean)
+      : [];
+    const footerNotes = Array.isArray(receiptData?.detail?.footerNotes)
+      ? receiptData.detail.footerNotes.map((item) => String(item || '').trim()).filter(Boolean)
+      : [];
     const paidAmount = Number(receiptData?.summary?.paid || 0) || 0;
     const remainingDue = Number(receiptData?.summary?.remainingDue || 0) || 0;
     const paymentAmountLabel = remainingDue > 0
@@ -6675,12 +7976,21 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       `Sisa Bayar: ${formatClipboardMoney(remainingDue)}`,
     ]);
 
+    if (proofingNotes.length > 0) {
+      appendClipboardSection(lines, 'DETAIL PROOFING', proofingNotes.map((item) => `- ${item}`));
+    }
+
+    if (footerNotes.length > 0) {
+      appendClipboardSection(lines, 'NB', footerNotes.map((item) => `- ${item}`));
+    }
+
     return lines.join('\n').trim();
   };
 
   const buildOrderClipboardText = (snapshot, options = {}) => {
     const estimatedDoneAt = String(options?.estimatedDoneAt || '-').trim() || '-';
     const items = Array.isArray(snapshot?.items) ? snapshot.items : [];
+    const proofingNotes = buildPreviewReceiptProofingNotes(snapshot);
     const lines = [];
 
     appendClipboardSection(lines, 'DETAIL PESANAN', [
@@ -6705,6 +8015,10 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       lines.push(`   Subtotal: ${formatClipboardMoney(item?.total || 0)}`);
       lines.push('');
     });
+
+    if (proofingNotes.length > 0) {
+      appendClipboardSection(lines, 'DETAIL PROOFING', proofingNotes.map((item) => `- ${item}`));
+    }
 
     return lines.join('\n').trim();
   };
@@ -6864,6 +8178,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       detail: {
         ...buildReceiptDetailSection({
           orderDetails: detailLines,
+          proofingNotes: buildPreviewReceiptProofingNotes(snapshot),
         }),
         ...detailOverrides,
       },
@@ -7071,6 +8386,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       hour: '2-digit',
       minute: '2-digit',
     });
+    const proofingNotes = buildReceiptProofingNotes(items);
     return {
       store: {
         title: receiptSettings.receipt_title,
@@ -7121,6 +8437,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
             .map((item) => String(item?.note || item?.notes || '').trim())
             .filter((value) => value && value !== '-')
           : [],
+        proofingNotes,
       }),
     };
   };
@@ -7224,6 +8541,873 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       },
     });
   };
+
+  const updateDanaQrisModalState = (updater) => {
+    setDanaQrisModal((prev) => {
+      const next = typeof updater === 'function' ? updater(prev) : updater;
+      const resolved = next && typeof next === 'object' && !Array.isArray(next)
+        ? next
+        : createDanaQrisModalState();
+      danaQrisModalRef.current = resolved;
+      return resolved;
+    });
+  };
+
+  const mergeDanaQrisTransaction = (transaction, options = {}) => {
+    if (!transaction) {
+      return;
+    }
+
+    upsertDanaInvoiceMonitor(transaction, {
+      orderId: Number(options.orderId || options.backendOrderId || danaQrisModalRef.current?.backendOrderId || 0) || 0,
+      invoiceNo: String(options.invoiceNo || transaction.invoiceNo || danaQrisModalRef.current?.invoiceNo || '').trim(),
+      orderResult: options.orderResult !== undefined ? options.orderResult : danaQrisModalRef.current?.orderResult,
+      receiptSnapshot: options.receiptSnapshot !== undefined ? options.receiptSnapshot : danaQrisModalRef.current?.receiptSnapshot,
+    });
+
+    updateDanaQrisModalState((prev) => ({
+      ...prev,
+      ...options,
+      paymentTransactionId: transaction.id || prev.paymentTransactionId,
+      invoiceId: transaction.invoiceId || prev.invoiceId,
+      invoiceNo: transaction.invoiceNo || prev.invoiceNo,
+      amount: transaction.amount > 0 ? transaction.amount : prev.amount,
+      currency: transaction.currency || prev.currency || 'IDR',
+      status: transaction.status || prev.status,
+      providerStatusCode: transaction.providerStatusCode || prev.providerStatusCode,
+      providerMessage: transaction.providerMessage || prev.providerMessage,
+      message: options.message || transaction.providerMessage || transaction.reason || prev.message,
+      qrContent: transaction.qrContent || prev.qrContent,
+      qrUrl: transaction.qrUrl || prev.qrUrl,
+      qrImage: transaction.qrImage || prev.qrImage,
+      expiresAt: transaction.expiresAt || prev.expiresAt,
+      paidAt: transaction.paidAt || prev.paidAt,
+    }));
+  };
+
+  const finalizeDanaQrisPaid = async (transaction = null) => {
+    if (danaQrisPaidHandledRef.current) {
+      return;
+    }
+
+    danaQrisPaidHandledRef.current = true;
+    const current = danaQrisModalRef.current || {};
+    updateDanaQrisModalState((prev) => ({
+      ...prev,
+      status: 'paid',
+      isFinalizing: true,
+      paidAt: transaction?.paidAt || prev.paidAt || new Date().toISOString(),
+      message: 'Pembayaran QRIS DANA berhasil. Nota sedang disiapkan.',
+    }));
+
+    const submitResult = {
+      ...(current.orderResult || {}),
+      ok: true,
+      danaQris: false,
+      backendOrderId: current.backendOrderId || current.orderResult?.backendOrderId || null,
+      invoiceId: transaction?.invoiceId || current.invoiceId || current.orderResult?.invoiceId || null,
+      invoiceNo: transaction?.invoiceNo || current.invoiceNo || current.orderResult?.invoiceNo || '-',
+      receipt: current.orderResult?.receipt || null,
+    };
+
+    try {
+      setModalPilihPembayaran(false);
+      setModalDetailPesanan(false);
+      removeDanaInvoiceMonitor(transaction?.invoiceId || current.invoiceId || current.orderResult?.invoiceId || null);
+      await loadDraftInvoices().catch(() => {});
+      await printOrderPreview(current.receiptSnapshot || orderPreviewSnapshot, submitResult);
+      resetTransaction();
+      updateDanaQrisModalState((prev) => ({
+        ...prev,
+        isFinalizing: false,
+        status: 'paid',
+        message: 'Pembayaran berhasil. Invoice sudah lunas dan nota sudah diproses.',
+      }));
+    } catch (error) {
+      resetTransaction();
+      removeDanaInvoiceMonitor(transaction?.invoiceId || current.invoiceId || current.orderResult?.invoiceId || null);
+      updateDanaQrisModalState((prev) => ({
+        ...prev,
+        isFinalizing: false,
+        status: 'paid',
+        message: 'Pembayaran berhasil, tetapi cetak nota perlu dicoba ulang.',
+      }));
+      openNotice(
+        'Pembayaran QRIS Berhasil',
+        `Invoice sudah lunas, tetapi nota gagal dicetak otomatis: ${error.message}`,
+      );
+    }
+  };
+
+  const applyDanaQrisStatusFromPayload = async (payload, source = 'poll') => {
+    const transaction = extractDanaQrisTransaction(payload);
+    if (!transaction) {
+      return;
+    }
+
+    const current = danaQrisModalRef.current || {};
+    if (current.paymentTransactionId > 0 && transaction.id > 0 && Number(transaction.id) !== Number(current.paymentTransactionId)) {
+      if (
+        current.invoiceId > 0
+        && transaction.invoiceId > 0
+        && Number(transaction.invoiceId) === Number(current.invoiceId)
+        && (transaction.status === 'paid' || normalizeDanaQrisStatus(transaction.invoiceStatus) === 'paid')
+      ) {
+        await finalizeDanaQrisPaid(transaction);
+      }
+      return;
+    }
+    if (current.invoiceId > 0 && transaction.invoiceId > 0 && Number(transaction.invoiceId) !== Number(current.invoiceId)) {
+      return;
+    }
+
+    const realtimeAvailable = source === 'realtime' ? true : current.realtimeAvailable;
+    upsertDanaInvoiceMonitor(transaction, {
+      orderId: Number(current.backendOrderId || 0) || 0,
+      invoiceNo: String(transaction.invoiceNo || current.invoiceNo || '').trim(),
+      orderResult: current.orderResult || null,
+      receiptSnapshot: current.receiptSnapshot || null,
+    });
+    mergeDanaQrisTransaction(transaction, {
+      isGenerating: false,
+      message: source === 'realtime'
+        ? current.message
+        : buildDanaStatusUpdateMessage(transaction, source, 'QRIS DANA'),
+      realtimeAvailable,
+      realtimeMessage: source === 'realtime'
+        ? 'Realtime aktif. Status pembayaran diterima dari websocket.'
+        : source === 'provider'
+          ? 'Status diperbarui dari Query Payment DANA.'
+        : current.realtimeMessage,
+    });
+
+    if (transaction.status === 'paid' || normalizeDanaQrisStatus(transaction.invoiceStatus) === 'paid') {
+      await finalizeDanaQrisPaid(transaction);
+    }
+  };
+
+  const startDanaQrisPayment = async (orderResult) => {
+    const invoiceId = Number(orderResult?.invoiceId || 0) || 0;
+    if (!(invoiceId > 0)) {
+      openNotice(
+        'QRIS DANA',
+        'Order berhasil dibuat, tetapi ID invoice tidak ditemukan dari response backend. Buka daftar invoice dan lanjutkan pembayaran manual.',
+      );
+      return;
+    }
+
+    danaQrisPaidHandledRef.current = false;
+    danaQrisLastProviderSyncRef.current = 0;
+    const initialState = {
+      ...createDanaQrisModalState(),
+      visible: true,
+      isGenerating: true,
+      invoiceId,
+      invoiceNo: String(orderResult?.invoiceNo || '').trim(),
+      backendOrderId: Number(orderResult?.backendOrderId || 0) || 0,
+      amount: Number(orderResult?.amount || orderPreviewSnapshot?.grandTotal || 0) || 0,
+      status: 'pending',
+      message: 'Membuat QRIS DANA sesuai full sisa invoice...',
+      orderResult,
+      receiptSnapshot: orderPreviewSnapshot,
+    };
+    updateDanaQrisModalState(initialState);
+    setDanaQrisTick(Date.now());
+
+    try {
+      const response = await createDanaQrisPayment(invoiceId, orderResult?.qrisPaymentPayload || {});
+      const transaction = extractDanaQrisTransaction(response);
+      if (!transaction || !(transaction.id > 0)) {
+        throw new Error('Response QRIS DANA tidak memuat transaksi pembayaran.');
+      }
+
+      const hasQrPayload = Boolean(transaction.qrContent || transaction.qrUrl || transaction.qrImage);
+      mergeDanaQrisTransaction(transaction, {
+        isGenerating: false,
+        orderId: Number(orderResult?.backendOrderId || 0) || 0,
+        orderResult,
+        receiptSnapshot: orderPreviewSnapshot,
+        message: transaction.status === 'pending'
+          ? (hasQrPayload
+              ? 'QRIS siap discan pelanggan. Menunggu callback pembayaran DANA.'
+              : (transaction.providerMessage || 'Generate QRIS masih pending di DANA. POS akan mencoba ulang otomatis.'))
+          : (transaction.providerMessage || 'Status QRIS DANA berhasil diterima.'),
+      });
+
+      if (transaction.status === 'paid') {
+        await finalizeDanaQrisPaid(transaction);
+      }
+    } catch (error) {
+      const message = String(formatBackendValidationError(error) || error?.message || 'QRIS DANA gagal dibuat.').trim();
+      const errorTransaction = extractDanaQrisTransaction(error?.body);
+      const providerMessage = String(
+        errorTransaction?.providerMessage
+        || error?.body?.provider_message
+        || error?.body?.error
+        || error?.body?.data?.last_error
+        || error?.body?.data?.provider_status_message
+        || ''
+      ).trim();
+      const messageLower = message.toLowerCase();
+      const providerMessageLower = providerMessage.toLowerCase();
+      const shouldShowBackendMessage = Boolean(message)
+        && (
+          !providerMessage
+          || (
+            messageLower !== 'internal server error'
+            && !messageLower.includes(providerMessageLower)
+            && !providerMessageLower.includes(messageLower)
+          )
+        );
+      updateDanaQrisModalState((prev) => ({
+        ...prev,
+        ...(errorTransaction ? {
+          paymentTransactionId: errorTransaction.id || prev.paymentTransactionId,
+          invoiceId: errorTransaction.invoiceId || prev.invoiceId,
+          invoiceNo: errorTransaction.invoiceNo || prev.invoiceNo,
+          amount: errorTransaction.amount > 0 ? errorTransaction.amount : prev.amount,
+          providerMessage: providerMessage || errorTransaction.providerMessage || prev.providerMessage,
+        } : {}),
+        isGenerating: false,
+        status: 'failed',
+        message: [
+          'Invoice sudah dibuat, tetapi QRIS DANA gagal dibuat.',
+          providerMessage,
+          shouldShowBackendMessage ? message : null,
+          'Buka daftar invoice/piutang untuk melanjutkan pembayaran dengan metode lain atau coba ulang dari backend jika sudah tersedia.',
+        ].filter(Boolean).join('\n'),
+      }));
+      if (errorTransaction) {
+        upsertDanaInvoiceMonitor(errorTransaction, {
+          orderId: Number(orderResult?.backendOrderId || 0) || 0,
+          invoiceNo: String(errorTransaction.invoiceNo || orderResult?.invoiceNo || '').trim(),
+          orderResult,
+          receiptSnapshot: orderPreviewSnapshot,
+        });
+      }
+      openNotice('QRIS DANA Gagal', `Invoice ${orderResult?.invoiceNo || '-'} sudah dibuat, tetapi QRIS gagal dibuat: ${providerMessage || message}`);
+    }
+  };
+
+  const refreshDanaQrisStatus = async (options = {}) => {
+    const paymentTransactionId = Number(danaQrisModalRef.current?.paymentTransactionId || 0) || 0;
+    if (!(paymentTransactionId > 0)) {
+      return;
+    }
+
+    try {
+      if (options?.syncProvider === true) {
+        danaQrisLastProviderSyncRef.current = Date.now();
+      }
+      const response = await fetchDanaQrisPaymentStatus(paymentTransactionId, {
+        syncProvider: options?.syncProvider === true,
+      });
+      await applyDanaQrisStatusFromPayload(response, options?.syncProvider === true ? 'provider' : 'manual');
+    } catch (error) {
+      updateDanaQrisModalState((prev) => ({
+        ...prev,
+        realtimeMessage: `Cek status gagal: ${formatBackendValidationError(error) || error.message}`,
+      }));
+    }
+  };
+
+  const closeDanaQrisModal = () => {
+    if (danaQrisModal.isFinalizing) {
+      return;
+    }
+    if (danaQrisModal.isGenerating || normalizeDanaQrisStatus(danaQrisModal.status) === 'pending') {
+      updateDanaQrisModalState((prev) => ({
+        ...prev,
+        visible: false,
+        message: 'Monitor QRIS ditutup. Pembayaran tetap dipantau dari daftar invoice.',
+      }));
+      return;
+    }
+
+    updateDanaQrisModalState(createDanaQrisModalState());
+  };
+
+  useEffect(() => {
+    danaQrisModalRef.current = danaQrisModal;
+  }, [danaQrisModal]);
+
+  useEffect(() => {
+    const status = normalizeDanaQrisStatus(danaQrisModal.status);
+    if (!danaQrisModal.visible || isDanaQrisTerminalStatus(status)) {
+      return undefined;
+    }
+
+    const tick = setInterval(() => {
+      setDanaQrisTick(Date.now());
+    }, 1000);
+
+    return () => clearInterval(tick);
+  }, [danaQrisModal.visible, danaQrisModal.status]);
+
+  useEffect(() => {
+    const status = normalizeDanaQrisStatus(danaQrisModal.status);
+    if (
+      !danaQrisModal.visible
+      || !(Number(danaQrisModal.invoiceId || 0) > 0)
+      || !(Number(danaQrisModal.paymentTransactionId || 0) > 0)
+      || isDanaQrisTerminalStatus(status)
+    ) {
+      return undefined;
+    }
+
+    return subscribeToInvoicePaymentUpdates(danaQrisModal.invoiceId, {
+      onUpdated: (payload) => {
+        applyDanaQrisStatusFromPayload(payload, 'realtime').catch(() => {});
+      },
+      onUnavailable: () => {
+        updateDanaQrisModalState((prev) => ({
+          ...prev,
+          realtimeAvailable: false,
+          realtimeMessage: 'Realtime belum aktif. POS memakai polling status tiap beberapa detik.',
+        }));
+      },
+      onError: () => {
+        updateDanaQrisModalState((prev) => ({
+          ...prev,
+          realtimeAvailable: false,
+          realtimeMessage: 'Realtime terputus. POS tetap cek status dengan polling.',
+        }));
+      },
+    });
+  }, [
+    danaQrisModal.visible,
+    danaQrisModal.invoiceId,
+    danaQrisModal.paymentTransactionId,
+    danaQrisModal.status,
+  ]);
+
+  useEffect(() => {
+    const status = normalizeDanaQrisStatus(danaQrisModal.status);
+    const paymentTransactionId = Number(danaQrisModal.paymentTransactionId || 0) || 0;
+    if (!danaQrisModal.visible || !(paymentTransactionId > 0) || isDanaQrisTerminalStatus(status)) {
+      return undefined;
+    }
+
+    let stopped = false;
+    const pollStatus = async () => {
+      try {
+        const nowMs = Date.now();
+        const shouldSyncProvider = nowMs - Number(danaQrisLastProviderSyncRef.current || 0) >= 30000;
+        if (shouldSyncProvider) {
+          danaQrisLastProviderSyncRef.current = nowMs;
+        }
+        const response = await fetchDanaQrisPaymentStatus(paymentTransactionId, {
+          syncProvider: shouldSyncProvider,
+        });
+        if (!stopped) {
+          await applyDanaQrisStatusFromPayload(response, shouldSyncProvider ? 'provider' : 'poll');
+        }
+      } catch (error) {
+        if (!stopped) {
+          updateDanaQrisModalState((prev) => ({
+            ...prev,
+            realtimeMessage: `Polling status tertunda: ${formatBackendValidationError(error) || error.message}`,
+          }));
+        }
+      }
+    };
+
+    const interval = setInterval(pollStatus, 5000);
+    return () => {
+      stopped = true;
+      clearInterval(interval);
+    };
+  }, [danaQrisModal.visible, danaQrisModal.paymentTransactionId, danaQrisModal.status]);
+
+  const updateDanaGatewayModalState = (updater) => {
+    setDanaGatewayModal((prev) => {
+      const baseState = prev && typeof prev === 'object'
+        ? prev
+        : createDanaGatewayModalState();
+      return typeof updater === 'function'
+        ? updater(baseState)
+        : { ...baseState, ...updater };
+    });
+  };
+
+  const mergeDanaGatewayTransaction = (transaction, options = {}) => {
+    if (!transaction) {
+      return;
+    }
+
+    upsertDanaInvoiceMonitor(transaction, {
+      orderId: Number(options.orderId || options.backendOrderId || danaGatewayModalRef.current?.backendOrderId || 0) || 0,
+      invoiceNo: String(options.invoiceNo || transaction.invoiceNo || danaGatewayModalRef.current?.invoiceNo || '').trim(),
+      orderResult: options.orderResult !== undefined ? options.orderResult : danaGatewayModalRef.current?.orderResult,
+      receiptSnapshot: options.receiptSnapshot !== undefined ? options.receiptSnapshot : danaGatewayModalRef.current?.receiptSnapshot,
+    });
+
+    updateDanaGatewayModalState((prev) => ({
+      ...prev,
+      ...options,
+      paymentTransactionId: transaction.id || prev.paymentTransactionId,
+      invoiceId: transaction.invoiceId || prev.invoiceId,
+      invoiceNo: transaction.invoiceNo || prev.invoiceNo,
+      amount: transaction.amount > 0 ? transaction.amount : prev.amount,
+      currency: transaction.currency || prev.currency || 'IDR',
+      status: transaction.status || prev.status,
+      providerStatusCode: transaction.providerStatusCode || prev.providerStatusCode,
+      providerMessage: transaction.providerMessage || prev.providerMessage,
+      message: options.message || transaction.providerMessage || transaction.reason || prev.message,
+      checkoutUrl: transaction.checkoutUrl || prev.checkoutUrl,
+      expiresAt: transaction.expiresAt || prev.expiresAt,
+      paidAt: transaction.paidAt || prev.paidAt,
+    }));
+  };
+
+  const finalizeDanaGatewayPaid = async (transaction = null) => {
+    if (danaGatewayPaidHandledRef.current) {
+      return;
+    }
+
+    danaGatewayPaidHandledRef.current = true;
+    const current = danaGatewayModalRef.current || {};
+    updateDanaGatewayModalState((prev) => ({
+      ...prev,
+      status: 'paid',
+      isFinalizing: true,
+      paidAt: transaction?.paidAt || prev.paidAt || new Date().toISOString(),
+      message: 'Pembayaran DANA Payment Gateway berhasil. Nota sedang disiapkan.',
+    }));
+
+    const submitResult = {
+      ...(current.orderResult || {}),
+      ok: true,
+      danaGateway: false,
+      backendOrderId: current.backendOrderId || current.orderResult?.backendOrderId || null,
+      invoiceId: transaction?.invoiceId || current.invoiceId || current.orderResult?.invoiceId || null,
+      invoiceNo: transaction?.invoiceNo || current.invoiceNo || current.orderResult?.invoiceNo || '-',
+      receipt: current.orderResult?.receipt || null,
+    };
+
+    try {
+      setModalPilihPembayaran(false);
+      setModalDetailPesanan(false);
+      removeDanaInvoiceMonitor(transaction?.invoiceId || current.invoiceId || current.orderResult?.invoiceId || null);
+      await loadDraftInvoices().catch(() => {});
+      await printOrderPreview(current.receiptSnapshot || orderPreviewSnapshot, submitResult);
+      resetTransaction();
+      updateDanaGatewayModalState((prev) => ({
+        ...prev,
+        isFinalizing: false,
+        status: 'paid',
+        message: 'Pembayaran berhasil. Invoice sudah lunas dan nota sudah diproses.',
+      }));
+    } catch (error) {
+      resetTransaction();
+      removeDanaInvoiceMonitor(transaction?.invoiceId || current.invoiceId || current.orderResult?.invoiceId || null);
+      updateDanaGatewayModalState((prev) => ({
+        ...prev,
+        isFinalizing: false,
+        status: 'paid',
+        message: 'Pembayaran berhasil, tetapi cetak nota perlu dicoba ulang.',
+      }));
+      openNotice(
+        'Pembayaran DANA Berhasil',
+        `Invoice sudah lunas, tetapi nota gagal dicetak otomatis: ${error.message}`,
+      );
+    }
+  };
+
+  const openDanaGatewayCheckout = async (checkoutUrl, options = {}) => {
+    const targetUrl = String(checkoutUrl || '').trim();
+    if (!targetUrl) {
+      if (options?.showNotice !== false) {
+        openNotice('DANA Payment Gateway', 'URL checkout DANA belum tersedia dari backend.');
+      }
+      return false;
+    }
+
+    const opened = await openExternalUrl(targetUrl);
+    updateDanaGatewayModalState((prev) => ({
+      ...prev,
+      checkoutUrl: targetUrl,
+      message: opened
+        ? 'Checkout DANA sudah dibuka. Tunggu sampai pembayaran paid.'
+        : prev.message,
+      realtimeMessage: opened
+        ? prev.realtimeMessage
+        : 'Checkout URL siap, tetapi browser gagal dibuka otomatis. Gunakan tombol buka halaman pembayaran.',
+    }));
+
+    if (!opened && options?.showNotice !== false) {
+      openNotice('DANA Payment Gateway', 'Browser tidak bisa dibuka otomatis. Gunakan tombol Buka Halaman Pembayaran di monitor DANA.');
+    }
+
+    return opened;
+  };
+
+  const applyDanaGatewayStatusFromPayload = async (payload, source = 'poll') => {
+    const transaction = extractDanaGatewayTransaction(payload);
+    if (!transaction) {
+      return;
+    }
+
+    const current = danaGatewayModalRef.current || {};
+    if (current.paymentTransactionId > 0 && transaction.id > 0 && Number(transaction.id) !== Number(current.paymentTransactionId)) {
+      if (
+        current.invoiceId > 0
+        && transaction.invoiceId > 0
+        && Number(transaction.invoiceId) === Number(current.invoiceId)
+        && (transaction.status === 'paid' || normalizeDanaQrisStatus(transaction.invoiceStatus) === 'paid')
+      ) {
+        await finalizeDanaGatewayPaid(transaction);
+      }
+      return;
+    }
+    if (current.invoiceId > 0 && transaction.invoiceId > 0 && Number(transaction.invoiceId) !== Number(current.invoiceId)) {
+      return;
+    }
+
+    const realtimeAvailable = source === 'realtime' ? true : current.realtimeAvailable;
+    upsertDanaInvoiceMonitor(transaction, {
+      orderId: Number(current.backendOrderId || 0) || 0,
+      invoiceNo: String(transaction.invoiceNo || current.invoiceNo || '').trim(),
+      orderResult: current.orderResult || null,
+      receiptSnapshot: current.receiptSnapshot || null,
+    });
+    mergeDanaGatewayTransaction(transaction, {
+      isGenerating: false,
+      message: source === 'realtime'
+        ? current.message
+        : buildDanaStatusUpdateMessage(transaction, source, 'DANA Payment Gateway'),
+      realtimeAvailable,
+      realtimeMessage: source === 'realtime'
+        ? 'Realtime aktif. Status pembayaran diterima dari websocket.'
+        : source === 'provider'
+          ? 'Status diperbarui dari Query Payment DANA.'
+          : current.realtimeMessage,
+    });
+
+    if (transaction.status === 'paid' || normalizeDanaQrisStatus(transaction.invoiceStatus) === 'paid') {
+      await finalizeDanaGatewayPaid(transaction);
+    }
+  };
+
+  const startDanaGatewayPayment = async (orderResult) => {
+    const invoiceId = Number(orderResult?.invoiceId || 0) || 0;
+    if (!(invoiceId > 0)) {
+      openNotice(
+        'DANA Payment Gateway',
+        'Order berhasil dibuat, tetapi ID invoice tidak ditemukan dari response backend. Buka daftar invoice dan lanjutkan pembayaran manual.',
+      );
+      return;
+    }
+
+    danaGatewayPaidHandledRef.current = false;
+    danaGatewayLastProviderSyncRef.current = 0;
+    const initialState = {
+      ...createDanaGatewayModalState(),
+      visible: true,
+      isGenerating: true,
+      invoiceId,
+      invoiceNo: String(orderResult?.invoiceNo || '').trim(),
+      backendOrderId: Number(orderResult?.backendOrderId || 0) || 0,
+      amount: Number(orderResult?.amount || orderPreviewSnapshot?.grandTotal || 0) || 0,
+      status: 'pending',
+      message: 'Membuat checkout DANA sesuai full sisa invoice...',
+      orderResult,
+      receiptSnapshot: orderPreviewSnapshot,
+    };
+    updateDanaGatewayModalState(initialState);
+    setDanaGatewayTick(Date.now());
+
+    try {
+      const response = await createDanaGatewayPayment(invoiceId, orderResult?.gatewayPaymentPayload || {});
+      const transaction = extractDanaGatewayTransaction(response);
+      if (!transaction || !(transaction.id > 0)) {
+        throw new Error('Response DANA Payment Gateway tidak memuat transaksi pembayaran.');
+      }
+
+      const hasCheckoutUrl = Boolean(transaction.checkoutUrl);
+      mergeDanaGatewayTransaction(transaction, {
+        isGenerating: false,
+        orderId: Number(orderResult?.backendOrderId || 0) || 0,
+        orderResult,
+        receiptSnapshot: orderPreviewSnapshot,
+        message: transaction.status === 'pending'
+          ? (hasCheckoutUrl
+              ? 'Checkout DANA siap dibuka. Lanjutkan pembayaran pelanggan melalui halaman DANA.'
+              : (transaction.providerMessage || 'Create Order masih pending di DANA. POS akan mencoba ulang otomatis.'))
+          : (transaction.providerMessage || 'Status DANA berhasil diterima.'),
+      });
+
+      if (hasCheckoutUrl) {
+        await openDanaGatewayCheckout(transaction.checkoutUrl, { showNotice: false });
+      }
+
+      if (transaction.status === 'paid') {
+        await finalizeDanaGatewayPaid(transaction);
+      }
+    } catch (error) {
+      const message = String(formatBackendValidationError(error) || error?.message || 'DANA Payment Gateway gagal dibuat.').trim();
+      const errorTransaction = extractDanaGatewayTransaction(error?.body);
+      const providerMessage = String(
+        errorTransaction?.providerMessage
+        || error?.body?.provider_message
+        || error?.body?.error
+        || error?.body?.data?.last_error
+        || error?.body?.data?.provider_status_message
+        || ''
+      ).trim();
+      const messageLower = message.toLowerCase();
+      const providerMessageLower = providerMessage.toLowerCase();
+      const shouldShowBackendMessage = Boolean(message)
+        && (
+          !providerMessage
+          || (
+            messageLower !== 'internal server error'
+            && !messageLower.includes(providerMessageLower)
+            && !providerMessageLower.includes(messageLower)
+          )
+        );
+      updateDanaGatewayModalState((prev) => ({
+        ...prev,
+        ...(errorTransaction ? {
+          paymentTransactionId: errorTransaction.id || prev.paymentTransactionId,
+          invoiceId: errorTransaction.invoiceId || prev.invoiceId,
+          invoiceNo: errorTransaction.invoiceNo || prev.invoiceNo,
+          amount: errorTransaction.amount > 0 ? errorTransaction.amount : prev.amount,
+          providerMessage: providerMessage || errorTransaction.providerMessage || prev.providerMessage,
+          checkoutUrl: errorTransaction.checkoutUrl || prev.checkoutUrl,
+        } : {}),
+        isGenerating: false,
+        status: 'failed',
+        message: [
+          'Invoice sudah dibuat, tetapi checkout DANA gagal dibuat.',
+          providerMessage,
+          shouldShowBackendMessage ? message : null,
+          'Buka daftar invoice/piutang untuk melanjutkan pembayaran dengan metode lain atau coba ulang dari backend jika sudah tersedia.',
+        ].filter(Boolean).join('\n'),
+      }));
+      if (errorTransaction) {
+        upsertDanaInvoiceMonitor(errorTransaction, {
+          orderId: Number(orderResult?.backendOrderId || 0) || 0,
+          invoiceNo: String(errorTransaction.invoiceNo || orderResult?.invoiceNo || '').trim(),
+          orderResult,
+          receiptSnapshot: orderPreviewSnapshot,
+        });
+      }
+      openNotice('DANA Gateway Gagal', `Invoice ${orderResult?.invoiceNo || '-'} sudah dibuat, tetapi checkout DANA gagal dibuat: ${providerMessage || message}`);
+    }
+  };
+
+  const refreshDanaGatewayStatus = async (options = {}) => {
+    const paymentTransactionId = Number(danaGatewayModalRef.current?.paymentTransactionId || 0) || 0;
+    if (!(paymentTransactionId > 0)) {
+      return;
+    }
+
+    try {
+      if (options?.syncProvider === true) {
+        danaGatewayLastProviderSyncRef.current = Date.now();
+      }
+      const response = await fetchDanaQrisPaymentStatus(paymentTransactionId, {
+        syncProvider: options?.syncProvider === true,
+      });
+      await applyDanaGatewayStatusFromPayload(response, options?.syncProvider === true ? 'provider' : 'manual');
+    } catch (error) {
+      updateDanaGatewayModalState((prev) => ({
+        ...prev,
+        realtimeMessage: `Cek status gagal: ${formatBackendValidationError(error) || error.message}`,
+      }));
+    }
+  };
+
+  const closeDanaGatewayModal = () => {
+    if (danaGatewayModal.isFinalizing) {
+      return;
+    }
+    if (danaGatewayModal.isGenerating || normalizeDanaQrisStatus(danaGatewayModal.status) === 'pending') {
+      updateDanaGatewayModalState((prev) => ({
+        ...prev,
+        visible: false,
+        message: 'Monitor DANA ditutup. Pembayaran tetap dipantau dari daftar invoice.',
+      }));
+      return;
+    }
+
+    updateDanaGatewayModalState(createDanaGatewayModalState());
+  };
+
+  useEffect(() => {
+    danaGatewayModalRef.current = danaGatewayModal;
+  }, [danaGatewayModal]);
+
+  useEffect(() => {
+    const status = normalizeDanaQrisStatus(danaGatewayModal.status);
+    if (!danaGatewayModal.visible || isDanaQrisTerminalStatus(status)) {
+      return undefined;
+    }
+
+    const tick = setInterval(() => {
+      setDanaGatewayTick(Date.now());
+    }, 1000);
+
+    return () => clearInterval(tick);
+  }, [danaGatewayModal.visible, danaGatewayModal.status]);
+
+  useEffect(() => {
+    const status = normalizeDanaQrisStatus(danaGatewayModal.status);
+    if (
+      !danaGatewayModal.visible
+      || !(Number(danaGatewayModal.invoiceId || 0) > 0)
+      || !(Number(danaGatewayModal.paymentTransactionId || 0) > 0)
+      || isDanaQrisTerminalStatus(status)
+    ) {
+      return undefined;
+    }
+
+    return subscribeToInvoicePaymentUpdates(danaGatewayModal.invoiceId, {
+      onUpdated: (payload) => {
+        applyDanaGatewayStatusFromPayload(payload, 'realtime').catch(() => {});
+      },
+      onUnavailable: () => {
+        updateDanaGatewayModalState((prev) => ({
+          ...prev,
+          realtimeAvailable: false,
+          realtimeMessage: 'Realtime belum aktif. POS memakai polling status tiap beberapa detik.',
+        }));
+      },
+      onError: () => {
+        updateDanaGatewayModalState((prev) => ({
+          ...prev,
+          realtimeAvailable: false,
+          realtimeMessage: 'Realtime terputus. POS tetap cek status dengan polling.',
+        }));
+      },
+    });
+  }, [
+    danaGatewayModal.visible,
+    danaGatewayModal.invoiceId,
+    danaGatewayModal.paymentTransactionId,
+    danaGatewayModal.status,
+  ]);
+
+  useEffect(() => {
+    const status = normalizeDanaQrisStatus(danaGatewayModal.status);
+    const paymentTransactionId = Number(danaGatewayModal.paymentTransactionId || 0) || 0;
+    if (!danaGatewayModal.visible || !(paymentTransactionId > 0) || isDanaQrisTerminalStatus(status)) {
+      return undefined;
+    }
+
+    let stopped = false;
+    const pollStatus = async () => {
+      try {
+        const nowMs = Date.now();
+        const shouldSyncProvider = nowMs - Number(danaGatewayLastProviderSyncRef.current || 0) >= 30000;
+        if (shouldSyncProvider) {
+          danaGatewayLastProviderSyncRef.current = nowMs;
+        }
+        const response = await fetchDanaQrisPaymentStatus(paymentTransactionId, {
+          syncProvider: shouldSyncProvider,
+        });
+        if (!stopped) {
+          await applyDanaGatewayStatusFromPayload(response, shouldSyncProvider ? 'provider' : 'poll');
+        }
+      } catch (error) {
+        if (!stopped) {
+          updateDanaGatewayModalState((prev) => ({
+            ...prev,
+            realtimeMessage: `Polling status tertunda: ${formatBackendValidationError(error) || error.message}`,
+          }));
+        }
+      }
+    };
+
+    const interval = setInterval(pollStatus, 5000);
+    return () => {
+      stopped = true;
+      clearInterval(interval);
+    };
+  }, [danaGatewayModal.visible, danaGatewayModal.paymentTransactionId, danaGatewayModal.status]);
+
+  useEffect(() => {
+    const hasPendingBackgroundMonitor = Object.values(activeDanaInvoiceMonitors || {}).some((summary) => (
+      normalizeDanaQrisStatus(summary?.status) === 'pending'
+    ));
+    if (!hasPendingBackgroundMonitor) {
+      return undefined;
+    }
+
+    const tick = setInterval(() => {
+      setProviderPaymentTick(Date.now());
+    }, 1000);
+
+    return () => clearInterval(tick);
+  }, [activeDanaInvoiceMonitors]);
+
+  useEffect(() => {
+    const monitorEntries = Object.values(activeDanaInvoiceMonitors || {}).filter((summary) => {
+      const paymentTransactionId = Number(summary?.id || 0) || 0;
+      return paymentTransactionId > 0 && normalizeDanaQrisStatus(summary?.status) === 'pending';
+    });
+    if (monitorEntries.length === 0) {
+      return undefined;
+    }
+
+    let stopped = false;
+    const pollPendingProviderPayments = async () => {
+      for (const summary of monitorEntries) {
+        if (stopped) {
+          return;
+        }
+
+        const invoiceId = Number(summary?.invoiceId || 0) || 0;
+        const paymentTransactionId = Number(summary?.id || 0) || 0;
+        if (!(invoiceId > 0) || !(paymentTransactionId > 0)) {
+          continue;
+        }
+
+        const handledByVisibleModal = (
+          danaQrisModal.visible
+          && Number(danaQrisModal.invoiceId || 0) === invoiceId
+        ) || (
+          danaGatewayModal.visible
+          && Number(danaGatewayModal.invoiceId || 0) === invoiceId
+        );
+        if (handledByVisibleModal) {
+          continue;
+        }
+
+        try {
+          const nowMs = Date.now();
+          const lastProviderSyncAt = Number(danaInvoiceMonitorProviderSyncRef.current[paymentTransactionId] || 0) || 0;
+          const shouldSyncProvider = nowMs - lastProviderSyncAt >= 30000;
+          if (shouldSyncProvider) {
+            danaInvoiceMonitorProviderSyncRef.current[paymentTransactionId] = nowMs;
+          }
+
+          const response = await fetchDanaQrisPaymentStatus(paymentTransactionId, {
+            syncProvider: shouldSyncProvider,
+          });
+          if (!stopped) {
+            await applyDanaProviderPaymentPayloadInBackground(response, shouldSyncProvider ? 'provider' : 'poll');
+          }
+        } catch (_error) {
+          // Background monitor sengaja diam agar kasir tetap bisa lanjut kerja.
+        }
+      }
+    };
+
+    pollPendingProviderPayments().catch(() => {});
+    const interval = setInterval(pollPendingProviderPayments, 5000);
+    return () => {
+      stopped = true;
+      clearInterval(interval);
+    };
+  }, [
+    activeDanaInvoiceMonitors,
+    danaQrisModal.visible,
+    danaQrisModal.invoiceId,
+    danaGatewayModal.visible,
+    danaGatewayModal.invoiceId,
+  ]);
 
   useEffect(() => {
     if (noticeAutoCloseRef.current) {
@@ -7678,6 +9862,14 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       : {}),
     [selectedBookPrintRuleConfig],
   );
+  const selectedBookConfigStatus = useMemo(
+    () => String(selectedBookPrintRuleConfig?.config_status || '').trim(),
+    [selectedBookPrintRuleConfig],
+  );
+  const selectedBookConfigMessage = useMemo(
+    () => String(selectedBookPrintRuleConfig?.config_message || '').trim(),
+    [selectedBookPrintRuleConfig],
+  );
   const selectedBookFlowContext = useMemo(
     () => getBookWizardProductContext(selectedBookPrintRuleConfig),
     [selectedBookPrintRuleConfig],
@@ -7724,11 +9916,14 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       : {};
   }, [bookPrintSide, selectedBookFlowContext, selectedBookDefaults]);
   const selectedBookInsideMaterialOptions = useMemo(() => {
-    const configuredRows = Array.isArray(selectedBookPrintRuleConfig?.material_bindings?.inside_candidate_rows)
-      ? selectedBookPrintRuleConfig.material_bindings.inside_candidate_rows
+    const bindings = selectedBookPrintRuleConfig?.material_bindings || {};
+    const hasInsideRows = Array.isArray(bindings?.inside_candidate_rows);
+    const hasCandidateRows = Array.isArray(bindings?.candidate_rows);
+    const configuredRows = hasInsideRows
+      ? bindings.inside_candidate_rows
       : (
-        Array.isArray(selectedBookPrintRuleConfig?.material_bindings?.candidate_rows)
-          ? selectedBookPrintRuleConfig.material_bindings.candidate_rows
+        hasCandidateRows
+          ? bindings.candidate_rows
           : []
       );
     const preferredRows = configuredRows
@@ -7739,11 +9934,13 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       return filterBookMaterialOptionsByFlowContext(preferredRows, selectedBookComponentFlowContext);
     }
 
-    const configuredIds = Array.isArray(selectedBookPrintRuleConfig?.material_bindings?.inside_candidate_ids)
-      ? selectedBookPrintRuleConfig.material_bindings.inside_candidate_ids.map((id) => Number(id)).filter((id) => id > 0)
+    const hasInsideIds = Array.isArray(bindings?.inside_candidate_ids);
+    const hasCandidateIds = Array.isArray(bindings?.candidate_ids);
+    const configuredIds = hasInsideIds
+      ? bindings.inside_candidate_ids.map((id) => Number(id)).filter((id) => id > 0)
       : (
-        Array.isArray(selectedBookPrintRuleConfig?.material_bindings?.candidate_ids)
-          ? selectedBookPrintRuleConfig.material_bindings.candidate_ids.map((id) => Number(id)).filter((id) => id > 0)
+        hasCandidateIds
+          ? bindings.candidate_ids.map((id) => Number(id)).filter((id) => id > 0)
           : []
       );
     const candidateIds = configuredIds;
@@ -7756,6 +9953,10 @@ const SalesScreen = ({ currentUser, onLogout }) => {
 
     if (preferredIdRows.length > 0) {
       return filterBookMaterialOptionsByFlowContext(preferredIdRows, selectedBookComponentFlowContext);
+    }
+
+    if (hasInsideRows || hasCandidateRows || hasInsideIds || hasCandidateIds) {
+      return [];
     }
 
     const fallbackRows = (Array.isArray(materials) ? materials : [])
@@ -7771,11 +9972,14 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     return filterBookMaterialOptionsByFlowContext(fallbackRows, selectedBookComponentFlowContext);
   }, [selectedBookPrintRuleConfig, materials, selectedBookComponentFlowContext]);
   const selectedBookCoverMaterialOptions = useMemo(() => {
-    const configuredRows = Array.isArray(selectedBookPrintRuleConfig?.material_bindings?.cover_candidate_rows)
-      ? selectedBookPrintRuleConfig.material_bindings.cover_candidate_rows
+    const bindings = selectedBookPrintRuleConfig?.material_bindings || {};
+    const hasCoverRows = Array.isArray(bindings?.cover_candidate_rows);
+    const hasCandidateRows = Array.isArray(bindings?.candidate_rows);
+    const configuredRows = hasCoverRows
+      ? bindings.cover_candidate_rows
       : (
-        Array.isArray(selectedBookPrintRuleConfig?.material_bindings?.candidate_rows)
-          ? selectedBookPrintRuleConfig.material_bindings.candidate_rows
+        hasCandidateRows
+          ? bindings.candidate_rows
           : []
       );
     const preferredRows = configuredRows
@@ -7786,11 +9990,13 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       return filterBookMaterialOptionsByFlowContext(preferredRows, selectedBookComponentFlowContext);
     }
 
-    const configuredIds = Array.isArray(selectedBookPrintRuleConfig?.material_bindings?.cover_candidate_ids)
-      ? selectedBookPrintRuleConfig.material_bindings.cover_candidate_ids.map((id) => Number(id)).filter((id) => id > 0)
+    const hasCoverIds = Array.isArray(bindings?.cover_candidate_ids);
+    const hasCandidateIds = Array.isArray(bindings?.candidate_ids);
+    const configuredIds = hasCoverIds
+      ? bindings.cover_candidate_ids.map((id) => Number(id)).filter((id) => id > 0)
       : (
-        Array.isArray(selectedBookPrintRuleConfig?.material_bindings?.candidate_ids)
-          ? selectedBookPrintRuleConfig.material_bindings.candidate_ids.map((id) => Number(id)).filter((id) => id > 0)
+        hasCandidateIds
+          ? bindings.candidate_ids.map((id) => Number(id)).filter((id) => id > 0)
           : []
       );
     const candidateIds = configuredIds;
@@ -7803,6 +10009,10 @@ const SalesScreen = ({ currentUser, onLogout }) => {
 
     if (preferredIdRows.length > 0) {
       return filterBookMaterialOptionsByFlowContext(preferredIdRows, selectedBookComponentFlowContext);
+    }
+
+    if (hasCoverRows || hasCandidateRows || hasCoverIds || hasCandidateIds) {
+      return [];
     }
 
     const fallbackRows = (Array.isArray(materials) ? materials : [])
@@ -8848,6 +11058,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
 
     if (!backendReady) {
       setDraftInvoices(queueRows);
+      hydrateDanaInvoiceMonitorsFromRows(queueRows);
       return;
     }
     try {
@@ -8889,12 +11100,14 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       });
       const mergedRows = [...queueRows, ...approvalListRows, ...rows];
       setDraftInvoices(mergedRows);
+      hydrateDanaInvoiceMonitorsFromRows(mergedRows);
 
       if (invoiceLoadError && mergedRows.length === 0) {
         openNotice('Invoice', `Gagal memuat invoice: ${invoiceLoadError.message}`);
       }
     } catch (error) {
       setDraftInvoices(queueRows);
+      hydrateDanaInvoiceMonitorsFromRows(queueRows);
       if (queueRows.length === 0) {
         openNotice('Invoice', `Gagal memuat invoice: ${error.message}`);
       }
@@ -8908,6 +11121,26 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       loadDraftInvoices();
     }
   }, [activeMenu, backendReady]);
+
+  useEffect(() => {
+    if (!backendReady) {
+      return undefined;
+    }
+    if (!isInvoiceAreaMenu(activeMenu) && !invoiceDetailModal.visible) {
+      return undefined;
+    }
+
+    const timer = setInterval(() => {
+      if (isInvoiceAreaMenu(activeMenu)) {
+        loadDraftInvoices().catch(() => {});
+      }
+      if (invoiceDetailModal.visible && invoiceDetailModal.row) {
+        handleViewInvoiceDetail(invoiceDetailModal.row, { silent: true }).catch(() => {});
+      }
+    }, 12000);
+
+    return () => clearInterval(timer);
+  }, [activeMenu, backendReady, invoiceDetailModal.row, invoiceDetailModal.visible]);
 
   useEffect(() => {
     const timer = setInterval(() => {
@@ -8981,9 +11214,37 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     }
   };
 
+  const loadProofingItems = async (override = {}) => {
+    if (!backendReady) {
+      setProofingRows([]);
+      return;
+    }
+
+    const status = String(override?.status || proofingStatusFilter || 'all');
+    const search = String(override?.search || proofingSearch || '').trim();
+    try {
+      setIsProofingLoading(true);
+      const payload = await fetchPosProofings({
+        status,
+        search,
+      });
+      setProofingRows(toDataRows(payload));
+    } catch (error) {
+      setProofingRows([]);
+      openNotice('Proofing', `Gagal memuat queue proofing: ${error.message}`);
+    } finally {
+      setIsProofingLoading(false);
+    }
+  };
+
   useEffect(() => {
     if (activeMenu === 'production') {
       loadProductionItems();
+    }
+  }, [activeMenu, backendReady]);
+  useEffect(() => {
+    if (activeMenu === 'proofing') {
+      loadProofingItems();
     }
   }, [activeMenu, backendReady]);
   useEffect(() => {
@@ -9042,6 +11303,17 @@ const SalesScreen = ({ currentUser, onLogout }) => {
 
     return () => clearTimeout(timeout);
   }, [productionSearch, productionStatusFilter, activeMenu]);
+  useEffect(() => {
+    if (activeMenu !== 'proofing') {
+      return;
+    }
+
+    const timeout = setTimeout(() => {
+      loadProofingItems();
+    }, 350);
+
+    return () => clearTimeout(timeout);
+  }, [proofingSearch, proofingStatusFilter, activeMenu]);
   const checkProductionRealtimeUpdates = async () => {
     if (!backendReady || productionPollingRef.current) {
       return;
@@ -9140,6 +11412,17 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     return () => clearInterval(timer);
   }, [activeMenu, productionStatusFilter, productionSearch, backendReady]);
   useEffect(() => {
+    if (activeMenu !== 'proofing' || !backendReady) {
+      return undefined;
+    }
+
+    const timer = setInterval(() => {
+      loadProofingItems();
+    }, 12000);
+
+    return () => clearInterval(timer);
+  }, [activeMenu, proofingStatusFilter, proofingSearch, backendReady]);
+  useEffect(() => {
     return () => {
       toneTimeoutsRef.current.forEach((timer) => clearTimeout(timer));
       toneTimeoutsRef.current = [];
@@ -9191,6 +11474,155 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     }
   };
 
+  const handleOpenProofingPublicLink = async (row) => {
+    const proofingId = Number(row?.id || 0);
+    if (!(proofingId > 0)) {
+      return;
+    }
+
+    try {
+      const detailPayload = await fetchPosProofingDetail(proofingId);
+      const detailRow = detailPayload?.data && typeof detailPayload.data === 'object'
+        ? detailPayload.data
+        : detailPayload;
+      const targetUrl = String(detailRow?.proofing_url || row?.proofing_url || '').trim();
+      if (!targetUrl) {
+        throw new Error('Link proofing customer belum tersedia.');
+      }
+      const opened = await openExternalUrl(targetUrl);
+      if (!opened) {
+        throw new Error('Browser/WhatsApp tidak bisa membuka link proofing.');
+      }
+    } catch (error) {
+      openNotice('Proofing', `Gagal membuka link proofing: ${error.message}`);
+    }
+  };
+
+  const handleViewProofingHistory = async (row) => {
+    const proofingId = Number(row?.id || 0);
+    if (!(proofingId > 0)) {
+      return;
+    }
+
+    try {
+      const payload = await fetchPosProofingHistory(proofingId);
+      const proofingRow = payload?.proofing && typeof payload.proofing === 'object'
+        ? payload.proofing
+        : row;
+      const historyRows = Array.isArray(payload?.data) ? payload.data : [];
+      openNotice(
+        'History Proofing',
+        buildProofingHistoryNoticeMessage(proofingRow, historyRows),
+      );
+    } catch (error) {
+      openNotice('Proofing', `Gagal memuat history proofing #${proofingId}: ${error.message}`);
+    }
+  };
+
+  const handleUploadProofingFile = async (row, mode = 'preview') => {
+    const proofingId = Number(row?.id || 0);
+    if (!(proofingId > 0)) {
+      return;
+    }
+
+    try {
+      const accept = mode === 'final'
+        ? '.cdr,.ai,.pdf,.eps,.jpg,.jpeg,.png,.webp'
+        : '.jpg,.jpeg,.png,.webp,.pdf';
+      const file = await pickBrowserFile({ accept });
+      if (!file) {
+        return;
+      }
+
+      setProcessingProofingId(proofingId);
+      if (mode === 'final') {
+        await uploadPosProofingFinalFile(proofingId, file);
+      } else {
+        await uploadPosProofingPreview(proofingId, file);
+      }
+      await loadProofingItems();
+      openNotice(
+        'Proofing',
+        `${mode === 'final' ? 'File final' : 'Preview'} proofing #${proofingId} berhasil diupload.`,
+        null,
+        {
+          showDefaultAction: false,
+          autoCloseMs: 1600,
+        },
+      );
+    } catch (error) {
+      openNotice(
+        'Proofing',
+        `Gagal upload ${mode === 'final' ? 'file final' : 'preview'} proofing #${proofingId}: ${error.message}`,
+      );
+    } finally {
+      setProcessingProofingId(null);
+    }
+  };
+
+  const handleSendProofingWhatsapp = async (row) => {
+    const proofingId = Number(row?.id || 0);
+    if (!(proofingId > 0)) {
+      return;
+    }
+
+    try {
+      setProcessingProofingId(proofingId);
+      const payload = await sendPosProofingWhatsapp(proofingId);
+      const whatsappUrl = String(payload?.whatsapp?.whatsapp_url || '').trim();
+      await loadProofingItems();
+      if (!whatsappUrl) {
+        throw new Error('Link WhatsApp tidak ditemukan dari backend.');
+      }
+      const opened = await openExternalUrl(whatsappUrl);
+      if (!opened) {
+        throw new Error('WhatsApp / browser tidak bisa membuka link wa.me.');
+      }
+      openNotice(
+        'Proofing',
+        `Link WhatsApp proofing #${proofingId} siap dikirim ke customer.`,
+        null,
+        {
+          showDefaultAction: false,
+          autoCloseMs: 1600,
+        },
+      );
+    } catch (error) {
+      openNotice('Proofing', `Gagal menyiapkan WhatsApp proofing #${proofingId}: ${error.message}`);
+    } finally {
+      setProcessingProofingId(null);
+    }
+  };
+
+  const handleReleaseProofingToProduction = async (row) => {
+    const proofingId = Number(row?.id || 0);
+    if (!(proofingId > 0)) {
+      return;
+    }
+
+    try {
+      setProcessingProofingId(proofingId);
+      await releasePosProofingToProduction(proofingId);
+      await Promise.all([
+        loadProofingItems(),
+        loadProductionItems().catch(() => {}),
+      ]);
+      openNotice(
+        'Proofing',
+        `Item proofing #${proofingId} berhasil dilepas ke produksi.`,
+        null,
+        {
+          showDefaultAction: false,
+          autoCloseMs: 1600,
+        },
+      );
+    } catch (error) {
+      openNotice('Proofing', `Gagal melepas proofing #${proofingId} ke produksi: ${error.message}`);
+    } finally {
+      setProcessingProofingId(null);
+    }
+  };
+
   const consumeQueuedDraftByQueueId = (queueId) => {
     const normalizedQueueId = String(queueId || '').trim();
     if (!normalizedQueueId) {
@@ -9229,6 +11661,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         .filter((item) => Number(item?.backendItem?.product_id || 0) > 0);
 
       setCartItems(cartFromQueue);
+      setSelectedProofingFlow(deriveProofingFlowFromCartItems(cartFromQueue));
       setCurrentDraftSourceId(null);
       setCurrentQueuedDraftQueueId(queueId || null);
       setOrderNumber('');
@@ -9324,6 +11757,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       }
 
       setCartItems(cartFromDraft);
+      setSelectedProofingFlow(deriveProofingFlowFromCartItems(cartFromDraft));
       setCurrentDraftSourceId(selectedId);
       setCurrentQueuedDraftQueueId(null);
       setOrderNumber('');
@@ -9909,6 +12343,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     setPaymentMethod('');
     setPaymentAmount('');
     setPaymentNotes('');
+    setSelectedProofingFlow(PROOFING_FLOW_NONE);
     setSelectedBankAccountId(null);
     setLastSyncInfo('');
     setQueueCount(loadOrderQueue().length);
@@ -10480,6 +12915,24 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       return null;
     }
 
+    if (cartHasProofingEligibleItems && selectedProofingFlow !== PROOFING_FLOW_NONE) {
+      const rawCustomerPhone = String(
+        selectedCustomer?.phone
+        || selectedCustomer?.mobile
+        || selectedCustomer?.whatsapp
+        || ''
+      ).trim();
+      try {
+        normalizeIndonesianPhone(rawCustomerPhone, { allowEmpty: false });
+      } catch (error) {
+        openNotice(
+          'Flow Proofing',
+          `Nomor WhatsApp customer wajib valid sebelum order memakai flow ${proofingFlowToLabel(selectedProofingFlow)}.`,
+        );
+        return null;
+      }
+    }
+
     const negotiationViolation = cartItems.find((item) => {
       const backendItem = item?.backendItem || {};
       const negotiatedPrice = Number(backendItem?.negotiated_price || 0);
@@ -10583,6 +13036,17 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       || mapPaymentMethodToBackend(canonicalMethodLabel)
       || '',
     ).trim();
+    const usingDanaQris = !isDraftMode
+      && options?.danaQris === true
+      && normalizePaymentMethodType(
+        selectedMethodConfig?.type
+        || selectedMethodConfig?.code
+        || canonicalMethodLabel
+        || method
+      ) === 'qris';
+    const usingDanaGateway = !isDraftMode
+      && options?.danaGateway === true
+      && isDanaGatewayPaymentMethodConfig(selectedMethodConfig, canonicalMethodLabel || method);
     const selectedBankId = Number(options?.bankAccountId || 0);
     const currentMethodAccounts = Array.isArray(selectedMethodConfig?.accounts)
       ? selectedMethodConfig.accounts.map((row) => normalizeBankAccountRow(row))
@@ -10827,6 +13291,28 @@ const SalesScreen = ({ currentUser, onLogout }) => {
           ?? item?.backendItem?.requires_design
           ?? true,
         );
+        const effectiveProofingFlow = originalRequiresDesign && cartHasProofingEligibleItems
+          ? normalizeProofingFlow(selectedProofingFlow, selectedProofingFlow !== PROOFING_FLOW_NONE)
+          : PROOFING_FLOW_NONE;
+        const effectiveProofingRequired = effectiveProofingFlow !== PROOFING_FLOW_NONE;
+
+        mergedSnapshot.original_flow = {
+          ...(parseJsonObject(mergedSnapshot?.original_flow) || {}),
+          requires_production: originalRequiresProduction,
+          requires_design: originalRequiresDesign,
+          proofing_required: effectiveProofingRequired,
+          proofing_flow: effectiveProofingFlow,
+        };
+        mergedSnapshot.draft_form = {
+          ...(parseJsonObject(mergedSnapshot?.draft_form) || {}),
+          proofing_required: effectiveProofingRequired,
+          proofing_flow: effectiveProofingFlow,
+        };
+        mergedSnapshot.cart_restore = {
+          ...(parseJsonObject(mergedSnapshot?.cart_restore) || {}),
+          proofing_required: effectiveProofingRequired,
+          proofing_flow: effectiveProofingFlow,
+        };
 
         return enforceDesignFirstFlow({
           ...item.backendItem,
@@ -10843,22 +13329,24 @@ const SalesScreen = ({ currentUser, onLogout }) => {
           note: toLabel(item?.backendItem?.note, item?.note, item?.notes, '-'),
           requires_production: isDraftMode ? false : originalRequiresProduction,
           requires_design: isDraftMode ? false : originalRequiresDesign,
+          proofing_required: effectiveProofingRequired,
+          proofing_flow: effectiveProofingFlow,
           production_status: isDraftMode ? 'not_required' : item?.backendItem?.production_status,
           spec_snapshot: mergedSnapshot,
         });
       });
 
-      const paymentTransactionType = isDraftMode
+      const paymentTransactionType = isDraftMode || usingDanaQris || usingDanaGateway
         ? 'unpaid'
         : transactionType;
-      const paymentAmountPayload = isDraftMode
+      const paymentAmountPayload = isDraftMode || usingDanaQris || usingDanaGateway
         ? 0
         : transactionType === 'full'
             ? grandTotal
             : transactionType === 'dp'
               ? Math.min(paidAmount, grandTotal)
               : 0;
-      if (!isDraftMode && !usingCustomerDeposit && selectedMethodConfig?.requiresPaymentAccount && paymentAmountPayload > 0 && !(resolvedPaymentAccountId > 0)) {
+      if (!isDraftMode && !usingCustomerDeposit && selectedMethodConfig?.requiresPaymentAccount && (paymentAmountPayload > 0 || usingDanaQris || usingDanaGateway) && !(resolvedPaymentAccountId > 0)) {
         openNotice('Akun Pembayaran', 'Akun pembayaran wajib dipilih sebelum proses order.');
         return null;
       }
@@ -10883,6 +13371,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
           `Tanggal Order: ${transactionDate}`,
           mode === 'draft' ? 'Mode: Simpan Draft' : 'Mode: Proses Orderan',
           currentDraftSourceId ? `Lanjutan Draft ID: ${currentDraftSourceId}` : '',
+          cartHasProofingEligibleItems ? `Flow Proofing: ${proofingFlowToLabel(selectedProofingFlow)}` : '',
           discountToApply > 0 ? `Diskon Order: ${discountToApply}` : '',
           paymentNotes ? `Catatan: ${paymentNotes}` : '',
         ]
@@ -11002,6 +13491,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         };
       }
       const backendOrderId = Number(created?.id || 0) || null;
+      const invoiceId = Number(created?.invoice?.id || created?.invoice_id || 0) || null;
       const invoiceNo = created?.invoice?.invoice_no || '-';
       let customerDepositBalanceAfterPayment = roundMoney(Number(customerDepositBalance || 0));
       if (!isDraftMode && usingCustomerDeposit) {
@@ -11055,6 +13545,42 @@ const SalesScreen = ({ currentUser, onLogout }) => {
           },
         }),
       );
+
+      if (!isDraftMode && usingDanaQris) {
+        loadDraftInvoices().catch(() => {});
+        return {
+          ok: true,
+          danaQris: true,
+          backendOrderId,
+          invoiceId,
+          invoiceNo,
+          amount: roundMoney(grandTotal),
+          receipt: created?.receipt || null,
+          qrisPaymentPayload: {
+            payment_method_id: Number(selectedMethodConfig?.id || 0) || null,
+            payment_account_id: resolvedPaymentAccountId || null,
+            bank_account_id: resolvedAccountingAccountId || null,
+          },
+        };
+      }
+
+      if (!isDraftMode && usingDanaGateway) {
+        loadDraftInvoices().catch(() => {});
+        return {
+          ok: true,
+          danaGateway: true,
+          backendOrderId,
+          invoiceId,
+          invoiceNo,
+          amount: roundMoney(grandTotal),
+          receipt: created?.receipt || null,
+          gatewayPaymentPayload: {
+            payment_method_id: Number(selectedMethodConfig?.id || 0) || null,
+            payment_account_id: resolvedPaymentAccountId || null,
+            bank_account_id: resolvedAccountingAccountId || null,
+          },
+        };
+      }
 
       openNotice(
         mode === 'draft'
@@ -11286,7 +13812,12 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       .map((row) => normalizeBankAccountRow(row))
       .filter((row) => Number(row?.id || 0) > 0);
     const methodType = normalizePaymentMethodType(methodConfig?.type || methodConfig?.code || methodLabel);
+    const methodCode = normalizeText(methodConfig?.code || methodLabel);
     return allOptions.filter((row) => {
+      const code = normalizeText(row?.paymentMethodCode || row?.payment_method_code || '');
+      if (code && methodCode && code === methodCode) {
+        return true;
+      }
       const type = normalizePaymentMethodType(row?.paymentType || row?.type || '');
       if (!type) {
         return false;
@@ -11396,7 +13927,13 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       const rows = await loadPaymentAccountOptionsForMethod(normalizedMethod);
       setDepositAccountOptions(rows);
       setDepositPaymentMethod(normalizedMethod);
-      setDepositAccountId(Number(rows[0]?.id || 0) || null);
+      setDepositAccountId((currentId) => {
+        const resolvedCurrentId = Number(currentId || 0);
+        if (resolvedCurrentId > 0 && rows.some((row) => resolveAccountingSelectionId(row) === resolvedCurrentId)) {
+          return resolvedCurrentId;
+        }
+        return resolveAccountingSelectionId(rows[0]) || null;
+      });
       return rows;
     } finally {
       if (options?.updateLoading !== false) {
@@ -11498,6 +14035,14 @@ const SalesScreen = ({ currentUser, onLogout }) => {
 
     setSubmittingDepositTopUp(true);
     try {
+      const selectedSourceAccount = depositAccountOptions.find(
+        (row) => resolveAccountingSelectionId(row) === sourceAccountId,
+      ) || null;
+      const paymentAccountId = Number(
+        selectedSourceAccount?.payment_account_id
+        || selectedSourceAccount?.id
+        || 0,
+      );
       const payload = {
         amount,
         payment_method: mapPaymentMethodToBackend(method),
@@ -11505,6 +14050,9 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         reference_no: String(depositReferenceNo || '').trim() || undefined,
         notes: String(depositNotes || '').trim() || undefined,
         bank_account_id: sourceAccountId,
+        ...(paymentAccountId > 0 && paymentAccountId !== sourceAccountId
+          ? { payment_account_id: paymentAccountId }
+          : {}),
       };
       const result = await topUpCustomerDeposit(customerId, payload);
       const nextBalance = extractCustomerDepositBalance(result);
@@ -11836,7 +14384,23 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       }
     }
 
-    const result = await submitTransaction('process', usingDeposit ? {} : { bankAccountId: bankId });
+    const result = await submitTransaction('process', usingDeposit ? {} : {
+      bankAccountId: bankId,
+      danaQris: isDanaQrisPaymentMethod,
+      danaGateway: isDanaGatewayPaymentMethod,
+    });
+    if (result?.ok && result?.danaQris) {
+      setModalPilihPembayaran(false);
+      setModalDetailPesanan(false);
+      await startDanaQrisPayment(result);
+      return;
+    }
+    if (result?.ok && result?.danaGateway) {
+      setModalPilihPembayaran(false);
+      setModalDetailPesanan(false);
+      await startDanaGatewayPayment(result);
+      return;
+    }
     if (result?.ok) {
       setModalPilihPembayaran(false);
       setModalDetailPesanan(false);
@@ -11925,8 +14489,26 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     }
     try {
       setIsOrderPreviewSubmitting(true);
-      const result = await submitTransaction('process', usingDeposit ? {} : { bankAccountId: bankId });
+      const result = await submitTransaction('process', usingDeposit ? {} : {
+        bankAccountId: bankId,
+        danaQris: isDanaQrisPaymentMethod,
+        danaGateway: isDanaGatewayPaymentMethod,
+      });
       if (result?.ok) {
+        if (result?.danaQris) {
+          setIsOrderPreviewOpen(false);
+          setModalPilihPembayaran(false);
+          setModalDetailPesanan(false);
+          await startDanaQrisPayment(result);
+          return;
+        }
+        if (result?.danaGateway) {
+          setIsOrderPreviewOpen(false);
+          setModalPilihPembayaran(false);
+          setModalDetailPesanan(false);
+          await startDanaGatewayPayment(result);
+          return;
+        }
         const verification = { checked: false, mismatchMessages: [] };
         setIsOrderPreviewOpen(false);
         if (verification.checked && verification.mismatchMessages.length > 0) {
@@ -12316,16 +14898,22 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       note: '',
       orderStatus: '-',
       productionSummary: '-',
+      proofingSummarySectionLabel: 'Proofing',
+      proofingSummary: '',
+      proofingSummaryColor: '#6b7280',
+      proofingSummaryNote: '',
       itemCount: 0,
       total: 0,
       createdAt: '-',
       pickedUpText: 'Belum diambil',
       cancellationText: '',
+      providerPaymentSummary: null,
       items: [],
       canPickup: false,
     });
   };
-  const handleViewInvoiceDetail = async (row) => {
+  const handleViewInvoiceDetail = async (row, options = {}) => {
+    const silent = options?.silent === true;
     let sourceRow = row;
     let detailLoaded = false;
     const selectedOrderId = Number(row?.approval?.orderId || row?.order?.id || row?.id || 0);
@@ -12340,11 +14928,15 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     }
     const hasInlineItems = Array.isArray(sourceRow?.items) && sourceRow.items.length > 0;
     if (!detailLoaded && Boolean(sourceRow?.list_compact) && !hasInlineItems) {
-      openNotice('Detail Invoice', 'Detail invoice lengkap belum berhasil dimuat. Coba refresh lalu buka lagi.');
+      if (!silent) {
+        openNotice('Detail Invoice', 'Detail invoice lengkap belum berhasil dimuat. Coba refresh lalu buka lagi.');
+      }
       return;
     }
     if (!canUserViewInvoiceRow(sourceRow, currentUser)) {
-      openNotice('Detail Invoice', 'Invoice tidak tersedia untuk user kasir ini atau sudah tidak bisa diakses.');
+      if (!silent) {
+        openNotice('Detail Invoice', 'Invoice tidak tersedia untuk user kasir ini atau sudah tidak bisa diakses.');
+      }
       return;
     }
 
@@ -12360,7 +14952,9 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     const isPickedUp = orderStatus === 'picked_up' || Boolean(pickedUpAt);
     const canPickup = Boolean(sourceRow?.production?.can_pickup) && !isPickedUp;
     const productionSummary = summarizeProductionStatusForInvoice(sourceRow);
+    const trackingSummaryInfo = buildCustomerTrackingSummary(sourceRow);
     const cancellationText = resolveCancellationSummaryText(sourceRow?.cancellation);
+    const providerPaymentSummary = resolveInvoiceProviderPaymentSummary(sourceRow);
     const items = Array.isArray(sourceRow?.items) ? sourceRow.items : [];
     const itemCount = items.length;
     const total = Number(
@@ -12388,6 +14982,16 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       const materialText = restored.materialText || '-';
       const pricingSummary = buildPricingSummaryFromBackendItem(item, materialText);
       const lineTotal = resolveItemGrandTotal(item, pricingSummary);
+      const proofingRow = item?.proofing && typeof item.proofing === 'object' ? item.proofing : null;
+      const proofingRequired = Boolean(item?.proofing_required) || Boolean(proofingRow);
+      const proofingStatusLabel = proofingRequired
+        ? (proofingRow ? proofingStatusToLabel(proofingRow?.status) : 'Belum dibuat')
+        : 'Tidak aktif';
+      const proofingStatusColor = proofingRequired
+        ? (proofingRow ? getProofingStatusTextColor(proofingRow?.status) : '#92400e')
+        : '#6b7280';
+      const proofingReleaseState = proofingRow ? resolveProofingReleaseState(proofingRow) : null;
+      const trackingState = buildInvoiceItemTrackingState(item, proofingRequired, proofingRow, proofingReleaseState);
       const bundleComponents = normalizeBundleComponentRows(
         item?.bundle_components
         || item?.bundleComponents
@@ -12411,6 +15015,28 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         isGroupProduct: Boolean(item?.is_group_product) || bundleComponents.length > 0,
         groupSummary: toLabel(item?.group_summary, bundleComponents.length > 0 ? `${bundleComponents.length} komponen` : ''),
         bundleComponents,
+        proofingRequired,
+        proofingFlowLabel: proofingRequired
+          ? proofingFlowToLabel(normalizeProofingFlow(item?.proofing_flow, true))
+          : 'Tanpa proofing design',
+        customerTrackingMode: trackingState.mode,
+        customerTrackingSectionLabel: trackingState.sectionLabel,
+        customerTrackingLabel: trackingState.label,
+        customerTrackingColor: trackingState.color,
+        customerTrackingNote: trackingState.note,
+        proofingStatusLabel,
+        proofingStatusColor,
+        proofingDesignerName: toLabel(proofingRow?.designer?.name, '-'),
+        proofingPaymentGateLabel: proofingRequired
+          ? toLabel(proofingRow?.payment_gate?.label, proofingRow ? 'Gate pembayaran belum siap' : 'Proofing belum dibuat')
+          : '-',
+        proofingLatestLogText: buildProofingLatestLogSummary(proofingRow?.latest_log),
+        proofingWhatsappSentAt: formatProofingEventDateTime(proofingRow?.whatsapp_sent_at),
+        proofingApprovedAt: formatProofingEventDateTime(proofingRow?.approved_at),
+        proofingRevisedAt: formatProofingEventDateTime(proofingRow?.revised_at),
+        proofingRevisionNote: String(proofingRow?.revision_note_from_customer || '').trim(),
+        proofingDesignerNote: String(proofingRow?.notes_from_designer || '').trim(),
+        proofingCanRelease: proofingReleaseState?.canRelease === true,
         note: toLabel(
           item?.notes,
           item?.note,
@@ -12465,11 +15091,16 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       note: orderNote,
       orderStatus: orderStatusLabel,
       productionSummary,
+      proofingSummarySectionLabel: trackingSummaryInfo.sectionLabel,
+      proofingSummary: trackingSummaryInfo.label,
+      proofingSummaryColor: trackingSummaryInfo.color,
+      proofingSummaryNote: trackingSummaryInfo.note,
       itemCount,
       total,
       createdAt: String(sourceRow?.created_at || '-'),
       pickedUpText,
       cancellationText,
+      providerPaymentSummary,
       items: detailItems,
       canPickup,
     });
@@ -13652,6 +16283,12 @@ const SalesScreen = ({ currentUser, onLogout }) => {
               <Text style={styles.greenTabText}>Invoice</Text>
             </Pressable>
             <Pressable
+              style={[styles.greenTab, activeMenu === 'proofing' ? styles.greenTabActive : null]}
+              onPress={() => setActiveMenu('proofing')}
+            >
+              <Text style={styles.greenTabText}>Proofing</Text>
+            </Pressable>
+            <Pressable
               style={[styles.greenTab, activeMenu === 'production' ? styles.greenTabActive : null]}
               onPress={() => setActiveMenu('production')}
             >
@@ -13668,6 +16305,18 @@ const SalesScreen = ({ currentUser, onLogout }) => {
               onPress={() => setActiveMenu('expense')}
             >
               <Text style={styles.greenTabText}>Pengeluaran</Text>
+            </Pressable>
+            <Pressable
+              style={[styles.greenTab, activeMenu === 'closing_store' ? styles.greenTabActive : null]}
+              onPress={() => setActiveMenu('closing_store')}
+            >
+              <Text style={styles.greenTabText}>Closing Toko</Text>
+            </Pressable>
+            <Pressable
+              style={[styles.greenTab, activeMenu === 'closing_archive' ? styles.greenTabActive : null]}
+              onPress={() => setActiveMenu('closing_archive')}
+            >
+              <Text style={styles.greenTabText}>Arsip Closing</Text>
             </Pressable>
             <Pressable
               style={[styles.greenTab, activeMenu === 'report' ? styles.greenTabActive : null]}
@@ -13771,6 +16420,8 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                 onChangePages={(value) => setPages(sanitizeNumericInput(value))}
                 showBookPrintRuleSection={selectedIsBookProduct}
                 bookProductLabel={buildSelectedProductLabel(selectedProductRow) || productName || '-'}
+                bookConfigStatus={selectedBookConfigStatus}
+                bookConfigMessage={selectedBookConfigMessage}
                 bookDisplayPrimary={bookFinishedSize || 'Book'}
                 bookDisplaySecondary={selectedBookDisplaySecondary}
                 bookType={bookType}
@@ -13957,8 +16608,39 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                     const productionStage = getCurrentProductionStageForInvoice(row);
                     const paymentLifecycle = resolveInvoicePaymentLifecycle(row);
                     const productionLifecycle = resolveInvoiceProductionLifecycle(row);
+                    const providerPaymentSummaryRaw = resolveInvoiceProviderPaymentSummary(row);
+                    const providerPaymentStatusKey = normalizeDanaQrisStatus(providerPaymentSummaryRaw?.status);
+                    const providerPaymentRowDueTotal = roundMoney(Math.max(0, Number(
+                      row?.invoice?.due_total
+                      || providerPaymentSummaryRaw?.invoiceDueTotal
+                      || 0
+                    )));
+                    const providerPaymentSummary = providerPaymentSummaryRaw && (
+                      providerPaymentStatusKey === 'pending'
+                      || (
+                        providerPaymentRowDueTotal > 0
+                        && ['failed', 'expired', 'cancelled', 'refund_required'].includes(providerPaymentStatusKey)
+                      )
+                    )
+                      ? providerPaymentSummaryRaw
+                      : null;
+                    const providerPaymentCountdownLabel = providerPaymentSummary
+                      ? formatDanaProviderPaymentCountdownLabel(providerPaymentSummary, providerPaymentTick)
+                      : '';
+                    const providerPaymentCanResume = Boolean(
+                      providerPaymentSummary
+                      && (
+                        providerPaymentSummary.isActive
+                        || ['failed', 'expired', 'cancelled', 'refund_required'].includes(normalizeDanaQrisStatus(providerPaymentSummary.status))
+                        || providerPaymentSummary.checkoutUrl
+                        || providerPaymentSummary.qrContent
+                        || providerPaymentSummary.qrUrl
+                        || providerPaymentSummary.qrImage
+                      )
+                    );
                     const productionLabel = isDraftRow ? 'Belum Masuk Produksi' : productionStage.label;
                     const productionColor = isDraftRow ? '#6b7280' : getProductionStatusTextColor(productionStage.key);
+                    const proofingSummaryInfo = buildCustomerTrackingSummary(row);
                     const snapshotState = isDraftRow ? resolveDraftSnapshotState(row) : null;
                     const invoiceStatusLabel = formatDraftStatusLabel(invoiceStatus);
                     const invoiceStatusColor = getInvoiceStatusTextColor(invoiceStatus);
@@ -14022,6 +16704,8 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                         invoiceStatusColor={invoiceStatusColor}
                         isDraftRow={isDraftRow}
                         paymentLifecycle={paymentLifecycle}
+                        providerPaymentSummary={providerPaymentSummary}
+                        providerPaymentCountdownLabel={providerPaymentCountdownLabel}
                         approvalInfo={approvalInfo}
                         approvalLabelPrefix={approvalLabelPrefix}
                         approvalStatusText={approvalStatusText}
@@ -14030,6 +16714,10 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                         productionLabel={productionLabel}
                         productionColor={productionColor}
                         productionStageCount={Number(productionStage.count || 0) || 0}
+                        proofingSummarySectionLabel={proofingSummaryInfo.sectionLabel}
+                        proofingSummaryLabel={proofingSummaryInfo.label}
+                        proofingSummaryColor={proofingSummaryInfo.color}
+                        proofingSummaryNote={proofingSummaryInfo.note}
                         paymentMethodLabel={paymentMethodLabel}
                         paymentTargetLabel={paymentTargetLabel}
                         paymentBadgeVariant={paymentBadgeVariant}
@@ -14046,9 +16734,11 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                         canApproveManualApprovalRow={canApproveManualApprovalRow}
                         canResolveManualApprovalRow={canResolveManualApprovalRow}
                         canPayReceivable={canPayReceivable}
+                        canOpenProviderPayment={providerPaymentCanResume}
                         onContinueDraft={() => handleContinueDraft(row)}
                         onDeleteDraft={() => confirmDeleteDraft(row)}
                         onViewDetail={() => handleViewInvoiceDetail(row)}
+                        onOpenProviderPayment={() => handleOpenProviderPaymentMonitor(row)}
                         onCreateManualApproval={() => openCreateManualApprovalModal(row)}
                         onApproveManualApproval={() => openManualApprovalDecisionModal(row, 'approve')}
                         onRejectManualApproval={() => openManualApprovalDecisionModal(row, 'reject')}
@@ -14072,6 +16762,23 @@ const SalesScreen = ({ currentUser, onLogout }) => {
               onUpdateStatus={handleUpdateProductionStatus}
               updatingItemId={updatingProductionItemId}
             />
+          ) : activeMenu === 'proofing' ? (
+            <ProofingPanel
+              rows={proofingRows}
+              isLoading={isProofingLoading}
+              statusFilter={proofingStatusFilter}
+              onChangeStatusFilter={setProofingStatusFilter}
+              searchText={proofingSearch}
+              onChangeSearchText={setProofingSearch}
+              onRefresh={loadProofingItems}
+              onUploadPreview={(row) => handleUploadProofingFile(row, 'preview')}
+              onUploadFinal={(row) => handleUploadProofingFile(row, 'final')}
+              onOpenPublicLink={handleOpenProofingPublicLink}
+              onViewHistory={handleViewProofingHistory}
+              onSendWhatsapp={handleSendProofingWhatsapp}
+              onReleaseToProduction={handleReleaseProofingToProduction}
+              processingProofingId={processingProofingId}
+            />
           ) : activeMenu === 'purchase_material' ? (
             <PurchaseMaterialPanel
               currentUser={currentUser}
@@ -14081,6 +16788,17 @@ const SalesScreen = ({ currentUser, onLogout }) => {
           ) : activeMenu === 'expense' ? (
             <ExpensePanel
               isActive={activeMenu === 'expense'}
+              onNotify={openNotice}
+            />
+          ) : activeMenu === 'closing_store' ? (
+            <ClosingStorePanel
+              currentUser={currentUser}
+              isActive={activeMenu === 'closing_store'}
+              onNotify={openNotice}
+            />
+          ) : activeMenu === 'closing_archive' ? (
+            <ClosingArchivePanel
+              isActive={activeMenu === 'closing_archive'}
               onNotify={openNotice}
             />
           ) : activeMenu === 'report' ? (
@@ -14122,481 +16840,6 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                 <Text style={styles.debugText}>Sedang menyiapkan laporan close order...</Text>
               ) : closingReport ? (
                 <>
-                  <View style={styles.reportSectionCard}>
-                    <Text style={styles.debugTitle}>Kas Masuk / Keluar Kasir</Text>
-                    <Text style={styles.debugText}>
-                      Catat pengeluaran mendadak, pembelian kecil, titipan uang, atau uang yang diambil dari kasir supaya laporan closing lebih jelas.
-                    </Text>
-
-                    <View style={styles.filterRow}>
-                      <Pressable
-                        style={[
-                          styles.filterButton,
-                          cashFlowTransactionType === 'expense' ? styles.filterButtonActive : null,
-                        ]}
-                        onPress={() => setCashFlowTransactionType('expense')}
-                      >
-                        <Text style={[
-                          styles.filterButtonText,
-                          cashFlowTransactionType === 'expense' ? styles.filterButtonTextActive : null,
-                        ]}
-                        >
-                          Kas Keluar
-                        </Text>
-                      </Pressable>
-                      <Pressable
-                        style={[
-                          styles.filterButton,
-                          cashFlowTransactionType === 'income' ? styles.filterButtonActive : null,
-                        ]}
-                        onPress={() => setCashFlowTransactionType('income')}
-                      >
-                        <Text style={[
-                          styles.filterButtonText,
-                          cashFlowTransactionType === 'income' ? styles.filterButtonTextActive : null,
-                        ]}
-                        >
-                          Kas Masuk
-                        </Text>
-                      </Pressable>
-                    </View>
-
-                    <View style={styles.reportSummaryGrid}>
-                      {cashFlowTransactionType === 'expense' ? (
-                        <>
-                          <View style={styles.reportInputGroup}>
-                            <Text style={styles.reportInputLabel}>Kategori Pengeluaran Backend</Text>
-                            <Pressable
-                              style={styles.cashFlowCategorySelectButton}
-                              onPress={openExpenseCategoryModal}
-                            >
-                              <Text style={styles.cashFlowCategorySelectLabel}>Pilih kategori dari backend</Text>
-                              <Text style={styles.cashFlowCategorySelectValue}>
-                                {selectedCashFlowType ? String(selectedCashFlowType?.name || '') : 'Belum memilih kategori pengeluaran'}
-                              </Text>
-                              <Text style={styles.cashFlowCategorySelectAction}>Buka Popup</Text>
-                            </Pressable>
-                            {isCashFlowTypesLoading ? (
-                              <Text style={styles.debugText}>Memuat kategori pengeluaran...</Text>
-                            ) : availableCashFlowTypes.length > 0 ? (
-                              <Text style={styles.debugText}>
-                                Kategori backend aktif: {availableCashFlowTypes.map((row) => String(row?.name || '').trim()).filter(Boolean).join(', ')}
-                              </Text>
-                            ) : (
-                              <Text style={styles.debugText}>Belum ada kategori pengeluaran aktif dari backend.</Text>
-                            )}
-                          </View>
-                          <View style={styles.reportInputGroup}>
-                            <Text style={styles.reportInputLabel}>Kategori Backend Terpilih</Text>
-                            <TextInput
-                              value={selectedCashFlowType ? String(selectedCashFlowType?.name || '') : ''}
-                              editable={false}
-                              placeholder="Pilih kategori pengeluaran dari popup backend"
-                              placeholderTextColor="#6c7485"
-                              style={[styles.reportInput, styles.reportInputReadonly]}
-                            />
-                          </View>
-                        </>
-                      ) : (
-                        <>
-                          <View style={styles.reportInputGroup}>
-                            <Text style={styles.reportInputLabel}>Kategori Cepat</Text>
-                            <View style={styles.reportChipWrap}>
-                              {isCashFlowTypesLoading ? (
-                                <Text style={styles.debugText}>Memuat kategori...</Text>
-                              ) : quickCashFlowCategories.length > 0 ? quickCashFlowCategories.map((row) => {
-                                const active = row?.typeId
-                                  ? Number(row.typeId) === Number(cashFlowTypeId || 0)
-                                  : (!selectedCashFlowType && normalizeText(cashFlowCategory) === normalizeText(row?.manualCategory || row?.label));
-                                return (
-                                  <Pressable
-                                    key={String(row?.key || `cash-flow-type-${row?.label || 'type'}`)}
-                                    style={[styles.reportChip, active ? styles.reportChipActive : null]}
-                                    onPress={() => handleSelectQuickCashFlowCategory(row)}
-                                  >
-                                    <View style={styles.reportChipContent}>
-                                      <Text style={[styles.reportChipText, active ? styles.reportChipTextActive : null]}>
-                                        {String(row?.label || '-')}
-                                      </Text>
-                                      <View style={[styles.reportChipBadge, active ? styles.reportChipBadgeActive : null]}>
-                                        <Text style={[styles.reportChipBadgeText, active ? styles.reportChipBadgeTextActive : null]}>
-                                          {formatCashFlowSourceLabel(row?.source)}
-                                        </Text>
-                                      </View>
-                                    </View>
-                                  </Pressable>
-                                );
-                              }) : (
-                                <Text style={styles.debugText}>Belum ada kategori aktif. Isi manual di bawah.</Text>
-                              )}
-                            </View>
-                          </View>
-                          <View style={styles.reportInputGroup}>
-                            <Text style={styles.reportInputLabel}>Kategori Manual</Text>
-                            <TextInput
-                              value={selectedCashFlowType ? String(selectedCashFlowType?.name || '') : cashFlowCategory}
-                              onChangeText={setCashFlowCategory}
-                              editable={!selectedCashFlowType}
-                              placeholder="Contoh: beli galon, ambil kas owner"
-                              placeholderTextColor="#6c7485"
-                              style={[
-                                styles.reportInput,
-                                selectedCashFlowType ? styles.reportInputReadonly : null,
-                              ]}
-                            />
-                          </View>
-                        </>
-                      )}
-                      {cashFlowTransactionType === 'expense' ? (
-                        <View style={styles.reportInputGroup}>
-                          <Text style={styles.reportInputLabel}>Akun Kas / Bank Sumber</Text>
-                          <View style={styles.reportChipWrap}>
-                            {isCashFlowAccountsLoading ? (
-                              <Text style={styles.debugText}>Memuat akun kas / bank...</Text>
-                            ) : cashFlowSourceAccounts.length > 0 ? cashFlowSourceAccounts.map((row) => {
-                              const accountKey = Number(row?.accountingAccountId || row?.id || 0) || 0;
-                              const active = accountKey > 0 && accountKey === Number(cashFlowSourceAccountId || 0);
-                              return (
-                                <Pressable
-                                  key={`cash-flow-account-${accountKey}`}
-                                  style={[styles.reportChip, active ? styles.reportChipActive : null]}
-                                  onPress={() => setCashFlowSourceAccountId(accountKey)}
-                                >
-                                  <Text style={[styles.reportChipText, active ? styles.reportChipTextActive : null]}>
-                                    {String(row?.displayTitle || row?.displayName || row?.label || '-')}
-                                  </Text>
-                                </Pressable>
-                              );
-                            }) : (
-                              <Text style={styles.debugText}>Belum ada akun kas / bank aktif yang bisa dipakai untuk pengeluaran.</Text>
-                            )}
-                          </View>
-                        </View>
-                      ) : null}
-                      <View style={styles.reportInputGroup}>
-                        <Text style={styles.reportInputLabel}>Nominal</Text>
-                        <TextInput
-                          value={cashFlowAmount}
-                          onChangeText={(value) => setCashFlowAmount(sanitizeCurrencyInput(value))}
-                          keyboardType="numeric"
-                          placeholder="0"
-                          placeholderTextColor="#6c7485"
-                          style={styles.reportInput}
-                        />
-                      </View>
-                      <View style={styles.reportInputGroup}>
-                        <Text style={styles.reportInputLabel}>Catatan</Text>
-                        <TextInput
-                          value={cashFlowNote}
-                          onChangeText={setCashFlowNote}
-                          placeholder="Contoh: beli kebutuhan mendadak / diambil untuk operasional"
-                          placeholderTextColor="#6c7485"
-                          multiline
-                          numberOfLines={3}
-                          style={[styles.reportInput, styles.reportTextarea]}
-                        />
-                      </View>
-                    </View>
-
-                    <View style={styles.headerActions}>
-                      <Pressable
-                        style={[styles.refreshButton, isCashFlowSubmitting ? styles.draftActionDisabled : null]}
-                        disabled={isCashFlowSubmitting}
-                        onPress={handleSubmitCashFlow}
-                      >
-                        {isCashFlowSubmitting ? (
-                          <View style={styles.inlineLoadingButtonContent}>
-                            <SyncLoadingAnimation size={20} />
-                            <Text style={styles.refreshButtonText}>Menyimpan...</Text>
-                          </View>
-                        ) : (
-                          <Text style={styles.refreshButtonText}>Simpan Kas Masuk / Keluar</Text>
-                        )}
-                      </Pressable>
-                      <Pressable
-                        style={[styles.printerSecondaryButton, isCashFlowRowsLoading ? styles.draftActionDisabled : null]}
-                        disabled={isCashFlowRowsLoading}
-                        onPress={() => loadCashFlowRows(closingReportDate)}
-                      >
-                        <Text style={styles.printerSecondaryButtonText}>{isCashFlowRowsLoading ? 'Memuat...' : 'Refresh Riwayat'}</Text>
-                      </Pressable>
-                    </View>
-
-                    {cashOutWarningText ? (
-                      <View style={styles.reportWarningBox}>
-                        <Text style={styles.reportWarningText}>{cashOutWarningText}</Text>
-                      </View>
-                    ) : null}
-
-                    <View style={styles.filterRow}>
-                      <Pressable
-                        style={[styles.filterButton, cashFlowHistoryFilter === 'all' ? styles.filterButtonActive : null]}
-                        onPress={() => setCashFlowHistoryFilter('all')}
-                      >
-                        <Text style={[styles.filterButtonText, cashFlowHistoryFilter === 'all' ? styles.filterButtonTextActive : null]}>
-                          Semua Riwayat
-                        </Text>
-                      </Pressable>
-                      <Pressable
-                        style={[styles.filterButton, cashFlowHistoryFilter === 'income' ? styles.filterButtonActive : null]}
-                        onPress={() => setCashFlowHistoryFilter('income')}
-                      >
-                        <Text style={[styles.filterButtonText, cashFlowHistoryFilter === 'income' ? styles.filterButtonTextActive : null]}>
-                          Riwayat Masuk
-                        </Text>
-                      </Pressable>
-                      <Pressable
-                        style={[styles.filterButton, cashFlowHistoryFilter === 'expense' ? styles.filterButtonActive : null]}
-                        onPress={() => setCashFlowHistoryFilter('expense')}
-                      >
-                        <Text style={[styles.filterButtonText, cashFlowHistoryFilter === 'expense' ? styles.filterButtonTextActive : null]}>
-                          Riwayat Keluar
-                        </Text>
-                      </Pressable>
-                    </View>
-
-                    <View style={styles.reportNestedList}>
-                      {filteredCashFlowRows.length > 0 ? filteredCashFlowRows.map((row, index) => (
-                        <View
-                          key={`cash-flow-row-${row?.id || row?.transaction_no || index}`}
-                          style={[
-                            styles.reportNestedItem,
-                            String(row?.transaction_type || '').toLowerCase() === 'income'
-                              ? styles.cashFlowIncomeItem
-                              : styles.cashFlowExpenseItem,
-                          ]}
-                        >
-                          <View style={styles.cashFlowRowHeader}>
-                            <Text
-                              style={[
-                                styles.reportNestedTitle,
-                                String(row?.transaction_type || '').toLowerCase() === 'income'
-                                  ? styles.cashFlowIncomeText
-                                  : styles.cashFlowExpenseText,
-                              ]}
-                            >
-                              {String(row?.transaction_type_label || row?.transaction_type || '-')} - {String(row?.category || '-')}
-                            </Text>
-                            <View style={styles.cashFlowRowBadges}>
-                              <View
-                                style={[
-                                  styles.cashFlowTypeBadge,
-                                  String(row?.transaction_type || '').toLowerCase() === 'income'
-                                    ? styles.cashFlowIncomeBadge
-                                    : styles.cashFlowExpenseBadge,
-                                ]}
-                              >
-                                <Text style={styles.cashFlowTypeBadgeText}>
-                                  {String(row?.transaction_type || '').toLowerCase() === 'income' ? 'Masuk' : 'Keluar'}
-                                </Text>
-                              </View>
-                              <View style={styles.cashFlowSourceBadge}>
-                                <Text style={styles.cashFlowSourceBadgeText}>
-                                  {row?.type?.id ? 'Backend' : 'Manual'}
-                                </Text>
-                              </View>
-                            </View>
-                          </View>
-                          <Text style={styles.reportNestedMeta}>
-                            {String(row?.occurred_at || '-')} | {formatRupiah(row?.amount || 0)} | {String(row?.transaction_no || '-')}
-                          </Text>
-                          {row?.note ? (
-                            <Text style={styles.reportNestedMeta}>{String(row.note)}</Text>
-                          ) : null}
-                        </View>
-                      )) : (
-                        <Text style={styles.debugText}>Belum ada riwayat kas sesuai filter di tanggal ini.</Text>
-                      )}
-                    </View>
-                  </View>
-
-                  <View style={styles.reportSectionCard}>
-                    <Text style={styles.debugTitle}>Form Closing Shift</Text>
-                    <Text style={styles.debugText}>Isi nominal kas fisik dan catatan serah terima supaya laporan ke finance lebih lengkap.</Text>
-                    <View style={styles.reportSummaryGrid}>
-                      <View style={styles.reportInputGroup}>
-                        <Text style={styles.reportInputLabel}>Saldo Awal Kas</Text>
-                        <TextInput
-                          value={closingOpeningCash}
-                          onChangeText={(value) => setClosingOpeningCash(sanitizeCurrencyInput(value))}
-                          keyboardType="numeric"
-                          placeholder="0"
-                          placeholderTextColor="#6c7485"
-                          style={styles.reportInput}
-                        />
-                      </View>
-                      <View style={styles.reportInputGroup}>
-                        <Text style={styles.reportInputLabel}>Uang Fisik Akhir</Text>
-                        <TextInput
-                          value={closingActualCash}
-                          onChangeText={(value) => setClosingActualCash(sanitizeCurrencyInput(value))}
-                          keyboardType="numeric"
-                          placeholder="0"
-                          placeholderTextColor="#6c7485"
-                          style={styles.reportInput}
-                        />
-                      </View>
-                      <View style={styles.reportInputGroup}>
-                        <Text style={styles.reportInputLabel}>Penerima Finance</Text>
-                        <TextInput
-                          value={closingFinanceRecipient}
-                          editable={false}
-                          placeholder={isFinanceRecipientsLoading ? 'Memuat admin keuangan...' : 'Pilih admin keuangan'}
-                          placeholderTextColor="#6c7485"
-                          style={styles.reportInput}
-                        />
-                        <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.financeRecipientPicker}>
-                          {(Array.isArray(financeRecipients) ? financeRecipients : []).map((row) => {
-                            const active = Number(row?.id || 0) === Number(closingFinanceRecipientId || 0);
-                            return (
-                              <Pressable
-                                key={`finance-${row?.id || row?.name || Math.random()}`}
-                                style={[styles.financeRecipientChip, active ? styles.financeRecipientChipActive : null]}
-                                onPress={() => {
-                                  setClosingFinanceRecipientId(Number(row?.id || 0) || null);
-                                  setClosingFinanceRecipient(String(row?.name || '').trim());
-                                }}
-                              >
-                                <Text style={[styles.financeRecipientChipText, active ? styles.financeRecipientChipTextActive : null]}>
-                                  {row?.name || '-'}
-                                </Text>
-                              </Pressable>
-                            );
-                          })}
-                        </ScrollView>
-                      </View>
-                      <View style={styles.reportInputGroup}>
-                        <Text style={styles.reportInputLabel}>Catatan Shift</Text>
-                        <TextInput
-                          value={closingShiftNote}
-                          onChangeText={setClosingShiftNote}
-                          placeholder="Catatan tambahan untuk finance"
-                          placeholderTextColor="#6c7485"
-                          multiline
-                          numberOfLines={3}
-                          style={[styles.reportInput, styles.reportTextarea]}
-                        />
-                      </View>
-                    </View>
-                    <View style={styles.reportSummaryGrid}>
-                      <View style={styles.reportSummaryCard}>
-                        <Text style={styles.reportSummaryLabel}>Saldo Kas Sistem</Text>
-                        <Text style={styles.reportSummaryValue}>{formatRupiah(closingExpectedCashValue)}</Text>
-                      </View>
-                      <View style={styles.reportSummaryCard}>
-                        <Text style={styles.reportSummaryLabel}>Selisih Kas Fisik</Text>
-                        <Text style={[
-                          styles.reportSummaryValue,
-                          closingCashDifferenceValue < 0 ? styles.reportNegativeValue : null,
-                          closingCashDifferenceValue > 0 ? styles.reportPositiveValue : null,
-                        ]}
-                        >
-                          {formatRupiah(closingCashDifferenceValue)}
-                        </Text>
-                      </View>
-                    </View>
-                    <View style={styles.reportInputGroup}>
-                      <Text style={styles.reportInputLabel}>Laporan Barang Reject / Rusak</Text>
-                      <TextInput
-                        value={damageProductSearch}
-                        onChangeText={setDamageProductSearch}
-                        placeholder="Cari produk rusak"
-                        placeholderTextColor="#6c7485"
-                        style={styles.reportInput}
-                      />
-                      <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.financeRecipientPicker}>
-                        {filteredDamageProductOptions.map((row) => {
-                          const active = Number(row?.id || 0) === Number(selectedDamageProductId || 0);
-                          return (
-                            <Pressable
-                              key={`damage-product-${row?.id || row?.name}`}
-                              style={[styles.financeRecipientChip, active ? styles.financeRecipientChipActive : null]}
-                              onPress={() => setSelectedDamageProductId(Number(row?.id || 0) || null)}
-                            >
-                              <Text style={[styles.financeRecipientChipText, active ? styles.financeRecipientChipTextActive : null]}>
-                                {row?.name || '-'}
-                              </Text>
-                            </Pressable>
-                          );
-                        })}
-                      </ScrollView>
-                      <View style={styles.reportSummaryGrid}>
-                        <View style={styles.reportInputGroup}>
-                          <Text style={styles.reportInputLabel}>Qty Rusak</Text>
-                          <TextInput
-                            value={damageQtyInput}
-                            onChangeText={setDamageQtyInput}
-                            keyboardType="numeric"
-                            placeholder="1"
-                            placeholderTextColor="#6c7485"
-                            style={styles.reportInput}
-                          />
-                        </View>
-                        <View style={styles.reportInputGroup}>
-                          <Text style={styles.reportInputLabel}>Catatan Barang</Text>
-                          <TextInput
-                            value={damageNoteInput}
-                            onChangeText={setDamageNoteInput}
-                            placeholder="Contoh: reject print, sobek, warna meleset"
-                            placeholderTextColor="#6c7485"
-                            style={styles.reportInput}
-                          />
-                        </View>
-                      </View>
-                      <View style={styles.headerActions}>
-                        <Pressable style={styles.refreshButton} onPress={handleAddDamageItem}>
-                          <Text style={styles.refreshButtonText}>Tambah Barang Rusak</Text>
-                        </Pressable>
-                      </View>
-                      <View style={styles.reportNestedList}>
-                        {closingDamageItems.length > 0 ? closingDamageItems.map((row, index) => (
-                          <View key={String(row?.id || `damage-row-${index}`)} style={styles.reportNestedItem}>
-                            <Text style={styles.reportNestedTitle}>
-                              {row?.productName || '-'} | Qty: {row?.qty || 0}
-                            </Text>
-                            <Text style={styles.reportNestedMeta}>
-                              Estimasi nilai: {formatRupiah(row?.estimatedTotalValue || 0)}
-                              {row?.auditStatus && row.auditStatus !== 'reported' ? ` | Audit: ${row.auditStatus}` : ''}
-                              {row?.responsibility ? ` | Beban: ${row.responsibility}` : ''}
-                            </Text>
-                            <Text style={styles.reportNestedMeta}>{row?.note || '-'}</Text>
-                            <Pressable
-                              style={styles.deleteDraftButton}
-                              onPress={() => setClosingDamageItems((prev) => prev.filter((item) => item.id !== row.id))}
-                            >
-                              <Text style={styles.deleteDraftButtonText}>Hapus</Text>
-                            </Pressable>
-                          </View>
-                        )) : (
-                          <Text style={styles.debugText}>Belum ada barang reject / rusak yang dilaporkan di closer ini.</Text>
-                        )}
-                      </View>
-                    </View>
-                    <View style={styles.filterRow}>
-                      <Pressable
-                        style={[styles.refreshButton, isClosingSubmitLoading ? styles.draftActionDisabled : null]}
-                        disabled={isClosingSubmitLoading}
-                        onPress={handleSubmitCloserOrder}
-                      >
-                        {isClosingSubmitLoading ? (
-                          <View style={styles.inlineLoadingButtonContent}>
-                            <SyncLoadingAnimation size={20} />
-                            <Text style={styles.refreshButtonText}>Mengirim...</Text>
-                          </View>
-                        ) : (
-                          <Text style={styles.refreshButtonText}>Kirim ke Finance</Text>
-                        )}
-                      </Pressable>
-                      {closingRecord ? (
-                        <Text style={styles.debugText}>
-                          Status closer: {String(closingRecord?.status || 'submitted')}
-                          {' | '}Finance: {String(closingRecord?.finance_user?.name || closingFinanceRecipient || '-')}
-                          {closingRecord?.accounting_journal?.reference ? ` | Jurnal: ${closingRecord.accounting_journal.reference}` : ''}
-                        </Text>
-                      ) : null}
-                    </View>
-                  </View>
-
                   <View style={styles.reportSummaryGrid}>
                     <View style={[styles.reportSummaryCard, styles.reportSummaryCardInfo]}>
                       <Text style={styles.reportSummaryLabel}>Omzet Total Invoice</Text>
@@ -15025,6 +17268,43 @@ const SalesScreen = ({ currentUser, onLogout }) => {
             <Text style={styles.popupMessage}>Pelanggan: {orderPreviewSnapshot.customerName}</Text>
             <Text style={styles.popupMessage}>Tanggal: {orderPreviewSnapshot.transactionDate}</Text>
             <Text style={styles.popupMessage}>Catatan: {orderPreviewSnapshot.notes || '-'}</Text>
+            {cartHasProofingEligibleItems ? (
+              <View style={styles.processOrderSelectionCard}>
+                <Text style={styles.processOrderSelectionTitle}>Flow Proofing Design</Text>
+                <View style={styles.methodQuickRowWrap}>
+                  {[
+                    { key: PROOFING_FLOW_NONE, label: 'Tanpa Proofing' },
+                    { key: PROOFING_FLOW_PROOFING_FIRST, label: 'Proofing Dulu' },
+                    { key: PROOFING_FLOW_PAY_FIRST, label: 'Bayar Dulu' },
+                  ].map((option) => {
+                    const active = selectedProofingFlow === option.key;
+                    return (
+                      <Pressable
+                        key={`proofing-flow-${option.key}`}
+                        style={[
+                          styles.receivableMethodChip,
+                          active ? styles.receivableMethodChipActive : null,
+                        ]}
+                        disabled={isSubmitting}
+                        onPress={() => setSelectedProofingFlow(option.key)}
+                      >
+                        <Text
+                          style={[
+                            styles.receivableMethodChipText,
+                            active ? styles.receivableMethodChipTextActive : null,
+                          ]}
+                        >
+                          {option.label}
+                        </Text>
+                      </Pressable>
+                    );
+                  })}
+                </View>
+                <Text style={styles.receivableHelperText}>
+                  Aktifkan proofing hanya untuk order yang memang perlu review desain customer. Opsi tanpa proofing menjaga flow lama tetap jalan.
+                </Text>
+              </View>
+            ) : null}
 
             <ScrollView style={styles.processOrderItemList} contentContainerStyle={styles.processOrderItemListContent}>
               {Array.isArray(orderPreviewSnapshot.items) && orderPreviewSnapshot.items.length > 0 ? (
@@ -15075,6 +17355,12 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                 <Text style={styles.processOrderSummaryLabelStrong}>Total Akhir</Text>
                 <Text style={styles.processOrderSummaryValueStrong}>{formatRupiah(orderPreviewSnapshot.grandTotal)}</Text>
               </View>
+              {cartHasProofingEligibleItems ? (
+                <View style={styles.processOrderSummaryRow}>
+                  <Text style={styles.processOrderSummaryLabel}>Flow Proofing</Text>
+                  <Text style={styles.processOrderSummaryValue}>{orderPreviewSnapshot.proofingFlowLabel}</Text>
+                </View>
+              ) : null}
             </View>
 
             <View style={[styles.popupActions, styles.processOrderActionsCompact]}>
@@ -15118,7 +17404,11 @@ const SalesScreen = ({ currentUser, onLogout }) => {
           <View style={[styles.popupCard, styles.processOrderPaymentCard]}>
             <Text style={styles.popupTitle}>Pilih Metode Pembayaran</Text>
             <Text style={styles.processOrderHint}>
-              Pilih satu metode pembayaran yang benar sebelum transaksi diproses dan nota dicetak.
+              {isDanaQrisPaymentMethod
+                ? 'QRIS DANA akan dibuat setelah invoice terbentuk. Nota baru diproses saat pembayaran confirmed paid.'
+                : isDanaGatewayPaymentMethod
+                  ? 'Checkout DANA Payment Gateway akan dibuat setelah invoice terbentuk. Nota baru diproses saat pembayaran confirmed paid.'
+                  : 'Pilih satu metode pembayaran yang benar sebelum transaksi diproses dan nota dicetak.'}
             </Text>
             <View style={styles.processOrderSummaryCard}>
               <View style={styles.processOrderSummaryRow}>
@@ -15129,6 +17419,12 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                 <Text style={styles.processOrderSummaryLabelStrong}>Total Akhir</Text>
                 <Text style={styles.processOrderSummaryValueStrong}>{formatRupiah(orderPreviewSnapshot.grandTotal)}</Text>
               </View>
+              {cartHasProofingEligibleItems ? (
+                <View style={styles.processOrderSummaryRow}>
+                  <Text style={styles.processOrderSummaryLabel}>Flow Proofing</Text>
+                  <Text style={styles.processOrderSummaryValue}>{orderPreviewSnapshot.proofingFlowLabel}</Text>
+                </View>
+              ) : null}
             </View>
             <View style={styles.receivablePaymentForm}>
               <Text style={styles.reportInputLabel}>Metode Pembayaran</Text>
@@ -15247,11 +17543,328 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                   </View>
                 ) : (
                   <Text style={styles.popupButtonText}>
-                    {isProcessOrderMethodMissing ? 'Pilih Metode Dulu' : processOrderNeedsAccountSelection ? 'Lengkapi Akun Dulu' : 'Proses dan Cetak Nota'}
+                    {isProcessOrderMethodMissing
+                      ? 'Pilih Metode Dulu'
+                      : processOrderNeedsAccountSelection
+                        ? 'Lengkapi Akun Dulu'
+                        : isDanaQrisPaymentMethod
+                          ? 'Buat QRIS DANA'
+                          : isDanaGatewayPaymentMethod
+                            ? 'Buat Checkout DANA'
+                          : 'Proses dan Cetak Nota'}
                   </Text>
                 )}
               </Pressable>
             </View>
+          </View>
+        </View>
+      </Modal>
+
+      <Modal
+        visible={danaQrisModal.visible}
+        transparent
+        animationType="fade"
+        onRequestClose={closeDanaQrisModal}
+      >
+        <View style={styles.popupBackdrop}>
+          <View style={[styles.popupCard, styles.danaQrisCard]}>
+            <Text style={styles.popupTitle}>Pembayaran QRIS DANA</Text>
+            <Text style={styles.processOrderHint}>
+              Scan QRIS sesuai nominal invoice. POS akan otomatis menunggu status paid dari websocket dan polling cadangan.
+            </Text>
+
+            <View style={styles.danaQrisStatusRow}>
+              <View
+                style={[
+                  styles.danaQrisStatusBadge,
+                  normalizeDanaQrisStatus(danaQrisModal.status) === 'paid'
+                    ? styles.danaQrisStatusBadgePaid
+                    : normalizeDanaQrisStatus(danaQrisModal.status) === 'failed'
+                      || normalizeDanaQrisStatus(danaQrisModal.status) === 'expired'
+                      || normalizeDanaQrisStatus(danaQrisModal.status) === 'cancelled'
+                        ? styles.danaQrisStatusBadgeFailed
+                        : styles.danaQrisStatusBadgePending,
+                ]}
+              >
+                <Text style={styles.danaQrisStatusBadgeText}>
+                  {getDanaQrisStatusLabel(danaQrisModal.status)}
+                </Text>
+              </View>
+              <Text style={styles.danaQrisRealtimeText}>
+                {danaQrisModal.realtimeAvailable ? 'Realtime aktif' : 'Polling aktif'}
+              </Text>
+            </View>
+
+            <View style={styles.processOrderSummaryCard}>
+              <View style={styles.processOrderSummaryRow}>
+                <Text style={styles.processOrderSummaryLabel}>Invoice</Text>
+                <Text style={styles.processOrderSummaryValue}>{danaQrisModal.invoiceNo || '-'}</Text>
+              </View>
+              <View style={styles.processOrderSummaryRow}>
+                <Text style={styles.processOrderSummaryLabel}>Nominal</Text>
+                <Text style={styles.processOrderSummaryValue}>{formatRupiah(danaQrisModal.amount || 0)}</Text>
+              </View>
+              <View style={[styles.processOrderSummaryRow, styles.processOrderSummaryRowStrong]}>
+                <Text style={styles.processOrderSummaryLabelStrong}>Expired</Text>
+                <Text style={styles.processOrderSummaryValueStrong}>
+                  {danaQrisModal.expiresAt
+                    ? `${danaQrisCountdownLabel} lagi`
+                    : 'Menunggu QRIS'}
+                </Text>
+              </View>
+            </View>
+
+            <View style={styles.danaQrisQrPanel}>
+              {danaQrisModal.isGenerating ? (
+                <View style={styles.danaQrisLoadingBox}>
+                  <SyncLoadingAnimation size={42} />
+                  <Text style={styles.danaQrisMessage}>Membuat QRIS DANA...</Text>
+                </View>
+              ) : danaQrisImageUri ? (
+                <Image
+                  source={{ uri: danaQrisImageUri }}
+                  style={styles.danaQrisImage}
+                  resizeMode="contain"
+                />
+              ) : String(danaQrisModal.qrContent || '').trim() ? (
+                <View style={styles.danaQrisGeneratedQr}>
+                  <QRCode
+                    value={String(danaQrisModal.qrContent || '')}
+                    size={220}
+                    backgroundColor="#ffffff"
+                    color="#111827"
+                  />
+                </View>
+              ) : (
+                <View style={styles.danaQrisLoadingBox}>
+                  <Text style={styles.danaQrisMessage}>
+                    QRIS belum tersedia. Jika status gagal, cek konfigurasi DANA dan response provider.
+                  </Text>
+                </View>
+              )}
+            </View>
+
+            {String(danaQrisModal.qrContent || '').trim() ? (
+              <Text style={styles.danaQrisPayloadText} numberOfLines={2}>
+                Payload QR: {danaQrisModal.qrContent}
+              </Text>
+            ) : null}
+
+            <Text style={styles.danaQrisMessage}>
+              {danaQrisModal.message || danaQrisModal.providerMessage || 'Menunggu status pembayaran.'}
+            </Text>
+            {String(danaQrisModal.realtimeMessage || '').trim() ? (
+              <Text style={styles.danaQrisRealtimeHint}>{danaQrisModal.realtimeMessage}</Text>
+            ) : null}
+
+            <View style={[styles.popupActions, styles.processOrderActionsCompact]}>
+              <Pressable
+                style={[
+                  styles.popupButton,
+                  styles.popupButtonSecondary,
+                  styles.processOrderActionButtonCompact,
+                  (danaQrisModal.isGenerating || (!danaQrisCanRetry && !(Number(danaQrisModal.paymentTransactionId || 0) > 0))) ? styles.draftActionDisabled : null,
+                ]}
+                disabled={danaQrisModal.isGenerating || (!danaQrisCanRetry && !(Number(danaQrisModal.paymentTransactionId || 0) > 0))}
+                onPress={() => {
+                  if (danaQrisCanRetry) {
+                    startDanaQrisPayment(danaQrisModal.orderResult).catch(() => {});
+                    return;
+                  }
+                  refreshDanaQrisStatus({ syncProvider: true }).catch(() => {});
+                }}
+              >
+                <Text style={[styles.popupButtonText, styles.popupButtonTextSecondary]}>
+                  {danaQrisCanRetry ? 'Generate Ulang' : 'Cek Status'}
+                </Text>
+              </Pressable>
+              <Pressable
+                style={[
+                  styles.popupButton,
+                  styles.processOrderActionButtonCompact,
+                  (danaQrisModal.isFinalizing || (danaQrisModal.isGenerating && !(Number(danaQrisModal.paymentTransactionId || 0) > 0))) ? styles.draftActionDisabled : null,
+                ]}
+                disabled={danaQrisModal.isFinalizing || (danaQrisModal.isGenerating && !(Number(danaQrisModal.paymentTransactionId || 0) > 0))}
+                onPress={closeDanaQrisModal}
+              >
+                {danaQrisModal.isFinalizing ? (
+                  <View style={styles.inlineLoadingButtonContent}>
+                    <SyncLoadingAnimation size={20} />
+                    <Text style={styles.popupButtonText}>Memproses Nota...</Text>
+                  </View>
+                ) : (
+                  <Text style={styles.popupButtonText}>
+                    {normalizeDanaQrisStatus(danaQrisModal.status) === 'paid'
+                      ? 'Tutup'
+                      : normalizeDanaQrisStatus(danaQrisModal.status) === 'pending'
+                        ? 'Kembali ke Kasir'
+                        : 'Tutup Monitor'}
+                  </Text>
+                )}
+              </Pressable>
+            </View>
+            {normalizeDanaQrisStatus(danaQrisModal.status) === 'pending' ? (
+              <Text style={styles.danaQrisRealtimeHint}>
+                Kasir bisa klik `Kembali ke Kasir` untuk lanjut input pesanan lain. Monitor pembayaran tetap berjalan dari daftar invoice.
+              </Text>
+            ) : null}
+          </View>
+        </View>
+      </Modal>
+
+      <Modal
+        visible={danaGatewayModal.visible}
+        transparent
+        animationType="fade"
+        onRequestClose={closeDanaGatewayModal}
+      >
+        <View style={styles.popupBackdrop}>
+          <View style={[styles.popupCard, styles.danaQrisCard]}>
+            <Text style={styles.popupTitle}>DANA Payment Gateway</Text>
+            <Text style={styles.processOrderHint}>
+              Customer akan diarahkan ke checkout DANA. POS akan otomatis menunggu status paid dari websocket dan polling cadangan.
+            </Text>
+
+            <View style={styles.danaQrisStatusRow}>
+              <View
+                style={[
+                  styles.danaQrisStatusBadge,
+                  normalizeDanaQrisStatus(danaGatewayModal.status) === 'paid'
+                    ? styles.danaQrisStatusBadgePaid
+                    : normalizeDanaQrisStatus(danaGatewayModal.status) === 'failed'
+                      || normalizeDanaQrisStatus(danaGatewayModal.status) === 'expired'
+                      || normalizeDanaQrisStatus(danaGatewayModal.status) === 'cancelled'
+                        ? styles.danaQrisStatusBadgeFailed
+                        : styles.danaQrisStatusBadgePending,
+                ]}
+              >
+                <Text style={styles.danaQrisStatusBadgeText}>
+                  {getDanaGatewayStatusLabel(danaGatewayModal.status)}
+                </Text>
+              </View>
+              <Text style={styles.danaQrisRealtimeText}>
+                {danaGatewayModal.realtimeAvailable ? 'Realtime aktif' : 'Polling aktif'}
+              </Text>
+            </View>
+
+            <View style={styles.processOrderSummaryCard}>
+              <View style={styles.processOrderSummaryRow}>
+                <Text style={styles.processOrderSummaryLabel}>Invoice</Text>
+                <Text style={styles.processOrderSummaryValue}>{danaGatewayModal.invoiceNo || '-'}</Text>
+              </View>
+              <View style={styles.processOrderSummaryRow}>
+                <Text style={styles.processOrderSummaryLabel}>Nominal</Text>
+                <Text style={styles.processOrderSummaryValue}>{formatRupiah(danaGatewayModal.amount || 0)}</Text>
+              </View>
+              <View style={[styles.processOrderSummaryRow, styles.processOrderSummaryRowStrong]}>
+                <Text style={styles.processOrderSummaryLabelStrong}>Expired</Text>
+                <Text style={styles.processOrderSummaryValueStrong}>
+                  {danaGatewayModal.expiresAt
+                    ? `${danaGatewayCountdownLabel} lagi`
+                    : 'Menunggu checkout'}
+                </Text>
+              </View>
+            </View>
+
+            <View style={styles.danaGatewayCheckoutPanel}>
+              {danaGatewayModal.isGenerating ? (
+                <View style={styles.danaQrisLoadingBox}>
+                  <SyncLoadingAnimation size={42} />
+                  <Text style={styles.danaQrisMessage}>Membuat checkout DANA...</Text>
+                </View>
+              ) : (
+                <>
+                  <Text style={styles.danaQrisMessage}>
+                    {String(danaGatewayModal.checkoutUrl || '').trim()
+                      ? 'Halaman checkout sudah siap. Klik tombol di bawah untuk membuka atau membuka ulang pembayaran DANA.'
+                      : ['failed', 'expired', 'cancelled'].includes(normalizeDanaQrisStatus(danaGatewayModal.status))
+                        ? (
+                          String(danaGatewayModal.providerMessage || '').trim()
+                            || 'Checkout DANA belum berhasil dibuat. Klik Buat Ulang Checkout atau lanjutkan pembayaran dengan metode lain.'
+                        )
+                        : 'Checkout URL belum tersedia. Gunakan cek status jika provider masih memproses create order.'}
+                  </Text>
+                  <Pressable
+                    style={[
+                      styles.popupButton,
+                      styles.danaGatewayCheckoutButton,
+                      !String(danaGatewayModal.checkoutUrl || '').trim() ? styles.draftActionDisabled : null,
+                    ]}
+                    disabled={!String(danaGatewayModal.checkoutUrl || '').trim()}
+                    onPress={() => {
+                      openDanaGatewayCheckout(danaGatewayModal.checkoutUrl).catch(() => {});
+                    }}
+                  >
+                    <Text style={styles.popupButtonText}>Buka Halaman Pembayaran</Text>
+                  </Pressable>
+                </>
+              )}
+            </View>
+
+            {String(danaGatewayModal.checkoutUrl || '').trim() ? (
+              <Text style={styles.danaQrisPayloadText} numberOfLines={2}>
+                URL Checkout: {danaGatewayModal.checkoutUrl}
+              </Text>
+            ) : null}
+
+            <Text style={styles.danaQrisMessage}>
+              {danaGatewayModal.message || danaGatewayModal.providerMessage || 'Menunggu status pembayaran.'}
+            </Text>
+            {String(danaGatewayModal.realtimeMessage || '').trim() ? (
+              <Text style={styles.danaQrisRealtimeHint}>{danaGatewayModal.realtimeMessage}</Text>
+            ) : null}
+
+            <View style={[styles.popupActions, styles.processOrderActionsCompact]}>
+              <Pressable
+                style={[
+                  styles.popupButton,
+                  styles.popupButtonSecondary,
+                  styles.processOrderActionButtonCompact,
+                  (danaGatewayModal.isGenerating || (!danaGatewayCanRetry && !(Number(danaGatewayModal.paymentTransactionId || 0) > 0))) ? styles.draftActionDisabled : null,
+                ]}
+                disabled={danaGatewayModal.isGenerating || (!danaGatewayCanRetry && !(Number(danaGatewayModal.paymentTransactionId || 0) > 0))}
+                onPress={() => {
+                  if (danaGatewayCanRetry) {
+                    startDanaGatewayPayment(danaGatewayModal.orderResult).catch(() => {});
+                    return;
+                  }
+                  refreshDanaGatewayStatus({ syncProvider: true }).catch(() => {});
+                }}
+              >
+                <Text style={[styles.popupButtonText, styles.popupButtonTextSecondary]}>
+                  {danaGatewayCanRetry ? 'Buat Ulang Checkout' : 'Cek Status'}
+                </Text>
+              </Pressable>
+              <Pressable
+                style={[
+                  styles.popupButton,
+                  styles.processOrderActionButtonCompact,
+                  (danaGatewayModal.isFinalizing || (danaGatewayModal.isGenerating && !(Number(danaGatewayModal.paymentTransactionId || 0) > 0))) ? styles.draftActionDisabled : null,
+                ]}
+                disabled={danaGatewayModal.isFinalizing || (danaGatewayModal.isGenerating && !(Number(danaGatewayModal.paymentTransactionId || 0) > 0))}
+                onPress={closeDanaGatewayModal}
+              >
+                {danaGatewayModal.isFinalizing ? (
+                  <View style={styles.inlineLoadingButtonContent}>
+                    <SyncLoadingAnimation size={20} />
+                    <Text style={styles.popupButtonText}>Memproses Nota...</Text>
+                  </View>
+                ) : (
+                  <Text style={styles.popupButtonText}>
+                    {normalizeDanaQrisStatus(danaGatewayModal.status) === 'paid'
+                      ? 'Tutup'
+                      : normalizeDanaQrisStatus(danaGatewayModal.status) === 'pending'
+                        ? 'Kembali ke Kasir'
+                        : 'Tutup Monitor'}
+                  </Text>
+                )}
+              </Pressable>
+            </View>
+            {normalizeDanaQrisStatus(danaGatewayModal.status) === 'pending' ? (
+              <Text style={styles.danaQrisRealtimeHint}>
+                Kasir bisa klik `Kembali ke Kasir` untuk lanjut transaksi lain. Checkout tetap dipantau dari daftar invoice sampai customer membayar.
+              </Text>
+            ) : null}
           </View>
         </View>
       </Modal>
@@ -15477,7 +18090,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                 <>
                   <ScrollView style={styles.bankPickerList}>
                     {depositAccountOptions.map((row, index) => {
-                      const rowId = Number(row?.id || 0);
+                      const rowId = resolveAccountingSelectionId(row);
                       const active = rowId > 0 && rowId === Number(depositAccountId || 0);
                       return (
                         <Pressable
@@ -16018,7 +18631,38 @@ const SalesScreen = ({ currentUser, onLogout }) => {
               ) : null}
               <Text style={styles.popupMessage}>Status Order: {invoiceDetailModal.orderStatus}</Text>
               <Text style={styles.popupMessage}>Produksi Ringkas: {invoiceDetailModal.productionSummary}</Text>
+              {String(invoiceDetailModal.proofingSummary || '').trim() ? (
+                <>
+                  <Text style={styles.popupMessage}>
+                    {String(invoiceDetailModal.proofingSummarySectionLabel || 'Proofing Ringkas')}:{' '}
+                    <Text style={{ color: invoiceDetailModal.proofingSummaryColor || '#6b7280' }}>
+                      {invoiceDetailModal.proofingSummary}
+                    </Text>
+                  </Text>
+                  {String(invoiceDetailModal.proofingSummaryNote || '').trim() ? (
+                    <Text style={styles.popupMessage}>{invoiceDetailModal.proofingSummaryNote}</Text>
+                  ) : null}
+                </>
+              ) : null}
               <Text style={styles.popupMessage}>Item: {invoiceDetailModal.itemCount} | Total: {formatRupiah(invoiceDetailModal.total)}</Text>
+              {invoiceDetailModal.providerPaymentSummary ? (
+                <>
+                  <Text style={styles.popupMessage}>
+                    Payment Online: {invoiceDetailModal.providerPaymentSummary.methodLabel} | {invoiceDetailModal.providerPaymentSummary.statusLabel}
+                  </Text>
+                  {formatDanaProviderPaymentCountdownLabel(invoiceDetailModal.providerPaymentSummary, providerPaymentTick) ? (
+                    <Text style={styles.popupMessage}>
+                      Sisa waktu bayar: {formatDanaProviderPaymentCountdownLabel(invoiceDetailModal.providerPaymentSummary, providerPaymentTick)}
+                    </Text>
+                  ) : null}
+                  {String(invoiceDetailModal.providerPaymentSummary.providerMessage || '').trim() ? (
+                    <Text style={styles.popupMessage}>
+                      Provider: {invoiceDetailModal.providerPaymentSummary.providerStatusCode ? `${invoiceDetailModal.providerPaymentSummary.providerStatusCode} - ` : ''}
+                      {invoiceDetailModal.providerPaymentSummary.providerMessage}
+                    </Text>
+                  ) : null}
+                </>
+              ) : null}
               <Text style={styles.popupMessage}>Pengambilan: {invoiceDetailModal.pickedUpText}</Text>
               <Text style={styles.popupMessage}>Tanggal: {invoiceDetailModal.createdAt}</Text>
               {String(invoiceDetailModal.cancellationText || '').trim() ? (
@@ -16030,13 +18674,61 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                   <View key={`${item.key}-${index}`} style={styles.invoiceItemCard}>
                     <View style={styles.invoiceItemHeader}>
                       <Text style={styles.invoiceItemTitle}>{index + 1}. {item.productName}</Text>
-                      <Text style={[styles.invoiceItemStatus, { color: getProductionStatusTextColor(item.productionStatus) }]}>
-                        {item.productionStatusLabel}
+                      <Text
+                        style={[
+                          styles.invoiceItemStatus,
+                          {
+                            color: item.proofingRequired && item.customerTrackingMode === 'production'
+                              ? (item.customerTrackingColor || getProductionStatusTextColor(item.productionStatus))
+                              : getProductionStatusTextColor(item.productionStatus),
+                          },
+                        ]}
+                      >
+                        {item.proofingRequired && item.customerTrackingMode === 'production'
+                          ? (item.customerTrackingLabel || item.productionStatusLabel)
+                          : item.productionStatusLabel}
                       </Text>
                     </View>
                     <Text style={styles.invoiceItemMeta}>
                       Qty: {item.qty}{item.showPages ? ` | Halaman: ${item.pages}` : ''}
                     </Text>
+                    {item.proofingRequired ? (
+                      <>
+                        <Text style={styles.invoiceItemMeta}>
+                          {item.customerTrackingSectionLabel || 'Proofing'}:{' '}
+                          <Text style={{ color: item.customerTrackingColor || item.proofingStatusColor || '#6b7280' }}>
+                            {item.customerTrackingLabel || item.proofingStatusLabel}
+                          </Text>
+                        </Text>
+                        {String(item.customerTrackingNote || '').trim() ? (
+                          <Text style={styles.invoiceItemMeta}>{item.customerTrackingNote}</Text>
+                        ) : null}
+                        <Text style={styles.invoiceItemMeta}>Flow: {item.proofingFlowLabel}</Text>
+                        <Text style={styles.invoiceItemMeta}>Designer: {item.proofingDesignerName}</Text>
+                        <Text style={styles.invoiceItemMeta}>
+                          Gate Produksi: {item.proofingPaymentGateLabel}
+                          {item.proofingCanRelease ? ' | Siap dilepas' : ''}
+                        </Text>
+                        {String(item.proofingLatestLogText || '').trim() ? (
+                          <Text style={styles.invoiceItemMeta}>Log terakhir: {item.proofingLatestLogText}</Text>
+                        ) : null}
+                        {item.proofingWhatsappSentAt !== '-' ? (
+                          <Text style={styles.invoiceItemMeta}>WA terkirim: {item.proofingWhatsappSentAt}</Text>
+                        ) : null}
+                        {item.proofingApprovedAt !== '-' ? (
+                          <Text style={styles.invoiceItemMeta}>Approved: {item.proofingApprovedAt}</Text>
+                        ) : null}
+                        {item.proofingRevisedAt !== '-' ? (
+                          <Text style={styles.invoiceItemMeta}>Revisi customer: {item.proofingRevisedAt}</Text>
+                        ) : null}
+                        {String(item.proofingRevisionNote || '').trim() ? (
+                          <Text style={styles.invoiceItemMeta}>Catatan revisi: {item.proofingRevisionNote}</Text>
+                        ) : null}
+                        {String(item.proofingDesignerNote || '').trim() ? (
+                          <Text style={styles.invoiceItemMeta}>Catatan designer: {item.proofingDesignerNote}</Text>
+                        ) : null}
+                      </>
+                    ) : null}
                     {item.isGroupProduct ? (
                       <Text style={styles.invoiceItemGroupBadge}>
                         Paket Produk{item.groupSummary ? ` | ${item.groupSummary}` : ''}
@@ -17921,6 +20613,121 @@ const styles = StyleSheet.create({
   },
   popupButtonTextSecondary: {
     color: '#2a2a2a',
+  },
+  danaQrisCard: {
+    width: '92%',
+    maxWidth: 460,
+    borderColor: '#0f766e',
+    backgroundColor: '#f8fffd',
+  },
+  danaQrisStatusRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 10,
+    marginTop: 10,
+    marginBottom: 8,
+  },
+  danaQrisStatusBadge: {
+    borderRadius: 999,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+  },
+  danaQrisStatusBadgePending: {
+    backgroundColor: '#fff7ed',
+    borderWidth: 1,
+    borderColor: '#fed7aa',
+  },
+  danaQrisStatusBadgePaid: {
+    backgroundColor: '#dcfce7',
+    borderWidth: 1,
+    borderColor: '#86efac',
+  },
+  danaQrisStatusBadgeFailed: {
+    backgroundColor: '#fee2e2',
+    borderWidth: 1,
+    borderColor: '#fecaca',
+  },
+  danaQrisStatusBadgeText: {
+    fontSize: 11,
+    fontWeight: '800',
+    color: '#12332d',
+  },
+  danaQrisRealtimeText: {
+    flex: 1,
+    textAlign: 'right',
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#0f766e',
+  },
+  danaQrisQrPanel: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    alignSelf: 'center',
+    width: '100%',
+    maxWidth: 300,
+    minHeight: 260,
+    marginTop: 8,
+    marginBottom: 10,
+    padding: 18,
+    borderRadius: 18,
+    borderWidth: 1,
+    borderColor: '#cdece5',
+    backgroundColor: '#ffffff',
+  },
+  danaGatewayCheckoutPanel: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    alignSelf: 'center',
+    width: '100%',
+    marginTop: 8,
+    marginBottom: 10,
+    padding: 18,
+    borderRadius: 18,
+    borderWidth: 1,
+    borderColor: '#cdece5',
+    backgroundColor: '#ffffff',
+    gap: 12,
+  },
+  danaGatewayCheckoutButton: {
+    alignSelf: 'stretch',
+  },
+  danaQrisImage: {
+    width: 238,
+    height: 238,
+  },
+  danaQrisGeneratedQr: {
+    padding: 12,
+    borderRadius: 12,
+    backgroundColor: '#ffffff',
+  },
+  danaQrisLoadingBox: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 10,
+    minHeight: 180,
+  },
+  danaQrisPayloadText: {
+    fontSize: 10,
+    lineHeight: 14,
+    color: '#60736f',
+    backgroundColor: '#eefaf7',
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+  },
+  danaQrisMessage: {
+    fontSize: 12,
+    lineHeight: 18,
+    color: '#20413b',
+    textAlign: 'center',
+  },
+  danaQrisRealtimeHint: {
+    marginTop: 6,
+    fontSize: 11,
+    lineHeight: 16,
+    color: '#5f6f6c',
+    textAlign: 'center',
   },
   debugTitle: {
     fontSize: 12,
