@@ -26,7 +26,6 @@ import {
 } from '../utils/orderPayload';
 import {
   createPosCustomer,
-  createPosCashFlow,
   createDanaGatewayPayment,
   createDanaQrisPayment,
   createPosInvoicePayment,
@@ -37,13 +36,10 @@ import {
   rejectPosManualApproval,
   resolvePosManualApproval,
   fetchPosBankAccounts,
-  fetchPosCashFlows,
-  fetchPosCashFlowTypes,
   fetchPosCloserOrder,
   fetchAllPosCustomers,
   fetchPosCustomers,
   fetchPosCustomerTypes,
-  fetchPosFinanceRecipients,
   fetchPosFinishings,
   fetchPosMaterials,
   fetchPosClosingSummary,
@@ -58,7 +54,6 @@ import {
   fetchPosProofings,
   fetchPosProducts,
   fetchPosReceivableApprovals,
-  getPengeluaranCategoryOptions,
   fetchPosManualApprovals,
   fetchPosSettings,
   fetchPosSyncChanges,
@@ -72,7 +67,6 @@ import {
   getCustomerReceivableSummary,
   getApiBaseUrl,
   previewPosPricing,
-  submitPosCloserOrder,
   topUpCustomerDeposit,
   uploadPosProofingFinalFile,
   uploadPosProofingPreview,
@@ -4326,23 +4320,6 @@ const DEFAULT_PAYMENT_METHOD_CONFIGS = [
     accounts: [],
   },
 ];
-const DEFAULT_CASH_FLOW_QUICK_CATEGORIES = {
-  expense: [
-    'Beli ATK',
-    'Beli konsumsi',
-    'Beli galon',
-    'Operasional mendadak',
-    'Ambil owner',
-    'Biaya kurir',
-  ],
-  income: [
-    'Titipan uang',
-    'Pengembalian supplier',
-    'Tambahan modal kas',
-    'Setoran lain',
-    'Penerimaan operasional',
-  ],
-};
 const DEFAULT_RECEIPT_LOGO_MODULE = require('../../assets/logo-sidomulyo.png');
 const DEFAULT_RECEIPT_SETTINGS = {
   brand_name: 'POS Kasir',
@@ -4796,15 +4773,6 @@ const isInvoiceRowInDateRange = (row, dateFrom, dateTo) => {
   }
   return true;
 };
-const formatCashFlowSourceLabel = (value) => {
-  const source = String(value || '').trim().toLowerCase();
-  if (source === 'backend') return 'Backend';
-  if (source === 'recent') return 'Riwayat';
-  if (source === 'fallback') return 'Cepat';
-  if (source === 'manual') return 'Manual';
-  return 'Custom';
-};
-
 const formatBackendValidationError = (error) => {
   const validationBody = error?.body;
   if (!validationBody || typeof validationBody !== 'object' || Array.isArray(validationBody)) {
@@ -5685,36 +5653,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
   const [processingProofingId, setProcessingProofingId] = useState(null);
   const [closingReportDate, setClosingReportDate] = useState(formatIsoDate(new Date()));
   const [closingReport, setClosingReport] = useState(null);
-  const [closingRecord, setClosingRecord] = useState(null);
   const [isClosingReportLoading, setIsClosingReportLoading] = useState(false);
-  const [financeRecipients, setFinanceRecipients] = useState([]);
-  const [isFinanceRecipientsLoading, setIsFinanceRecipientsLoading] = useState(false);
-  const [cashFlowTypes, setCashFlowTypes] = useState([]);
-  const [isCashFlowTypesLoading, setIsCashFlowTypesLoading] = useState(false);
-  const [cashFlowSourceAccounts, setCashFlowSourceAccounts] = useState([]);
-  const [isCashFlowAccountsLoading, setIsCashFlowAccountsLoading] = useState(false);
-  const [cashFlowRows, setCashFlowRows] = useState([]);
-  const [isCashFlowRowsLoading, setIsCashFlowRowsLoading] = useState(false);
-  const [cashFlowTransactionType, setCashFlowTransactionType] = useState('expense');
-  const [cashFlowHistoryFilter, setCashFlowHistoryFilter] = useState('all');
-  const [cashFlowTypeId, setCashFlowTypeId] = useState(null);
-  const [cashFlowSourceAccountId, setCashFlowSourceAccountId] = useState(null);
-  const [cashFlowCategory, setCashFlowCategory] = useState('');
-  const [expenseCategoryModalVisible, setExpenseCategoryModalVisible] = useState(false);
-  const [expenseCategorySearch, setExpenseCategorySearch] = useState('');
-  const [cashFlowAmount, setCashFlowAmount] = useState('');
-  const [cashFlowNote, setCashFlowNote] = useState('');
-  const [isCashFlowSubmitting, setIsCashFlowSubmitting] = useState(false);
-  const [isClosingSubmitLoading, setIsClosingSubmitLoading] = useState(false);
-  const [closingOpeningCash, setClosingOpeningCash] = useState('');
-  const [closingActualCash, setClosingActualCash] = useState('');
-  const [closingFinanceRecipientId, setClosingFinanceRecipientId] = useState(null);
-  const [closingFinanceRecipient, setClosingFinanceRecipient] = useState('');
-  const [closingShiftNote, setClosingShiftNote] = useState('');
-  const [damageProductSearch, setDamageProductSearch] = useState('');
-  const [selectedDamageProductId, setSelectedDamageProductId] = useState(null);
-  const [damageQtyInput, setDamageQtyInput] = useState('1');
-  const [damageNoteInput, setDamageNoteInput] = useState('');
   const [closingDamageItems, setClosingDamageItems] = useState([]);
 
   const [backendReady, setBackendReady] = useState(false);
@@ -6608,53 +6547,16 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     }
   };
 
-  const loadFinanceRecipients = async () => {
-    if (!backendReady) {
-      setFinanceRecipients([]);
-      return;
-    }
-    try {
-      setIsFinanceRecipientsLoading(true);
-      const rows = await fetchPosFinanceRecipients();
-      const normalizedRows = (Array.isArray(rows) ? rows : [])
-        .filter((row) => normalizeText(row?.role_name) === 'admin_keuangan')
-        .map((row) => ({
-          ...row,
-          id: Number(row?.id || 0),
-          name: String(row?.name || '').trim(),
-          email: String(row?.email || '').trim(),
-          outletName: String(row?.outlet_name || '').trim(),
-        }))
-        .filter((row) => row.id > 0 && row.name);
-      setFinanceRecipients(normalizedRows);
-      if (!(Number(closingFinanceRecipientId || 0) > 0) && normalizedRows.length > 0) {
-        setClosingFinanceRecipientId(normalizedRows[0].id);
-        setClosingFinanceRecipient(normalizedRows[0].name);
-      }
-    } catch (error) {
-      setFinanceRecipients([]);
-      openNotice('Laporan Close Order', `Gagal memuat admin keuangan: ${error.message}`);
-    } finally {
-      setIsFinanceRecipientsLoading(false);
-    }
-  };
-
   const loadCloserOrderRecord = async (overrideDate = null) => {
     const reportDate = String(overrideDate || closingReportDate || formatIsoDate(new Date())).trim();
     if (!backendReady) {
-      setClosingRecord(null);
+      setClosingDamageItems([]);
       return;
     }
     try {
       const payload = await fetchPosCloserOrder({ date: reportDate });
       const row = payload && typeof payload === 'object' ? payload : null;
-      setClosingRecord(row);
       if (row) {
-        setClosingOpeningCash(sanitizeCurrencyInput(String(Math.max(0, Number(row?.opening_cash || 0)))));
-        setClosingActualCash(sanitizeCurrencyInput(String(Math.max(0, Number(row?.cashier_actual_cash || 0)))));
-        setClosingFinanceRecipientId(Number(row?.finance_user?.id || 0) || null);
-        setClosingFinanceRecipient(String(row?.finance_user?.name || '').trim());
-        setClosingShiftNote(String(row?.cashier_note || '').trim());
         setClosingDamageItems(
           (Array.isArray(row?.damage_items) ? row.damage_items : []).map((item) => ({
             id: Number(item?.id || 0) || `damage-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
@@ -6671,95 +6573,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         setClosingDamageItems([]);
       }
     } catch (_error) {
-      setClosingRecord(null);
-    }
-  };
-
-  const loadCashFlowTypes = async (transactionType = null) => {
-    if (!backendReady) {
-      setCashFlowTypes([]);
-      return;
-    }
-    try {
-      setIsCashFlowTypesLoading(true);
-      const resolvedType = String(transactionType || cashFlowTransactionType || '').trim().toLowerCase();
-      if (resolvedType === 'expense') {
-        const rows = await getPengeluaranCategoryOptions();
-        setCashFlowTypes((Array.isArray(rows) ? rows : []).map((row) => ({
-          ...row,
-          id: Number(row?.id || 0) || null,
-          name: String(row?.name || '').trim(),
-          transaction_type: 'expense',
-          purchase_category_id: Number(row?.id || 0) || null,
-          purchase_category_code: String(row?.code || '').trim(),
-        })));
-      } else {
-        const rows = await fetchPosCashFlowTypes({
-          type: resolvedType,
-          active_only: true,
-        });
-        setCashFlowTypes(Array.isArray(rows) ? rows : []);
-      }
-    } catch (error) {
-      setCashFlowTypes([]);
-      openNotice('Kas Masuk / Keluar', `Gagal memuat tipe transaksi: ${error.message}`);
-    } finally {
-      setIsCashFlowTypesLoading(false);
-    }
-  };
-
-  const loadCashFlowSourceAccounts = async () => {
-    if (!backendReady) {
-      setCashFlowSourceAccounts([]);
-      setCashFlowSourceAccountId(null);
-      return;
-    }
-    try {
-      setIsCashFlowAccountsLoading(true);
-      const rows = await fetchPosBankAccounts({
-        context: 'expense',
-        allowedTypes: ['cash', 'bank_transfer', 'qris', 'e_wallet'],
-      });
-      const options = toDataRows(rows)
-        .map((row) => normalizeBankAccountRow(row))
-        .filter((row) => Number(row?.accountingAccountId || row?.id || 0) > 0);
-      setCashFlowSourceAccounts(options);
-      setCashFlowSourceAccountId((currentId) => {
-        const resolvedCurrentId = Number(currentId || 0);
-        if (resolvedCurrentId > 0 && options.some((row) => Number(row?.accountingAccountId || row?.id || 0) === resolvedCurrentId)) {
-          return resolvedCurrentId;
-        }
-        return Number(options[0]?.accountingAccountId || options[0]?.id || 0) || null;
-      });
-    } catch (error) {
-      setCashFlowSourceAccounts([]);
-      setCashFlowSourceAccountId(null);
-      openNotice('Kas Masuk / Keluar', `Gagal memuat akun kas / bank: ${error.message}`);
-    } finally {
-      setIsCashFlowAccountsLoading(false);
-    }
-  };
-
-  const loadCashFlowRows = async (overrideDate = null) => {
-    const reportDate = String(overrideDate || closingReportDate || formatIsoDate(new Date())).trim();
-    if (!backendReady) {
-      setCashFlowRows([]);
-      return;
-    }
-    try {
-      setIsCashFlowRowsLoading(true);
-      const payload = await fetchPosCashFlows({
-        date_from: reportDate,
-        date_to: reportDate,
-        per_page: 20,
-      });
-      const rows = Array.isArray(payload?.data) ? payload.data : (Array.isArray(payload) ? payload : []);
-      setCashFlowRows(rows);
-    } catch (error) {
-      setCashFlowRows([]);
-      openNotice('Kas Masuk / Keluar', `Gagal memuat riwayat kas: ${error.message}`);
-    } finally {
-      setIsCashFlowRowsLoading(false);
+      setClosingDamageItems([]);
     }
   };
 
@@ -6767,9 +6581,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     const reportDate = String(overrideDate || closingReportDate || formatIsoDate(new Date())).trim();
     await Promise.all([
       loadClosingReport(reportDate),
-      loadCashFlowRows(reportDate),
       loadCloserOrderRecord(reportDate),
-      loadFinanceRecipients(),
     ]);
   };
 
@@ -11267,30 +11079,8 @@ const SalesScreen = ({ currentUser, onLogout }) => {
   useEffect(() => {
     if (activeMenu === 'report') {
       loadClosingWorkspace();
-      loadCashFlowTypes();
-      loadCashFlowSourceAccounts();
     }
   }, [activeMenu, backendReady]);
-
-  useEffect(() => {
-    const matchedRecipient = (Array.isArray(financeRecipients) ? financeRecipients : [])
-      .find((row) => Number(row?.id || 0) === Number(closingFinanceRecipientId || 0)) || null;
-    if (matchedRecipient?.name) {
-      setClosingFinanceRecipient(matchedRecipient.name);
-    }
-  }, [financeRecipients, closingFinanceRecipientId]);
-
-  useEffect(() => {
-    if (activeMenu === 'report') {
-      loadCashFlowTypes(cashFlowTransactionType);
-      setCashFlowTypeId(null);
-      setExpenseCategoryModalVisible(false);
-      setExpenseCategorySearch('');
-      if (cashFlowTransactionType !== 'expense') {
-        setCashFlowSourceAccountId(null);
-      }
-    }
-  }, [cashFlowTransactionType]);
 
   useEffect(() => {
     if (activeMenu !== 'production') {
@@ -15353,90 +15143,6 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       total: roundMoney(nonCashSales + nonCashReceivable),
     };
   }, [closingReport]);
-  const availableCashFlowTypes = useMemo(
-    () => (Array.isArray(cashFlowTypes) ? cashFlowTypes : []).filter((row) => String(row?.transaction_type || '') === String(cashFlowTransactionType || '')),
-    [cashFlowTransactionType, cashFlowTypes],
-  );
-  const filteredCashFlowRows = useMemo(() => {
-    const rows = Array.isArray(cashFlowRows) ? cashFlowRows : [];
-    if (!['income', 'expense'].includes(String(cashFlowHistoryFilter || ''))) {
-      return rows;
-    }
-    return rows.filter((row) => String(row?.transaction_type || '').toLowerCase() === String(cashFlowHistoryFilter || '').toLowerCase());
-  }, [cashFlowHistoryFilter, cashFlowRows]);
-  const selectedCashFlowType = useMemo(
-    () => availableCashFlowTypes.find((row) => Number(row?.id || 0) === Number(cashFlowTypeId || 0)) || null,
-    [availableCashFlowTypes, cashFlowTypeId],
-  );
-  const filteredExpenseCashFlowTypes = useMemo(() => {
-    const keyword = normalizeText(expenseCategorySearch);
-    const rows = Array.isArray(availableCashFlowTypes) ? availableCashFlowTypes : [];
-    if (String(cashFlowTransactionType || '').toLowerCase() !== 'expense') {
-      return [];
-    }
-    if (!keyword) {
-      return rows;
-    }
-    return rows.filter((row) => {
-      const name = normalizeText(row?.name || '');
-      const code = normalizeText(row?.purchase_category_code || row?.code || '');
-      return name.includes(keyword) || code.includes(keyword);
-    });
-  }, [availableCashFlowTypes, cashFlowTransactionType, expenseCategorySearch]);
-  const selectedCashFlowSourceAccountRow = useMemo(
-    () => (Array.isArray(cashFlowSourceAccounts) ? cashFlowSourceAccounts : [])
-      .find((row) => Number(row?.accountingAccountId || row?.id || 0) === Number(cashFlowSourceAccountId || 0)) || null,
-    [cashFlowSourceAccountId, cashFlowSourceAccounts],
-  );
-  const recentCashFlowCategories = useMemo(
-    () => Array.from(new Set(
-      (Array.isArray(cashFlowRows) ? cashFlowRows : [])
-        .filter((row) => String(row?.transaction_type || '') === String(cashFlowTransactionType || ''))
-        .map((row) => String(row?.category || '').trim())
-        .filter(Boolean),
-    )).slice(0, 6),
-    [cashFlowRows, cashFlowTransactionType],
-  );
-  const quickCashFlowCategories = useMemo(() => {
-    const backendTypeRows = availableCashFlowTypes.map((row) => ({
-      key: `type-${row?.id || row?.name || ''}`,
-      label: String(row?.name || '-'),
-      typeId: Number(row?.id || 0) || null,
-      manualCategory: '',
-      source: 'backend',
-    }));
-    if (cashFlowTransactionType === 'expense') {
-      return backendTypeRows.slice(0, 12);
-    }
-    const fallbackRows = (DEFAULT_CASH_FLOW_QUICK_CATEGORIES[cashFlowTransactionType] || []).map((label) => ({
-      key: `fallback-${cashFlowTransactionType}-${label}`,
-      label,
-      typeId: null,
-      manualCategory: label,
-      source: 'fallback',
-    }));
-    const recentRows = recentCashFlowCategories.map((label) => ({
-      key: `recent-${cashFlowTransactionType}-${label}`,
-      label,
-      typeId: null,
-      manualCategory: label,
-      source: 'recent',
-    }));
-    const merged = [...backendTypeRows, ...recentRows, ...fallbackRows];
-    const seen = new Set();
-    return merged.filter((row) => {
-      const signature = normalizeText(row.label);
-      if (!signature || seen.has(signature)) {
-        return false;
-      }
-      seen.add(signature);
-      return true;
-    }).slice(0, 12);
-  }, [availableCashFlowTypes, cashFlowTransactionType, recentCashFlowCategories]);
-  const closingExternalRows = useMemo(
-    () => Array.isArray(closingReport?.external_cash?.transactions) ? closingReport.external_cash.transactions : [],
-    [closingReport],
-  );
   const closingReceivableSettlementRows = useMemo(
     () => Array.isArray(closingReport?.receivable_collections?.settlements) ? closingReport.receivable_collections.settlements : [],
     [closingReport],
@@ -15444,41 +15150,6 @@ const SalesScreen = ({ currentUser, onLogout }) => {
   const closingReceivableBreakdownRows = useMemo(
     () => Array.isArray(closingReport?.receivable_collections?.breakdown) ? closingReport.receivable_collections.breakdown : [],
     [closingReport],
-  );
-  const selectedFinanceRecipientRow = useMemo(
-    () => (Array.isArray(financeRecipients) ? financeRecipients : [])
-      .find((row) => Number(row?.id || 0) === Number(closingFinanceRecipientId || 0)) || null,
-    [financeRecipients, closingFinanceRecipientId],
-  );
-  const filteredDamageProductOptions = useMemo(() => {
-    const keyword = normalizeText(damageProductSearch);
-    const rows = Array.isArray(products) ? products : [];
-    const filtered = keyword
-      ? rows.filter((row) => {
-        const name = normalizeText(row?.name || '');
-        const sku = normalizeText(row?.sku || '');
-        return name.includes(keyword) || sku.includes(keyword);
-      })
-      : rows;
-
-    return filtered
-      .slice(0, 12)
-      .map((row) => ({
-        id: Number(row?.id || 0),
-        name: String(row?.name || '').trim(),
-        unitValue: roundMoney(Number(row?.price_regular || row?.price || row?.price_reseller || row?.bottom_price || 0)),
-      }))
-      .filter((row) => row.id > 0 && row.name);
-  }, [damageProductSearch, products]);
-  const selectedDamageProductRow = useMemo(
-    () => filteredDamageProductOptions.find((row) => Number(row?.id || 0) === Number(selectedDamageProductId || 0))
-      || (Array.isArray(products) ? products : []).map((row) => ({
-        id: Number(row?.id || 0),
-        name: String(row?.name || '').trim(),
-        unitValue: roundMoney(Number(row?.price_regular || row?.price || row?.price_reseller || row?.bottom_price || 0)),
-      })).find((row) => Number(row?.id || 0) === Number(selectedDamageProductId || 0))
-      || null,
-    [filteredDamageProductOptions, products, selectedDamageProductId],
   );
   const closingTopProducts = useMemo(
     () => Array.isArray(closingReport?.top_products) ? closingReport.top_products : [],
@@ -15528,291 +15199,6 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       auditedCount: 0,
     });
   }, [closingDamageItems]);
-  const closingOpeningCashValue = useMemo(() => parseCurrencyInput(closingOpeningCash), [closingOpeningCash]);
-  const closingActualCashValue = useMemo(() => parseCurrencyInput(closingActualCash), [closingActualCash]);
-  const closingExpectedCashValue = useMemo(() => {
-    if (!closingReport) return 0;
-    return roundMoney(closingOpeningCashValue + Number(closingReport?.closing?.net_cash_movement || 0));
-  }, [closingOpeningCashValue, closingReport]);
-  const closingCashDifferenceValue = useMemo(
-    () => roundMoney(closingActualCashValue - closingExpectedCashValue),
-    [closingActualCashValue, closingExpectedCashValue],
-  );
-  const pendingCashOutAfterInput = useMemo(() => {
-    if (String(cashFlowTransactionType || '') !== 'expense') {
-      return closingExpectedCashValue;
-    }
-    return roundMoney(closingExpectedCashValue - parseCurrencyInput(cashFlowAmount));
-  }, [cashFlowAmount, cashFlowTransactionType, closingExpectedCashValue]);
-  const cashOutWarningText = useMemo(() => {
-    const amount = parseCurrencyInput(cashFlowAmount);
-    if (String(cashFlowTransactionType || '') !== 'expense' || amount <= 0) {
-      return '';
-    }
-    if (amount > closingExpectedCashValue && closingExpectedCashValue > 0) {
-      return `Nominal kas keluar melebihi saldo kas sistem saat ini (${formatRupiah(closingExpectedCashValue)}).`;
-    }
-    if (pendingCashOutAfterInput < 0) {
-      return `Setelah transaksi ini, saldo kas sistem menjadi minus ${formatRupiah(Math.abs(pendingCashOutAfterInput))}.`;
-    }
-    if (closingExpectedCashValue > 0 && amount >= (closingExpectedCashValue * 0.7)) {
-      return `Nominal kas keluar cukup besar dibanding saldo kas sistem saat ini (${formatRupiah(closingExpectedCashValue)}).`;
-    }
-    return '';
-  }, [cashFlowAmount, cashFlowTransactionType, closingExpectedCashValue, pendingCashOutAfterInput]);
-  const closingSummaryText = useMemo(() => {
-    if (!closingReport) {
-      return '';
-    }
-    const reportDate = String(closingReport?.date || closingReportDate || '-');
-    const cashierName = String(currentUser?.name || 'Kasir').trim() || 'Kasir';
-    return [
-      `LAPORAN TUTUP TOKO`,
-      `Tanggal: ${reportDate}`,
-      `Kasir: ${cashierName}`,
-      '',
-      `Omzet total invoice sukses: ${formatRupiah(closingOmzetSummary.gross)}`,
-      `Omset lunas: ${formatRupiah(closingOmzetSummary.lunas)}`,
-      `Omset piutang: ${formatRupiah(closingOmzetSummary.piutang)}`,
-      `Pembayaran penjualan hari ini: ${formatRupiah(closingReport?.sales?.payment_received_total || 0)}`,
-      `Pelunasan piutang hari ini: ${formatRupiah(closingReport?.receivable_collections?.total || 0)}`,
-      `Invoice lunas: ${closingOmzetSummary.invoiceLunasCount}`,
-      `Invoice piutang: ${closingOmzetSummary.invoicePiutangCount}`,
-      `Rata-rata transaksi: ${formatRupiah(closingReport?.sales?.average_ticket || 0)}`,
-      '',
-      `Tunai seharusnya di kasir: ${formatRupiah(closingCashInHandSummary.physicalCashExpected)}`,
-      `Non tunai masuk rekening: ${formatRupiah(closingNonCashSummary.total)}`,
-      `Kas masuk lain: ${formatRupiah(closingReport?.external_cash?.income_total || 0)}`,
-      `Kas keluar: ${formatRupiah(closingReport?.external_cash?.expense_total || 0)}`,
-      `Pergerakan kas bersih: ${formatRupiah(closingReport?.closing?.net_cash_movement || 0)}`,
-      `Saldo awal kas: ${formatRupiah(closingOpeningCashValue)}`,
-      `Saldo kas sistem: ${formatRupiah(closingExpectedCashValue)}`,
-      `Uang fisik akhir: ${formatRupiah(closingActualCashValue)}`,
-      `Selisih kas: ${formatRupiah(closingCashDifferenceValue)}`,
-    ].join('\n');
-  }, [
-    closingActualCashValue,
-    closingCashDifferenceValue,
-    closingCashInHandSummary.physicalCashExpected,
-    closingExpectedCashValue,
-    closingOmzetSummary.gross,
-    closingOmzetSummary.invoiceLunasCount,
-    closingOmzetSummary.invoicePiutangCount,
-    closingOmzetSummary.lunas,
-    closingNonCashSummary.total,
-    closingOpeningCashValue,
-    closingOmzetSummary.piutang,
-    closingReport,
-    closingReportDate,
-    currentUser?.name,
-  ]);
-
-  const handleCopyClosingSummary = async () => {
-    if (!closingSummaryText) {
-      openNotice('Laporan Close Order', 'Belum ada ringkasan laporan yang bisa disalin.');
-      return;
-    }
-    try {
-      const clipboard = globalThis?.navigator?.clipboard;
-      if (!clipboard || typeof clipboard.writeText !== 'function') {
-        throw new Error('Clipboard belum tersedia di perangkat ini.');
-      }
-      await clipboard.writeText(closingSummaryText);
-      openNotice('Laporan Close Order', 'Ringkasan laporan berhasil disalin. Tinggal kirim ke finance.', null, {
-        autoCloseMs: 2200,
-      });
-    } catch (error) {
-      openNotice('Laporan Close Order', `Gagal menyalin ringkasan: ${error.message}`);
-    }
-  };
-
-  const handleSubmitCloserOrder = async () => {
-    if (!closingReport) {
-      openNotice('Laporan Close Order', 'Generate laporan dulu sebelum kirim ke finance.');
-      return;
-    }
-    const financeUserId = Number(closingFinanceRecipientId || 0);
-    if (!(financeUserId > 0)) {
-      openNotice('Laporan Close Order', 'Pilih admin keuangan penerima close order terlebih dahulu.');
-      return;
-    }
-
-    try {
-      setIsClosingSubmitLoading(true);
-      const payload = await submitPosCloserOrder({
-        report_date: String(closingReport?.date || closingReportDate || formatIsoDate(new Date())),
-        finance_user_id: financeUserId,
-        opening_cash: closingOpeningCashValue,
-        expected_cash: closingExpectedCashValue,
-        cashier_actual_cash: closingActualCashValue,
-        cashier_note: closingShiftNote || '',
-        damage_items: closingDamageItems.map((row) => ({
-          product_id: Number(row?.productId || 0),
-          qty: Math.max(0, Number(row?.qty || 0)),
-          note: String(row?.note || '').trim(),
-        })).filter((row) => row.product_id > 0 && row.qty > 0),
-        report_snapshot: {
-          sales: closingReport?.sales || null,
-          payments: closingReport?.payments || null,
-          receivable_collections: closingReport?.receivable_collections || null,
-          external_cash: closingReport?.external_cash || null,
-          closing: closingReport?.closing || null,
-          top_products: closingReport?.top_products || [],
-        },
-      });
-      setClosingRecord(payload && typeof payload === 'object' ? payload : null);
-      openNotice('Laporan Close Order', 'Close order berhasil dikirim ke admin keuangan untuk divalidasi.', null, {
-        autoCloseMs: 2200,
-      });
-    } catch (error) {
-      openNotice('Laporan Close Order', `Gagal mengirim close order: ${error.message}`);
-    } finally {
-      setIsClosingSubmitLoading(false);
-    }
-  };
-
-  const handleAddDamageItem = () => {
-    const productId = Number(selectedDamageProductId || 0);
-    const qty = Math.max(0, Number(String(damageQtyInput || '0').replace(',', '.')) || 0);
-    if (!(productId > 0) || qty <= 0) {
-      openNotice('Barang Rusak', 'Pilih produk dan isi qty barang rusak terlebih dahulu.');
-      return;
-    }
-
-    const productRow = selectedDamageProductRow;
-    const productName = String(productRow?.name || '').trim();
-    const unitValue = roundMoney(Number(productRow?.unitValue || 0));
-
-    setClosingDamageItems((prev) => ([
-      ...prev,
-      {
-        id: `damage-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-        productId,
-        productName,
-        qty,
-        note: String(damageNoteInput || '').trim(),
-        estimatedTotalValue: roundMoney(unitValue * qty),
-        auditStatus: 'reported',
-        responsibility: '',
-      },
-    ]));
-    setSelectedDamageProductId(null);
-    setDamageProductSearch('');
-    setDamageQtyInput('1');
-    setDamageNoteInput('');
-  };
-
-  const handleSubmitCashFlow = async () => {
-    const amount = parseCurrencyInput(cashFlowAmount);
-    const occurredAt = String(closingReportDate || formatIsoDate(new Date())).trim();
-    const manualCategory = String(cashFlowCategory || '').trim();
-    const isExpenseFlow = String(cashFlowTransactionType || '').trim().toLowerCase() === 'expense';
-    if (!occurredAt) {
-      openNotice('Kas Masuk / Keluar', 'Tanggal transaksi wajib diisi.');
-      return;
-    }
-    if (amount <= 0) {
-      openNotice('Kas Masuk / Keluar', 'Nominal transaksi wajib lebih dari nol.');
-      return;
-    }
-    if (isExpenseFlow && !selectedCashFlowType) {
-      openNotice('Kas Masuk / Keluar', 'Pilih kategori pengeluaran dari backend terlebih dahulu.');
-      return;
-    }
-    if (!isExpenseFlow && !selectedCashFlowType && !manualCategory) {
-      openNotice('Kas Masuk / Keluar', 'Pilih kategori transaksi atau isi kategori manual.');
-      return;
-    }
-    if (isExpenseFlow && !selectedCashFlowSourceAccountRow) {
-      openNotice('Kas Masuk / Keluar', 'Pilih akun kas / bank sumber pembayaran terlebih dahulu.');
-      return;
-    }
-
-    try {
-      setIsCashFlowSubmitting(true);
-      const payload = {
-        transaction_type: cashFlowTransactionType,
-        occurred_at: occurredAt,
-        amount,
-        note: String(cashFlowNote || '').trim() || null,
-      };
-
-      if (isExpenseFlow) {
-        payload.purchase_category_id = Number(selectedCashFlowType?.purchase_category_id || selectedCashFlowType?.id || 0) || null;
-        payload.purchase_category_code = String(selectedCashFlowType?.purchase_category_code || selectedCashFlowType?.code || '').trim() || null;
-        payload.source_account_id = Number(
-          selectedCashFlowSourceAccountRow?.accountingAccountId
-          || selectedCashFlowSourceAccountRow?.id
-          || 0,
-        ) || null;
-      } else {
-        payload.income_expense_type_id = selectedCashFlowType ? Number(selectedCashFlowType.id) : null;
-        payload.category = selectedCashFlowType ? null : manualCategory;
-      }
-
-      await createPosCashFlow(payload);
-      setCashFlowTypeId(null);
-      setCashFlowSourceAccountId((currentId) => {
-        if (!isExpenseFlow) {
-          return null;
-        }
-        return Number(currentId || 0) || null;
-      });
-      setCashFlowCategory('');
-      setCashFlowAmount('');
-      setCashFlowNote('');
-      await Promise.all([
-        loadCashFlowRows(occurredAt),
-        loadClosingReport(occurredAt),
-      ]);
-      openNotice(
-        'Kas Masuk / Keluar',
-        `${cashFlowTransactionType === 'income' ? 'Kas masuk' : 'Kas keluar'} berhasil dicatat dan masuk ke laporan closing.`,
-        null,
-        { autoCloseMs: 2200 },
-      );
-    } catch (error) {
-      openNotice('Kas Masuk / Keluar', `Gagal menyimpan transaksi kas: ${formatBackendValidationError(error)}`);
-    } finally {
-      setIsCashFlowSubmitting(false);
-    }
-  };
-
-  const handleSelectQuickCashFlowCategory = (row) => {
-    const nextTypeId = Number(row?.typeId || 0) || null;
-    if (nextTypeId) {
-      setCashFlowTypeId(nextTypeId);
-      setCashFlowCategory('');
-      return;
-    }
-    setCashFlowTypeId(null);
-    setCashFlowCategory(String(row?.manualCategory || row?.label || '').trim());
-  };
-
-  const openExpenseCategoryModal = () => {
-    if (String(cashFlowTransactionType || '').toLowerCase() !== 'expense') {
-      return;
-    }
-    setExpenseCategorySearch('');
-    setExpenseCategoryModalVisible(true);
-  };
-
-  const closeExpenseCategoryModal = () => {
-    setExpenseCategoryModalVisible(false);
-    setExpenseCategorySearch('');
-  };
-
-  const handleSelectExpenseCategory = (row) => {
-    const nextTypeId = Number(row?.id || row?.purchase_category_id || 0) || null;
-    if (!nextTypeId) {
-      return;
-    }
-    setCashFlowTypeId(nextTypeId);
-    setCashFlowCategory('');
-    setExpenseCategoryModalVisible(false);
-    setExpenseCategorySearch('');
-  };
-
   const buildClosingReportHtml = () => {
     if (!closingReport) {
       return '';
@@ -15823,23 +15209,12 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     const logoUrl = String(receiptSettings?.receipt_logo_url || '').trim();
     const brandName = String(receiptSettings?.brand_name || 'SIDOMULYO ADVERTISING').trim() || 'SIDOMULYO ADVERTISING';
     const brandTagline = String(receiptSettings?.brand_tagline || '').trim();
-    const financeRecipient = String(closingFinanceRecipient || '').trim() || '-';
-    const shiftNote = String(closingShiftNote || '').trim() || '-';
     const paymentLines = closingPaymentRows.length > 0
       ? closingPaymentRows.map((row) => `<div class="line"><span>${escapeHtml(formatClosingBreakdownLabel(row, bankAccounts))}</span><strong>${escapeHtml(formatRupiah(row?.total_amount || 0))}</strong></div>`).join('')
       : '<div class="muted">Belum ada pembayaran penjualan hari ini</div>';
     const receivableLines = closingReceivableBreakdownRows.length > 0
       ? closingReceivableBreakdownRows.map((row) => `<div class="line"><span>${escapeHtml(formatClosingBreakdownLabel(row, bankAccounts))}</span><strong>${escapeHtml(formatRupiah(row?.total_amount || 0))}</strong></div>`).join('')
       : '<div class="muted">Belum ada pelunasan piutang hari ini</div>';
-    const externalLines = closingExternalRows.length > 0
-      ? closingExternalRows.slice(0, 6).map((row) => `
-        <div class="mini-item">
-          <div><strong>${escapeHtml(String(row?.transaction_type || '').toLowerCase() === 'expense' ? 'Keluar' : 'Masuk')}</strong> - ${escapeHtml(String(row?.category || '-'))}</div>
-          <div class="muted">${escapeHtml(String(row?.note || '-'))}</div>
-          <div><strong>${escapeHtml(formatRupiah(row?.amount || 0))}</strong></div>
-        </div>
-      `).join('')
-      : '<div class="muted">Tidak ada kas masuk / keluar tambahan</div>';
     const receivableRefs = closingReceivableSettlementRows.length > 0
       ? closingReceivableSettlementRows.slice(0, 5).map((row) => `
         <div class="mini-item">
@@ -16004,25 +15379,6 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     .mini-item strong {
       font-weight: 800;
     }
-    .signatures {
-      margin-top: 14px;
-      display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: 12px;
-      page-break-inside: avoid;
-    }
-    .signature-card {
-      text-align: center;
-      font-size: var(--meta-size);
-      line-height: 1.2;
-      font-weight: 700;
-      color: #000;
-    }
-    .signature-space {
-      height: 44px;
-      border-bottom: 1.5px solid var(--line);
-      margin-bottom: 5px;
-    }
     @media print {
       html, body {
         width: var(--page-width);
@@ -16079,11 +15435,6 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     <div class="line"><span>Tunai di Kasir</span><strong>${escapeHtml(formatRupiah(closingCashInHandSummary.physicalCashExpected))}</strong></div>
     <div class="line"><span>Non Tunai Rekening</span><strong>${escapeHtml(formatRupiah(closingNonCashSummary.total))}</strong></div>
 
-    <h2>Kas Lain</h2>
-    <div class="line"><span>Kas Masuk Lain</span><strong>${escapeHtml(formatRupiah(closingReport?.external_cash?.income_total || 0))}</strong></div>
-    <div class="line"><span>Kas Keluar</span><strong>${escapeHtml(formatRupiah(closingReport?.external_cash?.expense_total || 0))}</strong></div>
-    ${externalLines}
-
     <h2>Barang Reject / Rusak</h2>
     <div class="line"><span>Jumlah Item</span><strong>${escapeHtml(String(closingDamageSummary.itemCount || 0))}</strong></div>
     <div class="line"><span>Total Qty</span><strong>${escapeHtml(String(closingDamageSummary.totalQty || 0))}</strong></div>
@@ -16091,29 +15442,8 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     <div class="line"><span>Sudah Diaudit</span><strong>${escapeHtml(String(closingDamageSummary.auditedCount || 0))}</strong></div>
     ${damageLines}
 
-    <h2>Closing Kas</h2>
-    <div class="line"><span>Saldo Awal</span><strong>${escapeHtml(formatRupiah(closingOpeningCashValue))}</strong></div>
-    <div class="line"><span>Saldo Sistem</span><strong>${escapeHtml(formatRupiah(closingExpectedCashValue))}</strong></div>
-    <div class="line"><span>Uang Fisik</span><strong>${escapeHtml(formatRupiah(closingActualCashValue))}</strong></div>
-    <div class="line"><span>Selisih</span><strong>${escapeHtml(formatRupiah(closingCashDifferenceValue))}</strong></div>
-
     <h2>Referensi Piutang</h2>
     ${receivableRefs}
-
-    <h2>Serah Terima</h2>
-    <div class="mini-item"><strong>Finance:</strong> ${escapeHtml(financeRecipient)}</div>
-    <div class="mini-item"><strong>Catatan:</strong> ${escapeHtml(shiftNote)}</div>
-
-    <div class="signatures">
-      <div class="signature-card">
-        <div class="signature-space"></div>
-        <div>Kasir</div>
-      </div>
-      <div class="signature-card">
-        <div class="signature-space"></div>
-        <div>Finance</div>
-      </div>
-    </div>
   </div>
 </body>
 </html>`;
@@ -16928,14 +16258,6 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                       <Text style={styles.reportLineLabel}>Cash dari pelunasan piutang</Text>
                       <Text style={[styles.reportLineValue, styles.reportCashValue]}>{formatRupiah(closingCashInHandSummary.cashReceivable)}</Text>
                     </View>
-                    <View style={styles.reportLineRow}>
-                      <Text style={styles.reportLineLabel}>Kas masuk lain</Text>
-                      <Text style={[styles.reportLineValue, styles.reportCashValue]}>{formatRupiah(closingCashInHandSummary.cashIncomeOther)}</Text>
-                    </View>
-                    <View style={styles.reportLineRow}>
-                      <Text style={styles.reportLineLabel}>Kas keluar</Text>
-                      <Text style={[styles.reportLineValue, styles.reportExpenseValue]}>{formatRupiah(closingCashInHandSummary.cashExpenseOther)}</Text>
-                    </View>
                     <View style={[styles.reportLineRow, styles.reportLineRowEmphasis]}>
                       <Text style={styles.reportLineLabel}>Tunai seharusnya di kasir</Text>
                       <Text style={[styles.reportLineValue, styles.reportCashValueStrong]}>{formatRupiah(closingCashInHandSummary.physicalCashExpected)}</Text>
@@ -17020,38 +16342,6 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                         <Text style={styles.reportLineValue}>{row?.total || 0}</Text>
                       </View>
                     ))}
-                  </View>
-
-                  <View style={styles.reportSectionCard}>
-                    <Text style={styles.debugTitle}>Kas Masuk / Keluar Tambahan</Text>
-                    <View style={styles.reportLineRow}>
-                      <Text style={styles.reportLineLabel}>Pemasukan lain</Text>
-                      <Text style={styles.reportLineValue}>{formatRupiah(closingReport?.external_cash?.income_total || 0)}</Text>
-                    </View>
-                    <View style={styles.reportLineRow}>
-                      <Text style={styles.reportLineLabel}>Pengeluaran</Text>
-                      <Text style={styles.reportLineValue}>{formatRupiah(closingReport?.external_cash?.expense_total || 0)}</Text>
-                    </View>
-                    <View style={styles.reportLineRow}>
-                      <Text style={styles.reportLineLabel}>Arus kas masuk bruto</Text>
-                      <Text style={styles.reportLineValue}>{formatRupiah(closingReport?.closing?.gross_inflow_total || 0)}</Text>
-                    </View>
-                    {closingExternalRows.length > 0 ? (
-                      <View style={styles.reportNestedList}>
-                        {closingExternalRows.map((row, index) => (
-                          <View key={`external-${row?.id || row?.transaction_no || index}`} style={styles.reportNestedItem}>
-                            <Text style={styles.reportNestedTitle}>
-                              {String(row?.transaction_type || '').toLowerCase() === 'expense' ? 'Pengeluaran' : 'Pemasukan'} {row?.category || '-'}
-                            </Text>
-                            <Text style={styles.reportNestedMeta}>
-                              {String(row?.occurred_at || '-')} | {formatRupiah(row?.amount || 0)}{row?.note ? ` | ${row.note}` : ''}
-                            </Text>
-                          </View>
-                        ))}
-                      </View>
-                    ) : (
-                      <Text style={styles.debugText}>Tidak ada catatan kas masuk/keluar tambahan.</Text>
-                    )}
                   </View>
 
                   <View style={styles.reportSectionCard}>
@@ -17177,63 +16467,6 @@ const SalesScreen = ({ currentUser, onLogout }) => {
           )}
         </View>
       </ScrollView>
-
-      <Modal
-        visible={expenseCategoryModalVisible}
-        transparent
-        animationType="fade"
-        onRequestClose={closeExpenseCategoryModal}
-      >
-        <View style={styles.popupBackdrop}>
-          <View style={[styles.popupCard, styles.cashFlowCategoryModalCard]}>
-            <Text style={styles.popupTitle}>Pilih Kategori Pengeluaran</Text>
-            <Text style={styles.popupMessage}>
-              Kasir hanya boleh memilih kategori pengeluaran yang dibuat admin di backend.
-            </Text>
-
-            <TextInput
-              value={expenseCategorySearch}
-              onChangeText={setExpenseCategorySearch}
-              placeholder="Cari kategori pengeluaran..."
-              placeholderTextColor="#6c7485"
-              style={styles.pickupInput}
-            />
-
-            <ScrollView style={styles.cashFlowCategoryModalList} contentContainerStyle={styles.cashFlowCategoryModalListContent}>
-              {isCashFlowTypesLoading ? (
-                <Text style={styles.debugText}>Memuat kategori pengeluaran...</Text>
-              ) : filteredExpenseCashFlowTypes.length > 0 ? filteredExpenseCashFlowTypes.map((row) => {
-                const active = Number(row?.id || 0) === Number(cashFlowTypeId || 0);
-                return (
-                  <Pressable
-                    key={`expense-category-${row?.id || row?.purchase_category_code || row?.name}`}
-                    style={[styles.cashFlowCategoryOption, active ? styles.cashFlowCategoryOptionActive : null]}
-                    onPress={() => handleSelectExpenseCategory(row)}
-                  >
-                    <Text style={[styles.cashFlowCategoryOptionTitle, active ? styles.cashFlowCategoryOptionTitleActive : null]}>
-                      {String(row?.name || '-')}
-                    </Text>
-                    <Text style={[styles.cashFlowCategoryOptionMeta, active ? styles.cashFlowCategoryOptionMetaActive : null]}>
-                      {String(row?.purchase_category_code || row?.code || '').trim() || 'Kategori backend'}
-                    </Text>
-                  </Pressable>
-                );
-              }) : (
-                <Text style={styles.debugText}>Belum ada kategori pengeluaran backend yang cocok dengan pencarian.</Text>
-              )}
-            </ScrollView>
-
-            <View style={styles.popupActions}>
-              <Pressable
-                style={[styles.popupButton, styles.popupButtonSecondary]}
-                onPress={closeExpenseCategoryModal}
-              >
-                <Text style={[styles.popupButtonText, styles.popupButtonTextSecondary]}>Tutup</Text>
-              </Pressable>
-            </View>
-          </View>
-        </View>
-      </Modal>
 
       <Modal
         visible={isPreparingApp}
@@ -19429,11 +18662,6 @@ const styles = StyleSheet.create({
   reportNegativeValue: {
     color: '#b63838',
   },
-  reportInputGroup: {
-    flexGrow: 1,
-    minWidth: 220,
-    gap: 5,
-  },
   reportInputLabel: {
     fontSize: 11,
     fontWeight: '700',
@@ -19451,30 +18679,6 @@ const styles = StyleSheet.create({
   reportInputReadonly: {
     backgroundColor: '#f1f4f9',
     color: '#58627a',
-  },
-  cashFlowCategorySelectButton: {
-    borderWidth: 1,
-    borderColor: '#c1cadf',
-    backgroundColor: '#f7f9fd',
-    paddingHorizontal: 10,
-    paddingVertical: 10,
-    gap: 4,
-  },
-  cashFlowCategorySelectLabel: {
-    fontSize: 10,
-    fontWeight: '700',
-    color: '#5d6780',
-    textTransform: 'uppercase',
-  },
-  cashFlowCategorySelectValue: {
-    fontSize: 12,
-    fontWeight: '700',
-    color: '#1d2433',
-  },
-  cashFlowCategorySelectAction: {
-    fontSize: 11,
-    fontWeight: '700',
-    color: '#2250c9',
   },
   reportWarningBox: {
     borderWidth: 1,
@@ -19494,29 +18698,6 @@ const styles = StyleSheet.create({
   reportTextarea: {
     minHeight: 78,
     textAlignVertical: 'top',
-  },
-  financeRecipientPicker: {
-    marginTop: 6,
-  },
-  financeRecipientChip: {
-    borderWidth: 1,
-    borderColor: '#b9c4de',
-    backgroundColor: '#f3f6fc',
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-    marginRight: 8,
-  },
-  financeRecipientChipActive: {
-    borderColor: '#2250c9',
-    backgroundColor: '#2f64ef',
-  },
-  financeRecipientChipText: {
-    fontSize: 11,
-    fontWeight: '700',
-    color: '#31415f',
-  },
-  financeRecipientChipTextActive: {
-    color: '#ffffff',
   },
   reportChipWrap: {
     flexDirection: 'row',
@@ -19616,9 +18797,6 @@ const styles = StyleSheet.create({
   reportNonCashValueStrong: {
     color: '#163f82',
   },
-  reportExpenseValue: {
-    color: '#b63838',
-  },
   reportNestedList: {
     marginTop: 8,
     gap: 6,
@@ -19630,73 +18808,15 @@ const styles = StyleSheet.create({
     paddingHorizontal: 9,
     paddingVertical: 7,
   },
-  cashFlowIncomeItem: {
-    borderColor: '#b9dfc7',
-    backgroundColor: '#f3fcf5',
-  },
-  cashFlowExpenseItem: {
-    borderColor: '#ecc7c7',
-    backgroundColor: '#fff6f6',
-  },
-  cashFlowRowHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'flex-start',
-    gap: 8,
-  },
-  cashFlowRowBadges: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    justifyContent: 'flex-end',
-    gap: 6,
-  },
   reportNestedTitle: {
     fontSize: 11,
     fontWeight: '700',
     color: '#20365f',
   },
-  cashFlowIncomeText: {
-    color: '#1f7a42',
-  },
-  cashFlowExpenseText: {
-    color: '#b63838',
-  },
   reportNestedMeta: {
     marginTop: 2,
     fontSize: 10,
     color: '#5b6780',
-  },
-  cashFlowTypeBadge: {
-    borderWidth: 1,
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-  },
-  cashFlowIncomeBadge: {
-    borderColor: '#1f7a42',
-    backgroundColor: '#2f9e5a',
-  },
-  cashFlowExpenseBadge: {
-    borderColor: '#b63838',
-    backgroundColor: '#d94a4a',
-  },
-  cashFlowTypeBadgeText: {
-    color: '#ffffff',
-    fontSize: 9,
-    fontWeight: '800',
-    textTransform: 'uppercase',
-  },
-  cashFlowSourceBadge: {
-    borderWidth: 1,
-    borderColor: '#bdc6d9',
-    backgroundColor: '#ffffff',
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-  },
-  cashFlowSourceBadgeText: {
-    color: '#56627c',
-    fontSize: 9,
-    fontWeight: '700',
-    textTransform: 'uppercase',
   },
   reportSummaryText: {
     fontSize: 11,
@@ -19943,49 +19063,6 @@ const styles = StyleSheet.create({
     backgroundColor: '#f5fcf7',
     paddingVertical: 20,
     paddingHorizontal: 18,
-  },
-  cashFlowCategoryModalCard: {
-    maxWidth: 560,
-    maxHeight: '82%',
-    alignItems: 'stretch',
-    backgroundColor: '#f5f7fb',
-    borderColor: '#c8d0e6',
-  },
-  cashFlowCategoryModalList: {
-    maxHeight: 360,
-    marginTop: 8,
-  },
-  cashFlowCategoryModalListContent: {
-    gap: 8,
-    paddingBottom: 8,
-  },
-  cashFlowCategoryOption: {
-    borderWidth: 1,
-    borderColor: '#c7d2e6',
-    backgroundColor: '#ffffff',
-    paddingHorizontal: 10,
-    paddingVertical: 9,
-  },
-  cashFlowCategoryOptionActive: {
-    borderColor: '#2250c9',
-    backgroundColor: '#eef4ff',
-  },
-  cashFlowCategoryOptionTitle: {
-    fontSize: 12,
-    fontWeight: '700',
-    color: '#24324f',
-    marginBottom: 2,
-  },
-  cashFlowCategoryOptionTitleActive: {
-    color: '#1848b0',
-  },
-  cashFlowCategoryOptionMeta: {
-    fontSize: 10,
-    color: '#5d6780',
-    textTransform: 'uppercase',
-  },
-  cashFlowCategoryOptionMetaActive: {
-    color: '#2250c9',
   },
   orderPreviewCard: {
     maxWidth: 416,
