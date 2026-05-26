@@ -126,21 +126,39 @@ jobs:
   deploy:
     needs: build
     runs-on: ubuntu-latest
-    if: ${{ secrets.SELFHOST_SSH_HOST != '' && secrets.SELFHOST_SSH_USER != '' && secrets.SELFHOST_SSH_KEY != '' && secrets.SELFHOST_DEPLOY_PATH != '' }}
 
     steps:
+      - name: Check deploy secrets
+        id: deploy_guard
+        env:
+          SELFHOST_DEPLOY_PATH: ${{ secrets.SELFHOST_DEPLOY_PATH }}
+          SELFHOST_SSH_HOST: ${{ secrets.SELFHOST_SSH_HOST }}
+          SELFHOST_SSH_KEY: ${{ secrets.SELFHOST_SSH_KEY }}
+          SELFHOST_SSH_USER: ${{ secrets.SELFHOST_SSH_USER }}
+        run: |
+          if [ -z "$SELFHOST_SSH_HOST" ] || [ -z "$SELFHOST_SSH_USER" ] || [ -z "$SELFHOST_SSH_KEY" ] || [ -z "$SELFHOST_DEPLOY_PATH" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "Self-host deploy secrets are incomplete. Skipping deploy job."
+            exit 0
+          fi
+
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+
       - name: Download self-hosted site artifact
+        if: steps.deploy_guard.outputs.skip != 'true'
         uses: actions/download-artifact@v4
         with:
           name: velopack-selfhost-site
           path: ./release-site
 
       - name: Start SSH agent
+        if: steps.deploy_guard.outputs.skip != 'true'
         uses: webfactory/ssh-agent@v0.9.0
         with:
           ssh-private-key: ${{ secrets.SELFHOST_SSH_KEY }}
 
       - name: Add server to known_hosts
+        if: steps.deploy_guard.outputs.skip != 'true'
         env:
           SELFHOST_SSH_HOST: ${{ secrets.SELFHOST_SSH_HOST }}
           SELFHOST_SSH_PORT: ${{ secrets.SELFHOST_SSH_PORT }}
@@ -149,6 +167,7 @@ jobs:
           ssh-keyscan -p "${SELFHOST_SSH_PORT:-22}" "$SELFHOST_SSH_HOST" >> ~/.ssh/known_hosts
 
       - name: Deploy self-hosted bundle via rsync
+        if: steps.deploy_guard.outputs.skip != 'true'
         env:
           SELFHOST_DEPLOY_PATH: ${{ secrets.SELFHOST_DEPLOY_PATH }}
           SELFHOST_SSH_HOST: ${{ secrets.SELFHOST_SSH_HOST }}
@@ -158,6 +177,7 @@ jobs:
           rsync -av --delete -e "ssh -p ${SELFHOST_SSH_PORT:-22}" ./release-site/ "${SELFHOST_SSH_USER}@${SELFHOST_SSH_HOST}:${SELFHOST_DEPLOY_PATH}/"
 
       - name: Verify remote Velopack files
+        if: steps.deploy_guard.outputs.skip != 'true'
         env:
           SELFHOST_DEPLOY_PATH: ${{ secrets.SELFHOST_DEPLOY_PATH }}
           SELFHOST_SSH_HOST: ${{ secrets.SELFHOST_SSH_HOST }}
