@@ -126,17 +126,18 @@ jobs:
   deploy:
     needs: build
     runs-on: ubuntu-latest
+    env:
+      SELFHOST_DEPLOY_PATH: ${{ secrets.SELFHOST_DEPLOY_PATH }}
+      SELFHOST_SSH_HOST: ${{ secrets.SELFHOST_SSH_HOST }}
+      SELFHOST_SSH_KEY: ${{ secrets.SELFHOST_SSH_KEY }}
+      SELFHOST_SSH_PORT: ${{ secrets.SELFHOST_SSH_PORT || '22' }}
+      SELFHOST_SSH_USER: ${{ secrets.SELFHOST_SSH_USER || 'deploy' }}
 
     steps:
       - name: Check deploy secrets
         id: deploy_guard
-        env:
-          SELFHOST_DEPLOY_PATH: ${{ secrets.SELFHOST_DEPLOY_PATH }}
-          SELFHOST_SSH_HOST: ${{ secrets.SELFHOST_SSH_HOST }}
-          SELFHOST_SSH_KEY: ${{ secrets.SELFHOST_SSH_KEY }}
-          SELFHOST_SSH_USER: ${{ secrets.SELFHOST_SSH_USER }}
         run: |
-          if [ -z "$SELFHOST_SSH_HOST" ] || [ -z "$SELFHOST_SSH_USER" ] || [ -z "$SELFHOST_SSH_KEY" ] || [ -z "$SELFHOST_DEPLOY_PATH" ]; then
+          if [ -z "$SELFHOST_SSH_HOST" ] || [ -z "$SELFHOST_SSH_KEY" ] || [ -z "$SELFHOST_DEPLOY_PATH" ]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
             echo "Self-host deploy secrets are incomplete. Skipping deploy job."
             exit 0
@@ -159,29 +160,16 @@ jobs:
 
       - name: Add server to known_hosts
         if: steps.deploy_guard.outputs.skip != 'true'
-        env:
-          SELFHOST_SSH_HOST: ${{ secrets.SELFHOST_SSH_HOST }}
-          SELFHOST_SSH_PORT: ${{ secrets.SELFHOST_SSH_PORT }}
         run: |
           mkdir -p ~/.ssh
           ssh-keyscan -p "${SELFHOST_SSH_PORT:-22}" "$SELFHOST_SSH_HOST" >> ~/.ssh/known_hosts
 
       - name: Deploy self-hosted bundle via rsync
         if: steps.deploy_guard.outputs.skip != 'true'
-        env:
-          SELFHOST_DEPLOY_PATH: ${{ secrets.SELFHOST_DEPLOY_PATH }}
-          SELFHOST_SSH_HOST: ${{ secrets.SELFHOST_SSH_HOST }}
-          SELFHOST_SSH_PORT: ${{ secrets.SELFHOST_SSH_PORT }}
-          SELFHOST_SSH_USER: ${{ secrets.SELFHOST_SSH_USER }}
         run: |
           rsync -av --delete -e "ssh -p ${SELFHOST_SSH_PORT:-22}" ./release-site/ "${SELFHOST_SSH_USER}@${SELFHOST_SSH_HOST}:${SELFHOST_DEPLOY_PATH}/"
 
       - name: Verify remote Velopack files
         if: steps.deploy_guard.outputs.skip != 'true'
-        env:
-          SELFHOST_DEPLOY_PATH: ${{ secrets.SELFHOST_DEPLOY_PATH }}
-          SELFHOST_SSH_HOST: ${{ secrets.SELFHOST_SSH_HOST }}
-          SELFHOST_SSH_PORT: ${{ secrets.SELFHOST_SSH_PORT }}
-          SELFHOST_SSH_USER: ${{ secrets.SELFHOST_SSH_USER }}
         run: |
           ssh -p "${SELFHOST_SSH_PORT:-22}" "${SELFHOST_SSH_USER}@${SELFHOST_SSH_HOST}" "test -f '${SELFHOST_DEPLOY_PATH}/releases.win.json' && test -f '${SELFHOST_DEPLOY_PATH}/RELEASES'"
