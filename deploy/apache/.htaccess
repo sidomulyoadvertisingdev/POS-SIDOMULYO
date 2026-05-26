@@ -1,0 +1,15 @@
+DirectoryIndex index.html
+
+RewriteEngine On
+
+# Velopack metadata and installer assets must bypass the SPA fallback.
+RewriteRule ^(releases\.win\.json|RELEASES|assets\.win\.json)$ - [L]
+RewriteRule \.(nupkg|exe|zip|json)$ - [L]
+
+# Serve existing files/folders directly.
+RewriteCond %{REQUEST_FILENAME} -f [OR]
+RewriteCond %{REQUEST_FILENAME} -d
+RewriteRule ^ - [L]
+
+# Expo web SPA fallback.
+RewriteRule ^ index.html [L]
