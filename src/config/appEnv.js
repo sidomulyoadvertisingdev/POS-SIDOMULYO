@@ -1,6 +1,7 @@
 import Constants from 'expo-constants';
 
 const DEFAULT_ERP_API_BASE_URL = 'https://dashboard.sidomulyoproject.com/api';
+const PRODUCTION_ERP_HOSTNAME = 'dashboard.sidomulyoproject.com';
 const trimString = (value) => String(value || '').trim();
 const extra = Constants.expoConfig?.extra || {};
 const resolvePublicEnv = (key, fallback = '') => {
@@ -12,6 +13,24 @@ const resolvePublicEnv = (key, fallback = '') => {
   return trimString(fallback);
 };
 const toBooleanFlag = (value) => ['1', 'true', 'yes'].includes(String(value || '').trim().toLowerCase());
+const normalizeConfiguredApiBaseUrl = (url) => {
+  const normalizedUrl = trimString(url).replace(/\/+$/, '');
+  if (!normalizedUrl) {
+    return '';
+  }
+
+  try {
+    const parsedUrl = new URL(normalizedUrl);
+    if (String(parsedUrl.hostname || '').trim().toLowerCase() === PRODUCTION_ERP_HOSTNAME) {
+      parsedUrl.protocol = 'https:';
+      return String(parsedUrl.toString() || '').replace(/\/+$/, '');
+    }
+  } catch (_error) {
+    return normalizedUrl;
+  }
+
+  return normalizedUrl;
+};
 const forceOnlineErpApi = toBooleanFlag(
   resolvePublicEnv('EXPO_PUBLIC_FORCE_ONLINE_ERP_API', extra.forceOnlineErpApi),
 );
@@ -20,7 +39,7 @@ export const appEnv = {
   appVersion: resolvePublicEnv('EXPO_PUBLIC_APP_VERSION', extra.appVersion),
   erpApiBaseUrl: forceOnlineErpApi
     ? DEFAULT_ERP_API_BASE_URL
-    : resolvePublicEnv('EXPO_PUBLIC_ERP_API_BASE_URL', extra.erpApiBaseUrl),
+    : normalizeConfiguredApiBaseUrl(resolvePublicEnv('EXPO_PUBLIC_ERP_API_BASE_URL', extra.erpApiBaseUrl)),
   forceOnlineErpApi: forceOnlineErpApi ? '1' : '',
   allowLocalErpApi: forceOnlineErpApi
     ? ''

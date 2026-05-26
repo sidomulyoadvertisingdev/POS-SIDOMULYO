@@ -4,6 +4,7 @@ const packageJson = require('./package.json');
 const trimString = (value) => String(value || '').trim();
 const DEFAULT_ERP_API_BASE_URL = 'https://dashboard.sidomulyoproject.com/api';
 const LOCAL_ERP_HOSTNAMES = new Set(['localhost', '127.0.0.1', '0.0.0.0']);
+const PRODUCTION_ERP_HOSTNAME = 'dashboard.sidomulyoproject.com';
 const resolveAppVersion = () => trimString(process.env.EXPO_PUBLIC_APP_VERSION) || trimString(packageJson.version);
 const shouldAllowLocalApiUrl = () => ['1', 'true', 'yes'].includes(trimString(process.env.EXPO_PUBLIC_ALLOW_LOCAL_ERP_API).toLowerCase());
 const shouldForceOnlineApiUrl = () => ['1', 'true', 'yes'].includes(trimString(process.env.EXPO_PUBLIC_FORCE_ONLINE_ERP_API).toLowerCase());
@@ -21,12 +22,30 @@ const isLocalApiBaseUrl = (url) => {
     return false;
   }
 };
+const normalizeConfiguredApiBaseUrl = (url) => {
+  const normalized = trimString(url);
+  if (!normalized) {
+    return '';
+  }
+
+  try {
+    const parsed = new URL(normalized);
+    if (String(parsed.hostname || '').trim().toLowerCase() === PRODUCTION_ERP_HOSTNAME) {
+      parsed.protocol = 'https:';
+      return parsed.toString().replace(/\/+$/, '');
+    }
+  } catch (_error) {
+    return normalized;
+  }
+
+  return normalized;
+};
 const resolveApiBaseUrl = () => {
   if (shouldForceOnlineApiUrl()) {
     return DEFAULT_ERP_API_BASE_URL;
   }
 
-  const configuredUrl = trimString(process.env.EXPO_PUBLIC_ERP_API_BASE_URL);
+  const configuredUrl = normalizeConfiguredApiBaseUrl(process.env.EXPO_PUBLIC_ERP_API_BASE_URL);
   if (!configuredUrl) {
     return DEFAULT_ERP_API_BASE_URL;
   }

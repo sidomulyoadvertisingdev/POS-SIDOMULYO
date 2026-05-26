@@ -9,6 +9,7 @@ import {
 const DEFAULT_ERP_API_BASE_URL = 'https://dashboard.sidomulyoproject.com/api';
 const LOCAL_DEV_ERP_API_BASE_URL = 'http://127.0.0.1:8000/api';
 const LOCAL_ERP_HOSTNAMES = new Set(['localhost', '127.0.0.1', '0.0.0.0']);
+const PRODUCTION_ERP_HOSTNAME = 'dashboard.sidomulyoproject.com';
 const trimString = (value) => String(value || '').trim();
 const extra = Constants.expoConfig?.extra || {};
 const resolvePublicEnv = (key, fallback = '') => {
@@ -21,6 +22,24 @@ const resolvePublicEnv = (key, fallback = '') => {
 };
 
 const normalizeApiBaseUrl = (url) => trimString(url).replace(/\/+$/, '');
+const normalizeConfiguredApiBaseUrl = (url) => {
+  const normalizedUrl = normalizeApiBaseUrl(url);
+  if (!normalizedUrl) {
+    return '';
+  }
+
+  try {
+    const parsedUrl = new URL(normalizedUrl);
+    if (String(parsedUrl.hostname || '').trim().toLowerCase() === PRODUCTION_ERP_HOSTNAME) {
+      parsedUrl.protocol = 'https:';
+      return String(parsedUrl.toString() || '').replace(/\/+$/, '');
+    }
+  } catch (_error) {
+    return normalizedUrl;
+  }
+
+  return normalizedUrl;
+};
 
 const isSupportedApiUrl = (url) => {
   const normalizedUrl = normalizeApiBaseUrl(url);
@@ -73,7 +92,7 @@ const resolveRuntimeApiBaseUrl = (configuredUrl, allowLocalApiUrl = false, prefe
     return DEFAULT_ERP_API_BASE_URL;
   }
 
-  const normalizedConfiguredUrl = normalizeApiBaseUrl(configuredUrl);
+  const normalizedConfiguredUrl = normalizeConfiguredApiBaseUrl(configuredUrl);
   const normalizedDefaultUrl = normalizeApiBaseUrl(resolveDefaultApiBaseUrl(preferLocalApiUrl));
   const normalizedProductionUrl = normalizeApiBaseUrl(DEFAULT_ERP_API_BASE_URL);
 
