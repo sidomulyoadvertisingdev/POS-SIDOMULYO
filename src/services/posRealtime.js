@@ -112,3 +112,36 @@ export const subscribeToInvoicePaymentUpdates = (invoiceId, handlers = {}) => {
     }
   };
 };
+
+export const subscribeToInvoiceWorkspaceUpdates = (handlers = {}) => {
+  const echo = getPosRealtime();
+  if (!echo) {
+    handlers.onUnavailable?.(getPosRealtimeConfig());
+    return () => {};
+  }
+
+  const channelName = 'pos.invoice-workspace';
+  const channel = echo.private(channelName);
+  const eventName = '.pos.invoice-workspace.updated';
+
+  handlers.onSubscribed?.(getPosRealtimeConfig());
+
+  channel.listen(eventName, (payload) => {
+    handlers.onUpdated?.(payload);
+  });
+
+  if (typeof channel.error === 'function') {
+    channel.error((error) => {
+      handlers.onError?.(error);
+    });
+  }
+
+  return () => {
+    try {
+      channel.stopListening(eventName);
+      echo.leave(channelName);
+    } catch (_error) {
+      // Ignore cleanup errors from transient websocket reconnects.
+    }
+  };
+};

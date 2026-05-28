@@ -78,7 +78,7 @@ import {
   updatePosProductionItemStatus,
   updatePosOrderStatus,
 } from '../services/erpApi';
-import { subscribeToInvoicePaymentUpdates } from '../services/posRealtime';
+import { subscribeToInvoicePaymentUpdates, subscribeToInvoiceWorkspaceUpdates } from '../services/posRealtime';
 import { appEnv } from '../config/appEnv';
 import { enqueueOrderPayload, loadOrderQueue, setOrderQueue } from '../utils/orderQueue';
 import { appendOrderAuditLog, loadOrderAuditLogs } from '../utils/orderAuditLog';
@@ -2202,6 +2202,8 @@ const REPRINT_SPEC_CACHE_MAX = 120;
 const PRINTER_PROFILE_STORAGE_KEY = 'pos_printer_profile_v1';
 const MASTER_SYNC_META_STORAGE_KEY = 'pos_master_sync_meta_v1';
 const MASTER_DATA_SNAPSHOT_STORAGE_KEY = 'pos_master_data_snapshot_v1';
+const INVOICE_SUCCESS_CACHE_KEY = 'pos_invoice_success_cache_v1';
+const INVOICE_SUCCESS_CACHE_MAX = 400;
 const MASTER_SYNC_POLL_INTERVAL_MS = 30000;
 const MASTER_SYNC_FULL_REFRESH_INTERVAL_MS = 5 * 60 * 1000;
 const MASTER_SYNC_FALLBACK_INTERVAL_MS = 45000;
@@ -2209,6 +2211,7 @@ let memoryReprintSpecCache = [];
 let memoryPrinterProfile = null;
 let memoryMasterSyncMeta = {};
 let memoryMasterDataSnapshot = null;
+let memoryInvoiceSuccessCache = [];
 const canUseLocalStorage = () => {
   return typeof globalThis !== 'undefined' && typeof globalThis.localStorage !== 'undefined';
 };
@@ -2658,6 +2661,81 @@ const isProcessingInvoiceRow = (row) => {
   return true;
 };
 const isInvoiceSuccessRow = (row) => isSuccessfulInvoiceRow(row);
+const getInvoiceSuccessCacheKey = (row, fallbackIndex = 0) => {
+  const invoiceId = Number(row?.invoice?.id || row?.invoice_id || 0) || 0;
+  if (invoiceId > 0) {
+    return `invoice:${invoiceId}`;
+  }
+  const orderId = Number(row?.id || row?.order?.id || row?.order_id || 0) || 0;
+  if (orderId > 0) {
+    return `order:${orderId}`;
+  }
+  const invoiceNo = String(row?.invoice?.invoice_no || row?.invoice_no || '').trim();
+  if (invoiceNo) {
+    return `invoice_no:${invoiceNo}`;
+  }
+  return `row:${fallbackIndex}`;
+};
+const getInvoiceSuccessCacheTimestamp = (row) => {
+  const raw = String(
+    row?.invoice?.updated_at
+    || row?.invoice?.finalized_at
+    || row?.invoice?.created_at
+    || row?.updated_at
+    || row?.created_at
+    || '',
+  ).trim();
+  const parsed = raw ? new Date(raw) : null;
+  return parsed && !Number.isNaN(parsed.getTime()) ? parsed.getTime() : 0;
+};
+const sortInvoiceSuccessCacheRows = (rows = []) => (
+  [...(Array.isArray(rows) ? rows : [])].sort((a, b) => getInvoiceSuccessCacheTimestamp(b) - getInvoiceSuccessCacheTimestamp(a))
+);
+const normalizeInvoiceSuccessCacheRows = (rows = []) => {
+  const map = new Map();
+  (Array.isArray(rows) ? rows : []).forEach((row, index) => {
+    if (!row || typeof row !== 'object' || !isInvoiceSuccessRow(row)) {
+      return;
+    }
+    map.set(getInvoiceSuccessCacheKey(row, index), row);
+  });
+  return sortInvoiceSuccessCacheRows(Array.from(map.values())).slice(0, INVOICE_SUCCESS_CACHE_MAX);
+};
+const loadInvoiceSuccessCache = () => {
+  if (canUseLocalStorage()) {
+    try {
+      const raw = globalThis.localStorage.getItem(INVOICE_SUCCESS_CACHE_KEY);
+      if (!raw) return [];
+      return normalizeInvoiceSuccessCacheRows(JSON.parse(raw));
+    } catch (_error) {
+      return [];
+    }
+  }
+  return normalizeInvoiceSuccessCacheRows(memoryInvoiceSuccessCache);
+};
+const persistInvoiceSuccessCache = (rows) => {
+  const next = normalizeInvoiceSuccessCacheRows(rows);
+  if (canUseLocalStorage()) {
+    try {
+      globalThis.localStorage.setItem(INVOICE_SUCCESS_CACHE_KEY, JSON.stringify(next));
+    } catch (_error) {
+      // ignore cache quota issues
+    }
+  } else {
+    memoryInvoiceSuccessCache = next;
+  }
+  return next;
+};
+const mergeInvoiceSuccessCacheRows = (currentRows = [], incomingRows = []) => {
+  const merged = new Map();
+  normalizeInvoiceSuccessCacheRows(currentRows).forEach((row, index) => {
+    merged.set(getInvoiceSuccessCacheKey(row, index), row);
+  });
+  normalizeInvoiceSuccessCacheRows(incomingRows).forEach((row, index) => {
+    merged.set(getInvoiceSuccessCacheKey(row, index), row);
+  });
+  return persistInvoiceSuccessCache(Array.from(merged.values()));
+};
 const isCompletedInvoiceRow = (row) => {
   if (isDraftInvoiceRow(row) || isProcessingInvoiceRow(row)) {
     return false;
@@ -5827,6 +5905,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
   const [activeMenu, setActiveMenu] = useState('pos');
   const [currentDraftSourceId, setCurrentDraftSourceId] = useState(null);
   const [currentQueuedDraftQueueId, setCurrentQueuedDraftQueueId] = useState(null);
+  const [invoiceSuccessCacheRows, setInvoiceSuccessCacheRows] = useState(() => loadInvoiceSuccessCache());
   const [draftInvoices, setDraftInvoices] = useState([]);
   const [invoiceListMeta, setInvoiceListMeta] = useState({
     currentPage: 1,
@@ -5834,6 +5913,14 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     hasMore: false,
     total: 0,
     searchMode: false,
+    source: 'server',
+  });
+  const [invoiceRealtimeState, setInvoiceRealtimeState] = useState({
+    available: false,
+    pendingCount: 0,
+    message: 'Realtime invoice belum aktif.',
+    lastReason: '',
+    lastUpdatedAt: '',
   });
   const [draftTimeTick, setDraftTimeTick] = useState(() => Date.now());
   const [invoiceFilter, setInvoiceFilter] = useState('success');
@@ -9638,6 +9725,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     for (const queued of queue) {
       try {
         const created = await createPosOrder(queued.payload);
+        syncInvoiceSuccessCacheFromRows([created]);
         const createdId = Number(created?.id || 0) || null;
         if (isDraftPayload(queued?.payload) && createdId) {
           try {
@@ -11177,6 +11265,22 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     return requestOptions;
   };
 
+  const markInvoiceRealtimeUpdatesApplied = () => {
+    setInvoiceRealtimeState((prev) => ({
+      ...prev,
+      pendingCount: 0,
+      message: prev.available ? 'Realtime invoice aktif.' : prev.message,
+    }));
+  };
+  const syncInvoiceSuccessCacheFromRows = (rows = []) => {
+    const nextCache = mergeInvoiceSuccessCacheRows(
+      [...loadInvoiceSuccessCache(), ...invoiceSuccessCacheRows],
+      rows,
+    );
+    setInvoiceSuccessCacheRows(nextCache);
+    return nextCache;
+  };
+
   const loadDraftInvoices = async (options = {}) => {
     const appendRows = Boolean(options?.append);
     const searchMode = String(options?.search ?? invoiceSearch ?? '').trim() !== '';
@@ -11209,16 +11313,41 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         hasMore: false,
         total: queueRows.length,
         searchMode,
+        source: 'queue',
       });
+      markInvoiceRealtimeUpdatesApplied();
       hydrateDanaInvoiceMonitorsFromRows(queueRows);
       return;
     }
+
+    const invoiceRequestOptions = buildInvoiceWorkspaceRequestOptions({
+      ...options,
+      page: requestPage,
+    });
+    const canUseSuccessCache = invoiceRequestOptions.area === 'success'
+      && !invoiceRequestOptions.search
+      && !appendRows
+      && !options?.forceServer;
+    if (canUseSuccessCache) {
+      const cachedRows = invoiceSuccessCacheRows.length > 0 ? invoiceSuccessCacheRows : loadInvoiceSuccessCache();
+      if (cachedRows.length > 0) {
+        setDraftInvoices(cachedRows);
+        setInvoiceListMeta({
+          currentPage: 1,
+          lastPage: 1,
+          hasMore: false,
+          total: cachedRows.length,
+          searchMode: false,
+          source: 'local_success_cache',
+        });
+        markInvoiceRealtimeUpdatesApplied();
+        hydrateDanaInvoiceMonitorsFromRows(cachedRows);
+        return;
+      }
+    }
+
     try {
       setIsDraftLoading(true);
-      const invoiceRequestOptions = buildInvoiceWorkspaceRequestOptions({
-        ...options,
-        page: requestPage,
-      });
       let rows = [];
       let pageMeta = null;
       let invoiceLoadError = null;
@@ -11254,6 +11383,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         ? (Array.isArray(draftInvoices) ? draftInvoices : [])
         : [];
       const mergedRows = mergeInvoiceRows(baseRows, [...queueRows, ...approvalListRows, ...rows]);
+      const nextSuccessCache = syncInvoiceSuccessCacheFromRows(mergedRows);
       setDraftInvoices(mergedRows);
       setInvoiceListMeta({
         currentPage: Number(pageMeta?.currentPage || requestPage) || requestPage,
@@ -11261,7 +11391,9 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         hasMore: Boolean(pageMeta?.hasMore),
         total: Number(pageMeta?.total || rows.length || 0) || rows.length,
         searchMode,
+        source: invoiceRequestOptions.area === 'success' && nextSuccessCache.length > 0 ? 'server_cache_sync' : 'server',
       });
+      markInvoiceRealtimeUpdatesApplied();
       hydrateDanaInvoiceMonitorsFromRows(mergedRows);
 
       if (invoiceLoadError && mergedRows.length === 0) {
@@ -11275,7 +11407,9 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         hasMore: false,
         total: queueRows.length,
         searchMode,
+        source: 'queue',
       });
+      markInvoiceRealtimeUpdatesApplied();
       hydrateDanaInvoiceMonitorsFromRows(queueRows);
       if (queueRows.length === 0) {
         openNotice('Invoice', `Gagal memuat invoice: ${error.message}`);
@@ -11300,21 +11434,53 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     if (!backendReady) {
       return undefined;
     }
-    if (!isInvoiceAreaMenu(activeMenu) && !invoiceDetailModal.visible) {
+
+    return subscribeToInvoiceWorkspaceUpdates({
+      onSubscribed: () => {
+        setInvoiceRealtimeState((prev) => ({
+          ...prev,
+          available: true,
+          message: 'Realtime invoice aktif.',
+        }));
+      },
+      onUpdated: (payload = {}) => {
+        setInvoiceRealtimeState((prev) => ({
+          ...prev,
+          available: true,
+          pendingCount: Math.min(Number(prev.pendingCount || 0) + 1, 99),
+          message: 'Ada update invoice baru. Klik badge untuk memuat saat kasir siap.',
+          lastReason: String(payload?.reason || 'updated'),
+          lastUpdatedAt: String(payload?.updated_at || new Date().toISOString()),
+        }));
+      },
+      onUnavailable: () => {
+        setInvoiceRealtimeState((prev) => ({
+          ...prev,
+          available: false,
+          message: 'Realtime invoice belum aktif. Gunakan tombol Refresh jika perlu.',
+        }));
+      },
+      onError: () => {
+        setInvoiceRealtimeState((prev) => ({
+          ...prev,
+          available: false,
+          message: 'Realtime invoice terputus sementara. Gunakan Refresh manual jika perlu.',
+        }));
+      },
+    });
+  }, [backendReady]);
+
+  useEffect(() => {
+    if (!backendReady || !invoiceDetailModal.visible || !invoiceDetailModal.row) {
       return undefined;
     }
 
     const timer = setInterval(() => {
-      if (isInvoiceAreaMenu(activeMenu)) {
-        loadDraftInvoices().catch(() => {});
-      }
-      if (invoiceDetailModal.visible && invoiceDetailModal.row) {
-        handleViewInvoiceDetail(invoiceDetailModal.row, { silent: true }).catch(() => {});
-      }
-    }, 12000);
+      handleViewInvoiceDetail(invoiceDetailModal.row, { silent: true }).catch(() => {});
+    }, 15000);
 
     return () => clearInterval(timer);
-  }, [activeMenu, backendReady, invoiceDetailModal.row, invoiceDetailModal.visible, invoiceFilter, invoiceSearch, invoiceDateFrom, invoiceDateTo]);
+  }, [backendReady, invoiceDetailModal.row, invoiceDetailModal.visible]);
 
   useEffect(() => {
     const timer = setInterval(() => {
@@ -14007,6 +14173,9 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         invoiceNo,
         items: buildReprintSnapshotItems(adjustedItems),
       });
+      if (!isDraftMode) {
+        syncInvoiceSuccessCacheFromRows([created]);
+      }
       let draftStatusWarning = '';
       if (!isDraftMode && backendOrderId && Number(currentDraftSourceId || 0) > 0) {
         setDraftInvoices((prev) => prev.filter((draft) => Number(draft?.id || 0) !== Number(currentDraftSourceId || 0)));
@@ -16738,10 +16907,13 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                 sectionMeta={invoiceSectionMeta}
                 onFlushQueue={async () => {
                   await flushQueuedOrders();
-                  await loadDraftInvoices();
+                  await loadDraftInvoices({ page: 1, forceServer: true });
                 }}
-                onRefresh={loadDraftInvoices}
+                onRefresh={() => loadDraftInvoices({ page: 1, forceServer: true })}
                 isLoading={isDraftLoading}
+                invoiceListMeta={invoiceListMeta}
+                invoiceRealtimeState={invoiceRealtimeState}
+                onApplyRealtimeUpdates={() => loadDraftInvoices({ page: 1, forceServer: true })}
                 invoiceFilter={invoiceFilter}
                 onSelectAreaMenu={openInvoiceAreaMenu}
                 onSelectAreaFilter={openInvoiceAreaFilter}

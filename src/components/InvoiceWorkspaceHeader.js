@@ -163,6 +163,9 @@ const InvoiceWorkspaceHeader = ({
   onFlushQueue,
   onRefresh,
   isLoading,
+  invoiceListMeta,
+  invoiceRealtimeState,
+  onApplyRealtimeUpdates,
   invoiceFilter,
   onSelectAreaMenu,
   onSelectAreaFilter,
@@ -183,6 +186,11 @@ const InvoiceWorkspaceHeader = ({
   const [draftDateTo, setDraftDateTo] = useState(String(invoiceDateTo || '').trim());
   const [calendarCursor, setCalendarCursor] = useState(() => resolveInitialCalendarCursor(invoiceDateFrom, invoiceDateTo));
   const calendarCells = useMemo(() => buildCalendarCells(calendarCursor), [calendarCursor]);
+  const pendingRealtimeCount = Math.max(Number(invoiceRealtimeState?.pendingCount || 0) || 0, 0);
+  const cacheSource = String(invoiceListMeta?.source || '').trim();
+  const realtimeMessage = cacheSource === 'local_success_cache'
+    ? 'Invoice sukses tampil dari cache lokal. Search/Refresh tetap ambil server.'
+    : String(invoiceRealtimeState?.message || '').trim();
 
   const openDateModal = () => {
     setDraftDateFrom(String(invoiceDateFrom || '').trim());
@@ -244,6 +252,15 @@ const InvoiceWorkspaceHeader = ({
         <Text style={styles.headerDescription}>{sectionMeta?.description || ''}</Text>
       </View>
       <View style={styles.headerActions}>
+        {pendingRealtimeCount > 0 ? (
+          <Pressable style={[styles.refreshButton, styles.realtimeUpdateButton]} onPress={onApplyRealtimeUpdates}>
+            <Text style={[styles.refreshButtonText, styles.realtimeUpdateButtonText]}>
+              {pendingRealtimeCount >= 99 ? '99+' : pendingRealtimeCount} update baru
+            </Text>
+          </Pressable>
+        ) : realtimeMessage ? (
+          <Text style={styles.realtimeHint}>{realtimeMessage}</Text>
+        ) : null}
         <Pressable style={styles.refreshButton} onPress={onFlushQueue}>
           <Text style={styles.refreshButtonText}>Kirim Ulang Antrian</Text>
         </Pressable>
@@ -491,6 +508,8 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     gap: 6,
     alignItems: 'center',
+    flexWrap: 'wrap',
+    justifyContent: 'flex-end',
   },
   refreshButton: {
     borderWidth: 1,
@@ -504,6 +523,20 @@ const styles = StyleSheet.create({
     color: '#ffffff',
     fontWeight: '700',
     fontSize: 11,
+  },
+  realtimeUpdateButton: {
+    borderColor: '#1d9a57',
+    backgroundColor: '#1d9a57',
+  },
+  realtimeUpdateButtonText: {
+    color: '#ffffff',
+  },
+  realtimeHint: {
+    maxWidth: 240,
+    color: '#667897',
+    fontSize: 10,
+    fontWeight: '700',
+    textAlign: 'right',
   },
   areaGrid: {
     flexDirection: 'row',
