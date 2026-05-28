@@ -228,6 +228,9 @@ const isDraftInvoiceRow = (row) => {
   if (normalizeText(row?.__source) === 'queue') {
     return true;
   }
+  if (resolveInvoiceStatusKey(row?.invoice?.status) === 'draft') {
+    return true;
+  }
   return isDraftCandidate(row) || resolveInvoiceStatusKey(normalizeInvoiceStatusText(row)) === 'draft';
 };
 const isApprovalInvoiceRow = (row) => normalizeText(row?.__source) === 'receivable_approval';

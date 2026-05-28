@@ -962,18 +962,18 @@ const styles = StyleSheet.create({
   title: {
     fontSize: 18,
     fontWeight: '900',
-    color: '#102a43',
+    color: '#173c87',
     marginBottom: 4,
   },
   description: {
     fontSize: 12,
     lineHeight: 18,
-    color: '#486581',
+    color: '#667897',
   },
   refreshButton: {
     borderWidth: 1,
-    borderColor: '#2250c9',
-    backgroundColor: '#2f64ef',
+    borderColor: '#0755b8',
+    backgroundColor: '#0755b8',
     paddingHorizontal: 12,
     paddingVertical: 8,
     borderRadius: 10,
@@ -985,7 +985,7 @@ const styles = StyleSheet.create({
   },
   formCard: {
     borderWidth: 1,
-    borderColor: '#d9e2ec',
+    borderColor: '#c8d8f2',
     backgroundColor: '#ffffff',
     borderRadius: 16,
     padding: 14,
@@ -1004,15 +1004,15 @@ const styles = StyleSheet.create({
   },
   secondaryButton: {
     borderWidth: 1,
-    borderColor: '#cbd2d9',
-    backgroundColor: '#f8fafc',
+    borderColor: '#b9c8e1',
+    backgroundColor: '#f5f9ff',
     borderRadius: 12,
     paddingHorizontal: 12,
     paddingVertical: 10,
     alignItems: 'center',
   },
   secondaryButtonText: {
-    color: '#334e68',
+    color: '#174a8c',
     fontSize: 12,
     fontWeight: '800',
   },
@@ -1032,14 +1032,14 @@ const styles = StyleSheet.create({
   },
   filterCard: {
     borderWidth: 1,
-    borderColor: '#d9e2ec',
+    borderColor: '#c8d8f2',
     backgroundColor: '#ffffff',
     borderRadius: 16,
     padding: 14,
   },
   card: {
     borderWidth: 1,
-    borderColor: '#d9e2ec',
+    borderColor: '#c8d8f2',
     backgroundColor: '#ffffff',
     borderRadius: 16,
     padding: 14,
@@ -1047,18 +1047,18 @@ const styles = StyleSheet.create({
   cardTitle: {
     fontSize: 14,
     fontWeight: '900',
-    color: '#102a43',
+    color: '#173c87',
     marginBottom: 8,
   },
   input: {
     borderWidth: 1,
-    borderColor: '#cbd2d9',
-    backgroundColor: '#ffffff',
+    borderColor: '#d4dcea',
+    backgroundColor: '#fbfdff',
     borderRadius: 12,
     paddingHorizontal: 12,
     paddingVertical: 10,
     fontSize: 12,
-    color: '#102a43',
+    color: '#14233d',
     marginBottom: 10,
   },
   noteInput: {
@@ -1077,7 +1077,7 @@ const styles = StyleSheet.create({
   label: {
     fontSize: 11,
     fontWeight: '800',
-    color: '#334e68',
+    color: '#435674',
     marginBottom: 5,
   },
   amountPreviewText: {
@@ -1119,7 +1119,7 @@ const styles = StyleSheet.create({
   selectorAction: {
     fontSize: 11,
     fontWeight: '900',
-    color: '#2250c9',
+    color: '#0755b8',
   },
   selectionInfoCard: {
     borderWidth: 1,
@@ -1133,13 +1133,13 @@ const styles = StyleSheet.create({
   selectionInfoTitle: {
     fontSize: 13,
     fontWeight: '900',
-    color: '#102a43',
+    color: '#173c87',
     marginBottom: 4,
   },
   selectionInfoMeta: {
     fontSize: 11,
     fontWeight: '700',
-    color: '#486581',
+    color: '#667897',
     marginBottom: 4,
   },
   selectionInfoDescription: {
@@ -1157,7 +1157,7 @@ const styles = StyleSheet.create({
     minWidth: 220,
     maxWidth: 360,
     borderWidth: 1,
-    borderColor: '#d9e2ec',
+    borderColor: '#dce5f4',
     backgroundColor: '#f8fbff',
     borderRadius: 12,
     paddingHorizontal: 12,
@@ -1165,13 +1165,13 @@ const styles = StyleSheet.create({
     gap: 2,
   },
   accountChipActive: {
-    borderColor: '#2250c9',
+    borderColor: '#0755b8',
     backgroundColor: '#eef4ff',
   },
   accountChipTitle: {
     fontSize: 11,
     fontWeight: '800',
-    color: '#102a43',
+    color: '#173c87',
   },
   accountChipTitleActive: {
     color: '#153e90',
@@ -1185,8 +1185,8 @@ const styles = StyleSheet.create({
   },
   primaryButton: {
     borderWidth: 1,
-    borderColor: '#2250c9',
-    backgroundColor: '#2f64ef',
+    borderColor: '#0755b8',
+    backgroundColor: '#0755b8',
     borderRadius: 12,
     paddingHorizontal: 12,
     paddingVertical: 10,
@@ -1218,14 +1218,14 @@ const styles = StyleSheet.create({
   },
   rowCard: {
     borderWidth: 1,
-    borderColor: '#d9e2ec',
+    borderColor: '#dce5f4',
     backgroundColor: '#fbfdff',
     borderRadius: 12,
     padding: 12,
     marginBottom: 10,
   },
   rowCardActive: {
-    borderColor: '#2250c9',
+    borderColor: '#0755b8',
     backgroundColor: '#eef4ff',
   },
   rowHeader: {
@@ -1239,13 +1239,13 @@ const styles = StyleSheet.create({
     flex: 1,
     fontSize: 12,
     fontWeight: '900',
-    color: '#102a43',
+    color: '#173c87',
   },
   detailTitle: {
     flex: 1,
     fontSize: 14,
     fontWeight: '900',
-    color: '#102a43',
+    color: '#173c87',
   },
   rowMeta: {
     fontSize: 11,
@@ -1262,7 +1262,7 @@ const styles = StyleSheet.create({
   rowNote: {
     fontSize: 11,
     lineHeight: 16,
-    color: '#334e68',
+    color: '#435674',
   },
   statusBadge: {
     borderRadius: 999,
@@ -1281,7 +1281,7 @@ const styles = StyleSheet.create({
   statusBadgeText: {
     fontSize: 10,
     fontWeight: '900',
-    color: '#102a43',
+    color: '#173c87',
     textTransform: 'uppercase',
   },
   totalCard: {
@@ -1316,7 +1316,7 @@ const styles = StyleSheet.create({
   noteLabel: {
     fontSize: 11,
     fontWeight: '800',
-    color: '#334e68',
+    color: '#435674',
     marginBottom: 4,
   },
   noteValue: {
@@ -1355,8 +1355,8 @@ const styles = StyleSheet.create({
     maxWidth: 560,
     maxHeight: '82%',
     borderWidth: 1,
-    borderColor: '#c8d0e6',
-    backgroundColor: '#f5f7fb',
+    borderColor: '#c8d8f2',
+    backgroundColor: '#ffffff',
     borderRadius: 18,
     padding: 16,
     alignItems: 'stretch',
@@ -1372,7 +1372,7 @@ const styles = StyleSheet.create({
     flex: 1,
     fontSize: 16,
     fontWeight: '900',
-    color: '#102a43',
+    color: '#173c87',
   },
   modalCloseButton: {
     borderWidth: 1,
@@ -1385,7 +1385,7 @@ const styles = StyleSheet.create({
   modalCloseButtonText: {
     fontSize: 11,
     fontWeight: '800',
-    color: '#334e68',
+    color: '#174a8c',
   },
   modalHelperText: {
     fontSize: 11,
@@ -1408,7 +1408,7 @@ const styles = StyleSheet.create({
     padding: 12,
   },
   modalOptionActive: {
-    borderColor: '#2250c9',
+    borderColor: '#0755b8',
     backgroundColor: '#eef4ff',
   },
   modalOptionHeader: {
@@ -1422,7 +1422,7 @@ const styles = StyleSheet.create({
     flex: 1,
     fontSize: 12,
     fontWeight: '900',
-    color: '#102a43',
+    color: '#173c87',
   },
   modalOptionBadge: {
     fontSize: 10,
@@ -1436,12 +1436,12 @@ const styles = StyleSheet.create({
   },
   modalOptionBadgeActive: {
     color: '#ffffff',
-    backgroundColor: '#2250c9',
+    backgroundColor: '#0755b8',
   },
   modalOptionMeta: {
     fontSize: 11,
     fontWeight: '700',
-    color: '#486581',
+    color: '#667897',
     marginBottom: 4,
   },
   modalOptionDescription: {

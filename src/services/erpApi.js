@@ -1474,7 +1474,17 @@ export const createPosInvoicePayment = async (invoiceId, payload) => {
   });
 };
 
+export const DANA_PROVIDER_PAYMENTS_ENABLED = false;
+export const DANA_PROVIDER_PAYMENTS_DISABLED_MESSAGE = 'Integrasi DANA sementara dinonaktifkan. Gunakan sistem QRIS lama/manual untuk pembayaran.';
+
+const ensureDanaProviderPaymentsEnabled = () => {
+  if (!DANA_PROVIDER_PAYMENTS_ENABLED) {
+    throw new Error(DANA_PROVIDER_PAYMENTS_DISABLED_MESSAGE);
+  }
+};
+
 export const createDanaQrisPayment = async (invoiceId, payload = {}) => {
+  ensureDanaProviderPaymentsEnabled();
   await ensureAuthenticated();
   return request(`/pos/invoices/${invoiceId}/payments/qris/dana`, {
     method: 'POST',
@@ -1484,6 +1494,7 @@ export const createDanaQrisPayment = async (invoiceId, payload = {}) => {
 };
 
 export const createDanaGatewayPayment = async (invoiceId, payload = {}) => {
+  ensureDanaProviderPaymentsEnabled();
   await ensureAuthenticated();
   return request(`/pos/invoices/${invoiceId}/payments/gateway/dana`, {
     method: 'POST',
@@ -1493,6 +1504,7 @@ export const createDanaGatewayPayment = async (invoiceId, payload = {}) => {
 };
 
 export const fetchDanaQrisPaymentStatus = async (paymentTransactionId, options = {}) => {
+  ensureDanaProviderPaymentsEnabled();
   await ensureAuthenticated();
   const params = new URLSearchParams();
   if (options?.syncProvider === true) {
@@ -1505,6 +1517,7 @@ export const fetchDanaQrisPaymentStatus = async (paymentTransactionId, options =
 };
 
 export const cancelDanaQrisPayment = async (paymentTransactionId, payload = {}) => {
+  ensureDanaProviderPaymentsEnabled();
   await ensureAuthenticated();
   return request(`/pos/payment-transactions/${paymentTransactionId}/cancel`, {
     method: 'POST',
@@ -1573,6 +1586,14 @@ export const updatePosProductionItemStatus = async (itemId, productionStatus) =>
   });
 };
 
+export const releasePosProductionItem = async (itemId) => {
+  await ensureAuthenticated();
+  return request(`/pos/production/items/${itemId}/release`, {
+    method: 'POST',
+    body: JSON.stringify({}),
+  });
+};
+
 export const fetchPosProofings = async (params = {}) => {
   await ensureAuthenticated();
   const query = new URLSearchParams();
@@ -1599,6 +1620,14 @@ export const fetchPosProofingHistory = async (proofingId) => {
 export const createPosProofing = async (payload) => {
   await ensureAuthenticated();
   return request('/pos/proofings', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+};
+
+export const sendPosProofingToDesign = async (proofingId, payload = {}) => {
+  await ensureAuthenticated();
+  return request(`/pos/proofings/${proofingId}/send-to-design`, {
     method: 'POST',
     body: JSON.stringify(payload),
   });
@@ -1722,6 +1751,15 @@ export const fetchPosOrderTransactionsPage = async (params = {}) => {
   if (params?.view) {
     query.set('view', String(params.view));
   }
+  if (params?.area) {
+    query.set('area', String(params.area));
+  }
+  if (params?.date_from) {
+    query.set('date_from', String(params.date_from));
+  }
+  if (params?.date_to) {
+    query.set('date_to', String(params.date_to));
+  }
   const payload = await request(`/pos/orders/transactions?${query.toString()}`, { timeoutMs });
   return toPaginatedDataList(payload);
 };
@@ -1790,6 +1828,15 @@ export const fetchPosOrdersPage = async (params = {}) => {
   }
   if (params?.view) {
     query.set('view', String(params.view));
+  }
+  if (params?.area) {
+    query.set('area', String(params.area));
+  }
+  if (params?.date_from) {
+    query.set('date_from', String(params.date_from));
+  }
+  if (params?.date_to) {
+    query.set('date_to', String(params.date_to));
   }
   const payload = await request(`/pos/orders?${query.toString()}`, { timeoutMs });
   return toPaginatedDataList(payload);
@@ -1902,9 +1949,17 @@ export const fetchPosClosingSummary = async (params = {}) => {
   return request(`/pos/reports/closing-summary${suffix}`);
 };
 
-export const fetchUserDirectory = async () => {
+export const fetchUserDirectory = async (params = {}) => {
   await ensureAuthenticated();
-  const payload = await request('/users');
+  const query = new URLSearchParams();
+  if (params?.search) {
+    query.set('search', String(params.search));
+  }
+  if (params?.limit) {
+    query.set('limit', String(params.limit));
+  }
+  const suffix = query.toString() ? `?${query.toString()}` : '';
+  const payload = await request(`/users${suffix}`);
   return toDataList(payload);
 };
 
@@ -2088,7 +2143,6 @@ export const saveStoreClosingCashValidation = async (closingId, payload = {}) =>
   await ensureAuthenticated();
   if (payload?.evidence) {
     const formData = new FormData();
-    formData.append('opening_cash', String(payload.opening_cash || 0));
     formData.append('physical_cash', String(payload.physical_cash || 0));
     if (payload.reason) formData.append('reason', String(payload.reason));
     if (payload.responsible_user_id) formData.append('responsible_user_id', String(payload.responsible_user_id));

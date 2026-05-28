@@ -28,6 +28,8 @@ import {
   createPosCustomer,
   createDanaGatewayPayment,
   createDanaQrisPayment,
+  DANA_PROVIDER_PAYMENTS_DISABLED_MESSAGE,
+  DANA_PROVIDER_PAYMENTS_ENABLED,
   createPosInvoicePayment,
   createPosManualApproval,
   createPosOrder,
@@ -44,8 +46,8 @@ import {
   fetchPosMaterials,
   fetchPosClosingSummary,
   fetchPosOrderDetail,
-  fetchAllPosOrders,
-  fetchAllPosOrderTransactions,
+  fetchPosOrdersPage,
+  fetchPosOrderTransactionsPage,
   fetchPosProductionItems,
   fetchPosProductionMaterials,
   fetchPosProductDetail,
@@ -58,9 +60,12 @@ import {
   fetchPosSettings,
   fetchPosSyncChanges,
   fetchPosSyncStatus,
+  fetchUserDirectory,
   fetchDanaQrisPaymentStatus,
   pickupPosOrder,
+  releasePosProductionItem,
   releasePosProofingToProduction,
+  sendPosProofingToDesign,
   sendPosProofingWhatsapp,
   fetchAuthMe,
   getCustomerDepositBalance,
@@ -103,7 +108,7 @@ const {
   isReceivableInvoiceRow,
   isSuccessfulInvoiceRow,
 } = require('../utils/invoiceVisibility');
-const { resolveProofingReleaseState } = require('../utils/proofingReleaseGate');
+const { formatProductionGateError, resolveProofingReleaseState } = require('../utils/proofingReleaseGate');
 const {
   CUSTOMER_PHONE_CONFLICT_MESSAGE,
   isCustomerPhoneConflictError,
@@ -558,6 +563,20 @@ const createManualApprovalModalState = () => ({
   note: '',
   status: 'pending',
   isSubmitting: false,
+});
+const PROOFING_SEND_TARGETS = [
+  { key: 'design', label: 'Design' },
+  { key: 'cashier', label: 'Kasir' },
+];
+const createProofingSendModalState = () => ({
+  visible: false,
+  row: null,
+  targetRole: 'design',
+  targetUserId: 0,
+  users: [],
+  isLoadingUsers: false,
+  isSubmitting: false,
+  error: '',
 });
 const formatIsoDate = (date) => {
   const year = date.getFullYear();
@@ -1868,6 +1887,7 @@ const resolveItemGrandTotal = (item, pricingSummaryInput = null) => {
 const PROOFING_FLOW_NONE = 'none';
 const PROOFING_FLOW_PROOFING_FIRST = 'proofing_first';
 const PROOFING_FLOW_PAY_FIRST = 'pay_first';
+const ORDER_SUBMIT_MODE_PROOFING = 'proofing';
 const normalizeProofingFlow = (value, proofingRequired = false) => {
   const normalized = String(value || '').trim().toLowerCase();
   if ([PROOFING_FLOW_PROOFING_FIRST, PROOFING_FLOW_PAY_FIRST].includes(normalized)) {
@@ -2592,6 +2612,15 @@ const getInvoiceStatusTextColor = (status) => {
   return '#3a3a3a';
 };
 const normalizeInvoiceOrderStatus = (row) => {
+  const invoiceStatus = normalizeText(
+    row?.invoice?.status
+    || row?.invoice?.payment_status
+    || '',
+  );
+  if (resolveInvoiceStatusKey(invoiceStatus) === 'draft') {
+    return invoiceStatus;
+  }
+
   return normalizeText(
     row?.status
     || row?.order_status
@@ -4257,7 +4286,37 @@ const resolveSelectedMaterialWarning = (usedMaterialInfo, productName = '') => {
 const PAYMENT_METHOD_LABELS = ['Cash', 'Transfer Bank', 'QRIS', 'Card / Debit / Credit'];
 const CUSTOMER_DEPOSIT_PAYMENT_LABEL = 'Saldo Pelanggan';
 const CUSTOMER_DEPOSIT_TOP_UP_TITLE = 'Top Up Saldo Customer';
+const DANA_QRIS_PAYMENT_LABEL = 'QRIS DANA';
 const DANA_GATEWAY_PAYMENT_LABEL = 'DANA Payment Gateway';
+const normalizePaymentAliasKey = (value) => normalizeText(value).replace(/[-\s]+/g, '_');
+const isDanaProviderName = (value) => normalizeText(value).includes('dana');
+const isDanaQrisPaymentAlias = (value) => (
+  ['qris_dana', 'dana_qris', 'qr_dana', 'dana_qr'].includes(normalizePaymentAliasKey(value))
+);
+const isDanaQrisPaymentAccount = (account, fallbackMethod = '') => {
+  const accountMethodType = normalizePaymentMethodType(
+    account?.paymentMethodCode
+    || account?.payment_method_code
+    || account?.paymentMethodName
+    || account?.payment_method_name
+    || account?.paymentType
+    || account?.payment_type
+    || fallbackMethod
+  );
+  return isDanaQrisPaymentAlias(account?.paymentMethodCode)
+    || isDanaQrisPaymentAlias(account?.payment_method_code)
+    || isDanaQrisPaymentAlias(account?.paymentMethodName)
+    || isDanaQrisPaymentAlias(account?.payment_method_name)
+    || (
+      accountMethodType === 'qris'
+      && (
+        isDanaProviderName(account?.providerName)
+        || isDanaProviderName(account?.provider_name)
+        || isDanaProviderName(account?.bankName)
+        || isDanaProviderName(account?.bank_name)
+      )
+    );
+};
 const DEFAULT_PAYMENT_METHOD_CONFIGS = [
   {
     id: 0,
@@ -4289,7 +4348,7 @@ const DEFAULT_PAYMENT_METHOD_CONFIGS = [
     isAvailable: true,
     accounts: [],
   },
-  {
+  ...(DANA_PROVIDER_PAYMENTS_ENABLED ? [{
     id: 0,
     code: 'dana_gateway',
     type: 'e_wallet',
@@ -4298,7 +4357,7 @@ const DEFAULT_PAYMENT_METHOD_CONFIGS = [
     requiresPaymentAccount: true,
     isAvailable: true,
     accounts: [],
-  },
+  }] : []),
   {
     id: 0,
     code: 'card',
@@ -4374,6 +4433,7 @@ const normalizePaymentMethodLabel = (value) => {
   const text = normalizeText(value);
   if (['cash', 'tunai'].includes(text)) return 'Cash';
   if (['transfer', 'bank transfer', 'transfer bank', 'bank_transfer'].includes(text)) return 'Transfer Bank';
+  if (isDanaQrisPaymentAlias(text)) return DANA_PROVIDER_PAYMENTS_ENABLED ? DANA_QRIS_PAYMENT_LABEL : 'QRIS';
   if (['qris', 'qr'].includes(text)) return 'QRIS';
   if (['dana_gateway', 'payment gateway dana', 'dana payment gateway', 'gateway_dana'].includes(text)) return DANA_GATEWAY_PAYMENT_LABEL;
   if (['card', 'kartu', 'debit', 'credit card', 'edc'].includes(text)) return 'Card / Debit / Credit';
@@ -4388,6 +4448,7 @@ const normalizePaymentMethodType = (value) => {
   const text = normalizeText(value);
   if (['cash', 'tunai'].includes(text)) return 'cash';
   if (['transfer', 'bank transfer', 'transfer bank', 'bank_transfer'].includes(text)) return 'bank_transfer';
+  if (isDanaQrisPaymentAlias(text)) return 'dana_qris';
   if (['qris', 'qr'].includes(text)) return 'qris';
   if (['dana_gateway', 'payment gateway dana', 'dana payment gateway', 'gateway_dana'].includes(text)) return 'dana_gateway';
   if (['card', 'kartu', 'debit', 'credit card', 'edc'].includes(text)) return 'card';
@@ -4404,13 +4465,50 @@ const isDanaGatewayPaymentMethodConfig = (config, fallbackValue = '') => {
 
   return candidates.some((candidate) => normalizePaymentMethodType(candidate) === 'dana_gateway');
 };
+const isDanaQrisPaymentMethodConfig = (config, fallbackValue = '') => {
+  if (config?.isDanaQrisMethod === true) {
+    return true;
+  }
+  const candidates = [
+    config?.code,
+    config?.name,
+    config?.type,
+    fallbackValue,
+    ...(Array.isArray(config?.accounts)
+      ? config.accounts.flatMap((account) => [
+        account?.paymentMethodCode,
+        account?.payment_method_code,
+        account?.paymentMethodName,
+        account?.payment_method_name,
+        account?.providerName,
+        account?.provider_name,
+        account?.bankName,
+        account?.bank_name,
+      ])
+      : []),
+  ];
+
+  return candidates.some((candidate) => normalizePaymentMethodType(candidate) === 'dana_qris')
+    || candidates.some((candidate) => isDanaQrisPaymentAlias(candidate));
+};
+const shouldExposePaymentMethodConfig = (row) => (
+  DANA_PROVIDER_PAYMENTS_ENABLED
+  || (
+    !isDanaGatewayPaymentMethodConfig(row, row?.name || row?.code || row?.type || '')
+    && !isDanaQrisPaymentMethodConfig(row, row?.name || row?.code || row?.type || '')
+  )
+);
 const normalizePosPaymentMethodRow = (row) => {
-  const normalizedName = normalizePaymentMethodLabel(
-    row?.name
+  const rawPaymentMethodLabel = row?.name
     || row?.label
     || row?.title
     || row?.code
-    || ''
+    || '';
+  const isDanaQrisMethod = isDanaQrisPaymentAlias(rawPaymentMethodLabel)
+    || isDanaQrisPaymentAlias(row?.code)
+    || isDanaQrisPaymentAlias(row?.type);
+  const normalizedName = normalizePaymentMethodLabel(
+    rawPaymentMethodLabel
   );
   const type = normalizePaymentMethodType(row?.type || row?.code || normalizedName);
   const accounts = Array.isArray(row?.accounts)
@@ -4422,6 +4520,10 @@ const normalizePosPaymentMethodRow = (row) => {
       payment_type: type,
       type,
     }))
+      .filter((account) => (
+        DANA_PROVIDER_PAYMENTS_ENABLED
+        || !isDanaQrisPaymentAccount(account, type)
+      ))
     : [];
   return {
     id: Number(row?.id || 0) || 0,
@@ -4433,6 +4535,7 @@ const normalizePosPaymentMethodRow = (row) => {
     requiresPaymentAccount: Boolean(row?.requires_payment_account),
     isAvailable: row?.is_available !== false,
     availabilityMessage: String(row?.availability_message || '').trim(),
+    isDanaQrisMethod,
     accounts,
   };
 };
@@ -4457,6 +4560,14 @@ const buildPaymentMethodConfigsFromAccountRows = (rows = []) => {
       || methodCode
       || methodName
     );
+    const isDanaQrisMethod = isDanaQrisPaymentAlias(methodCode)
+      || isDanaQrisPaymentAlias(methodName)
+      || isDanaQrisPaymentAlias(accountRow?.providerName)
+      || isDanaQrisPaymentAlias(accountRow?.provider_name)
+      || isDanaQrisPaymentAccount(accountRow, methodType);
+    if (!DANA_PROVIDER_PAYMENTS_ENABLED && isDanaQrisMethod) {
+      return;
+    }
     const groupKey = String(methodId > 0 ? `id:${methodId}` : `code:${methodCode || methodName}`);
 
     if (!grouped.has(groupKey)) {
@@ -4470,8 +4581,12 @@ const buildPaymentMethodConfigsFromAccountRows = (rows = []) => {
         requiresPaymentAccount: methodType !== 'customer_balance',
         isAvailable: true,
         availabilityMessage: '',
+        isDanaQrisMethod,
         accounts: [],
       });
+    }
+    if (isDanaQrisMethod) {
+      grouped.get(groupKey).isDanaQrisMethod = true;
     }
 
     grouped.get(groupKey).accounts.push({
@@ -4499,22 +4614,29 @@ const resolvePaymentMethodsFromSettingsPayload = (payload) => {
   }
 
   return Array.isArray(payload?.payment_methods) && payload.payment_methods.length > 0
-    ? payload.payment_methods.map((row) => normalizePosPaymentMethodRow(row))
+    ? payload.payment_methods
+      .map((row) => normalizePosPaymentMethodRow(row))
+      .filter((row) => shouldExposePaymentMethodConfig(row))
     : [];
 };
-const getDefaultPaymentMethodConfigs = () => DEFAULT_PAYMENT_METHOD_CONFIGS.map((row) => ({ ...row, accounts: [] }));
+const getDefaultPaymentMethodConfigs = () => DEFAULT_PAYMENT_METHOD_CONFIGS
+  .map((row) => ({ ...row, accounts: [] }))
+  .filter((row) => shouldExposePaymentMethodConfig(row));
 const findPaymentMethodConfig = (rows, value) => {
   const normalizedLabel = normalizePaymentMethodLabel(value);
   const normalizedType = normalizePaymentMethodType(value);
-  return (Array.isArray(rows) ? rows : []).find((row) => (
+  const matchedRow = (Array.isArray(rows) ? rows : []).find((row) => (
     normalizePaymentMethodLabel(row?.name) === normalizedLabel
     || normalizeText(row?.code) === normalizeText(value)
     || normalizePaymentMethodType(row?.type || row?.code || row?.name) === normalizedType
   )) || null;
+
+  return matchedRow && shouldExposePaymentMethodConfig(matchedRow) ? matchedRow : null;
 };
 const getPaymentMethodLabels = (rows, options = {}) => {
   const includeUnavailable = options?.includeUnavailable === true;
   return (Array.isArray(rows) ? rows : [])
+    .filter((row) => shouldExposePaymentMethodConfig(row))
     .filter((row) => includeUnavailable || row?.isAvailable !== false)
     .map((row) => String(row?.name || '').trim())
     .filter(Boolean);
@@ -4981,6 +5103,10 @@ const normalizeBankAccountRow = (row) => {
     row?.rekening,
     row?.number,
   );
+  const providerName = toLabel(
+    row?.provider_name,
+    row?.provider,
+  );
   const detail = toLabel(
     row?.detail,
     row?.payment_detail,
@@ -5017,6 +5143,7 @@ const normalizeBankAccountRow = (row) => {
     bankName,
     accountName,
     accountNumber,
+    providerName,
     detail,
     displayTitle,
     displaySubtitle,
@@ -5219,6 +5346,74 @@ const extractUserRoleLabel = (user) => {
   }
 
   return 'Kasir';
+};
+const normalizeProofingTargetRole = (value) => {
+  const key = String(value || '').trim().toLowerCase();
+  return ['cashier', 'kasir'].includes(key) ? 'cashier' : 'design';
+};
+const proofingTargetRoleLabel = (value) => (
+  normalizeProofingTargetRole(value) === 'cashier' ? 'Kasir' : 'Design'
+);
+const collectUserRoleLabels = (user) => {
+  const roleRows = Array.isArray(user?.roles)
+    ? user.roles
+    : (user?.roles && typeof user.roles === 'object')
+      ? Object.values(user.roles)
+      : [];
+  return [
+    user?.role_name,
+    user?.role,
+    user?.position,
+    user?.jabatan,
+    user?.user_type,
+    user?.level,
+    ...roleRows.map((role) => toLabel(role?.name, role?.title, role?.label, role)),
+  ]
+    .map((label) => String(label || '').trim().toLowerCase())
+    .filter(Boolean);
+};
+const userMatchesProofingTargetRole = (user, targetRole) => {
+  const normalizedRole = normalizeProofingTargetRole(targetRole);
+  const roleText = collectUserRoleLabels(user).join(' ');
+  if (normalizedRole === 'cashier') {
+    return roleText.includes('kasir') || roleText.includes('cashier');
+  }
+  return roleText.includes('design') || roleText.includes('desain') || roleText.includes('designer');
+};
+const filterProofingTargetUsers = (users, targetRole) => (
+  (Array.isArray(users) ? users : []).filter((user) => userMatchesProofingTargetRole(user, targetRole))
+);
+const resolveProofingRouting = (row) => {
+  const direct = row?.routing && typeof row.routing === 'object' ? row.routing : null;
+  if (direct) {
+    return direct;
+  }
+  const meta = row?.latest_log?.meta && typeof row.latest_log.meta === 'object'
+    ? row.latest_log.meta
+    : null;
+  if (!meta?.target_user_id && !meta?.target_user_name) {
+    return null;
+  }
+  return {
+    log_id: row?.latest_log?.id || 0,
+    target_role: normalizeProofingTargetRole(meta?.target_role),
+    target_role_label: proofingTargetRoleLabel(meta?.target_role),
+    target_user_id: Number(meta?.target_user_id || 0) || null,
+    target_user_name: String(meta?.target_user_name || '').trim(),
+    sent_at: row?.latest_log?.created_at || '',
+    sent_by: row?.latest_log?.actor || null,
+  };
+};
+const formatProofingRoutingLabel = (routing) => {
+  if (!routing || typeof routing !== 'object') {
+    return '';
+  }
+  const roleLabel = String(routing?.target_role_label || proofingTargetRoleLabel(routing?.target_role)).trim();
+  const userName = String(routing?.target_user_name || '').trim();
+  if (!userName) {
+    return roleLabel;
+  }
+  return `${roleLabel}: ${userName}`;
 };
 const canUserApproveManualApproval = (user) => {
   const roleRows = Array.isArray(user?.roles)
@@ -5633,6 +5828,13 @@ const SalesScreen = ({ currentUser, onLogout }) => {
   const [currentDraftSourceId, setCurrentDraftSourceId] = useState(null);
   const [currentQueuedDraftQueueId, setCurrentQueuedDraftQueueId] = useState(null);
   const [draftInvoices, setDraftInvoices] = useState([]);
+  const [invoiceListMeta, setInvoiceListMeta] = useState({
+    currentPage: 1,
+    lastPage: 1,
+    hasMore: false,
+    total: 0,
+    searchMode: false,
+  });
   const [draftTimeTick, setDraftTimeTick] = useState(() => Date.now());
   const [invoiceFilter, setInvoiceFilter] = useState('success');
   const [approvalStatusFilter, setApprovalStatusFilter] = useState('all');
@@ -5643,6 +5845,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
   const [isDeletingDraftId, setIsDeletingDraftId] = useState(null);
   const [productionRows, setProductionRows] = useState([]);
   const [proofingRows, setProofingRows] = useState([]);
+  const [proofingSendModal, setProofingSendModal] = useState(() => createProofingSendModalState());
   const [isProductionLoading, setIsProductionLoading] = useState(false);
   const [isProofingLoading, setIsProofingLoading] = useState(false);
   const [productionStatusFilter, setProductionStatusFilter] = useState('all');
@@ -5885,6 +6088,10 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     });
   };
   const hydrateDanaInvoiceMonitorsFromRows = (rows = []) => {
+    if (!DANA_PROVIDER_PAYMENTS_ENABLED) {
+      return;
+    }
+
     if (!Array.isArray(rows) || rows.length === 0) {
       return;
     }
@@ -5915,6 +6122,10 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     });
   };
   const resolveInvoiceProviderPaymentSummary = (row) => {
+    if (!DANA_PROVIDER_PAYMENTS_ENABLED) {
+      return null;
+    }
+
     const invoiceId = Number(row?.invoice?.id || row?.provider_payment?.invoice_id || 0) || 0;
     const monitorSummary = invoiceId > 0
       ? activeDanaInvoiceMonitorsRef.current?.[invoiceId]
@@ -5990,6 +6201,11 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     }
   };
   const openDanaMonitorFromSummary = (summary) => {
+    if (!DANA_PROVIDER_PAYMENTS_ENABLED) {
+      openNotice('Pembayaran QRIS', DANA_PROVIDER_PAYMENTS_DISABLED_MESSAGE);
+      return;
+    }
+
     const normalizedSummary = summary && typeof summary === 'object' ? summary : null;
     if (!normalizedSummary || !(Number(normalizedSummary.invoiceId || 0) > 0)) {
       openNotice('Pembayaran Online', 'Detail pembayaran online belum tersedia untuk invoice ini.');
@@ -6084,6 +6300,10 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     }
   };
   const applyDanaProviderPaymentPayloadInBackground = async (payload, source = 'poll') => {
+    if (!DANA_PROVIDER_PAYMENTS_ENABLED) {
+      return null;
+    }
+
     const transaction = extractDanaPaymentTransaction(payload);
     if (!transaction) {
       return null;
@@ -6144,8 +6364,9 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     || selectedPaymentMethodConfig?.code
     || paymentMethod,
   );
-  const isDanaQrisPaymentMethod = selectedPaymentMethodType === 'qris';
-  const isDanaGatewayPaymentMethod = isDanaGatewayPaymentMethodConfig(selectedPaymentMethodConfig, paymentMethod);
+  const isDanaQrisPaymentMethod = DANA_PROVIDER_PAYMENTS_ENABLED && selectedPaymentMethodType === 'qris';
+  const isDanaGatewayPaymentMethod = DANA_PROVIDER_PAYMENTS_ENABLED
+    && isDanaGatewayPaymentMethodConfig(selectedPaymentMethodConfig, paymentMethod);
   const selectedBankAccountRow = useMemo(
     () => bankAccounts.find((row) => Number(row?.id || 0) === Number(selectedBankAccountId || 0)) || null,
     [bankAccounts, selectedBankAccountId],
@@ -6217,6 +6438,12 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     }
 
     if (method === 'qris') {
+      if (!DANA_PROVIDER_PAYMENTS_ENABLED) {
+        return selectedAccountName
+          ? `QRIS lama/manual aktif. Pembayaran akan dicatat langsung ke akun tujuan saat order diproses: ${selectedAccountName}.`
+          : 'QRIS lama/manual aktif. Pilih akun tujuan QRIS agar pembayaran bisa dicatat saat order diproses.';
+      }
+
       return selectedAccountName
         ? `QRIS DANA akan dibuat full sisa invoice dan otomatis dicatat ke rekening/akun tujuan setelah callback paid: ${selectedAccountName}.`
         : 'QRIS DANA akan dibuat full sisa invoice. Pembayaran baru dicatat setelah callback paid dari DANA.';
@@ -6269,6 +6496,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     accountOptions: [],
     isLoadingAccounts: false,
     isSubmitting: false,
+    context: 'receivable',
   });
   const selectedReceivableAccountRow = useMemo(
     () => (Array.isArray(receivablePaymentModal.accountOptions) ? receivablePaymentModal.accountOptions : [])
@@ -6386,6 +6614,10 @@ const SalesScreen = ({ currentUser, onLogout }) => {
   const productionSnapshotRef = useRef(new Map());
   const productionSnapshotReadyRef = useRef(false);
   const productionPollingRef = useRef(false);
+  const proofingAssignmentSnapshotRef = useRef(new Map());
+  const proofingAssignmentSnapshotReadyRef = useRef(false);
+  const proofingAssignmentNotifiedRef = useRef(new Set());
+  const proofingAssignmentPollingRef = useRef(false);
   const receivableApprovalSnapshotRef = useRef(new Map());
   const receivableApprovalSnapshotReadyRef = useRef(false);
   const receivableApprovalPollingRef = useRef(false);
@@ -6529,60 +6761,69 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     const reportDate = String(overrideDate || closingReportDate || formatIsoDate(new Date())).trim();
     if (!reportDate) {
       openNotice('Laporan Close Order', 'Tanggal laporan wajib diisi.');
-      return;
+      return null;
     }
     if (!backendReady) {
       setClosingReport(null);
-      return;
+      return null;
     }
     try {
       setIsClosingReportLoading(true);
       const payload = await fetchPosClosingSummary({ date: reportDate });
-      setClosingReport(payload && typeof payload === 'object' ? payload : null);
+      const nextReport = payload && typeof payload === 'object' ? payload : null;
+      setClosingReport(nextReport);
+      return nextReport;
     } catch (error) {
       setClosingReport(null);
       openNotice('Laporan Close Order', `Gagal memuat laporan closing: ${error.message}`);
+      return null;
     } finally {
       setIsClosingReportLoading(false);
     }
+  };
+
+  const normalizeCloserOrderDamageItems = (payload) => {
+    const row = payload && typeof payload === 'object' ? payload : null;
+    if (!row) {
+      return [];
+    }
+
+    return (Array.isArray(row?.damage_items) ? row.damage_items : []).map((item) => ({
+      id: Number(item?.id || 0) || `damage-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+      productId: Number(item?.product_id || 0) || null,
+      productName: String(item?.product_name || '').trim(),
+      qty: Math.max(0, Number(item?.qty || 0)) || 0,
+      note: String(item?.cashier_note || '').trim(),
+      estimatedTotalValue: roundMoney(Number(item?.estimated_total_value || 0)),
+      auditStatus: String(item?.audit_status || 'reported'),
+      responsibility: String(item?.responsibility || ''),
+    }));
   };
 
   const loadCloserOrderRecord = async (overrideDate = null) => {
     const reportDate = String(overrideDate || closingReportDate || formatIsoDate(new Date())).trim();
     if (!backendReady) {
       setClosingDamageItems([]);
-      return;
+      return [];
     }
     try {
       const payload = await fetchPosCloserOrder({ date: reportDate });
-      const row = payload && typeof payload === 'object' ? payload : null;
-      if (row) {
-        setClosingDamageItems(
-          (Array.isArray(row?.damage_items) ? row.damage_items : []).map((item) => ({
-            id: Number(item?.id || 0) || `damage-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-            productId: Number(item?.product_id || 0) || null,
-            productName: String(item?.product_name || '').trim(),
-            qty: Math.max(0, Number(item?.qty || 0)) || 0,
-            note: String(item?.cashier_note || '').trim(),
-            estimatedTotalValue: roundMoney(Number(item?.estimated_total_value || 0)),
-            auditStatus: String(item?.audit_status || 'reported'),
-            responsibility: String(item?.responsibility || ''),
-          })),
-        );
-      } else {
-        setClosingDamageItems([]);
-      }
+      const nextDamageItems = normalizeCloserOrderDamageItems(payload);
+      setClosingDamageItems(nextDamageItems);
+      return nextDamageItems;
     } catch (_error) {
       setClosingDamageItems([]);
+      return [];
     }
   };
 
   const loadClosingWorkspace = async (overrideDate = null) => {
     const reportDate = String(overrideDate || closingReportDate || formatIsoDate(new Date())).trim();
-    await Promise.all([
+    const [report, damageItems] = await Promise.all([
       loadClosingReport(reportDate),
       loadCloserOrderRecord(reportDate),
     ]);
+    return { report, damageItems };
   };
 
   const openNotice = (title, message, onClose = null, options = {}) => {
@@ -8452,6 +8693,10 @@ const SalesScreen = ({ currentUser, onLogout }) => {
   };
 
   const applyDanaQrisStatusFromPayload = async (payload, source = 'poll') => {
+    if (!DANA_PROVIDER_PAYMENTS_ENABLED) {
+      return;
+    }
+
     const transaction = extractDanaQrisTransaction(payload);
     if (!transaction) {
       return;
@@ -8499,6 +8744,11 @@ const SalesScreen = ({ currentUser, onLogout }) => {
   };
 
   const startDanaQrisPayment = async (orderResult) => {
+    if (!DANA_PROVIDER_PAYMENTS_ENABLED) {
+      openNotice('QRIS Lama Aktif', DANA_PROVIDER_PAYMENTS_DISABLED_MESSAGE);
+      return;
+    }
+
     const invoiceId = Number(orderResult?.invoiceId || 0) || 0;
     if (!(invoiceId > 0)) {
       openNotice(
@@ -8602,6 +8852,10 @@ const SalesScreen = ({ currentUser, onLogout }) => {
   };
 
   const refreshDanaQrisStatus = async (options = {}) => {
+    if (!DANA_PROVIDER_PAYMENTS_ENABLED) {
+      return;
+    }
+
     const paymentTransactionId = Number(danaQrisModalRef.current?.paymentTransactionId || 0) || 0;
     if (!(paymentTransactionId > 0)) {
       return;
@@ -8645,7 +8899,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
 
   useEffect(() => {
     const status = normalizeDanaQrisStatus(danaQrisModal.status);
-    if (!danaQrisModal.visible || isDanaQrisTerminalStatus(status)) {
+    if (!DANA_PROVIDER_PAYMENTS_ENABLED || !danaQrisModal.visible || isDanaQrisTerminalStatus(status)) {
       return undefined;
     }
 
@@ -8659,7 +8913,8 @@ const SalesScreen = ({ currentUser, onLogout }) => {
   useEffect(() => {
     const status = normalizeDanaQrisStatus(danaQrisModal.status);
     if (
-      !danaQrisModal.visible
+      !DANA_PROVIDER_PAYMENTS_ENABLED
+      || !danaQrisModal.visible
       || !(Number(danaQrisModal.invoiceId || 0) > 0)
       || !(Number(danaQrisModal.paymentTransactionId || 0) > 0)
       || isDanaQrisTerminalStatus(status)
@@ -8696,7 +8951,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
   useEffect(() => {
     const status = normalizeDanaQrisStatus(danaQrisModal.status);
     const paymentTransactionId = Number(danaQrisModal.paymentTransactionId || 0) || 0;
-    if (!danaQrisModal.visible || !(paymentTransactionId > 0) || isDanaQrisTerminalStatus(status)) {
+    if (!DANA_PROVIDER_PAYMENTS_ENABLED || !danaQrisModal.visible || !(paymentTransactionId > 0) || isDanaQrisTerminalStatus(status)) {
       return undefined;
     }
 
@@ -8855,6 +9110,10 @@ const SalesScreen = ({ currentUser, onLogout }) => {
   };
 
   const applyDanaGatewayStatusFromPayload = async (payload, source = 'poll') => {
+    if (!DANA_PROVIDER_PAYMENTS_ENABLED) {
+      return;
+    }
+
     const transaction = extractDanaGatewayTransaction(payload);
     if (!transaction) {
       return;
@@ -8902,6 +9161,11 @@ const SalesScreen = ({ currentUser, onLogout }) => {
   };
 
   const startDanaGatewayPayment = async (orderResult) => {
+    if (!DANA_PROVIDER_PAYMENTS_ENABLED) {
+      openNotice('DANA Payment Gateway', DANA_PROVIDER_PAYMENTS_DISABLED_MESSAGE);
+      return;
+    }
+
     const invoiceId = Number(orderResult?.invoiceId || 0) || 0;
     if (!(invoiceId > 0)) {
       openNotice(
@@ -9010,6 +9274,10 @@ const SalesScreen = ({ currentUser, onLogout }) => {
   };
 
   const refreshDanaGatewayStatus = async (options = {}) => {
+    if (!DANA_PROVIDER_PAYMENTS_ENABLED) {
+      return;
+    }
+
     const paymentTransactionId = Number(danaGatewayModalRef.current?.paymentTransactionId || 0) || 0;
     if (!(paymentTransactionId > 0)) {
       return;
@@ -9053,7 +9321,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
 
   useEffect(() => {
     const status = normalizeDanaQrisStatus(danaGatewayModal.status);
-    if (!danaGatewayModal.visible || isDanaQrisTerminalStatus(status)) {
+    if (!DANA_PROVIDER_PAYMENTS_ENABLED || !danaGatewayModal.visible || isDanaQrisTerminalStatus(status)) {
       return undefined;
     }
 
@@ -9067,7 +9335,8 @@ const SalesScreen = ({ currentUser, onLogout }) => {
   useEffect(() => {
     const status = normalizeDanaQrisStatus(danaGatewayModal.status);
     if (
-      !danaGatewayModal.visible
+      !DANA_PROVIDER_PAYMENTS_ENABLED
+      || !danaGatewayModal.visible
       || !(Number(danaGatewayModal.invoiceId || 0) > 0)
       || !(Number(danaGatewayModal.paymentTransactionId || 0) > 0)
       || isDanaQrisTerminalStatus(status)
@@ -9104,7 +9373,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
   useEffect(() => {
     const status = normalizeDanaQrisStatus(danaGatewayModal.status);
     const paymentTransactionId = Number(danaGatewayModal.paymentTransactionId || 0) || 0;
-    if (!danaGatewayModal.visible || !(paymentTransactionId > 0) || isDanaQrisTerminalStatus(status)) {
+    if (!DANA_PROVIDER_PAYMENTS_ENABLED || !danaGatewayModal.visible || !(paymentTransactionId > 0) || isDanaQrisTerminalStatus(status)) {
       return undefined;
     }
 
@@ -9140,6 +9409,10 @@ const SalesScreen = ({ currentUser, onLogout }) => {
   }, [danaGatewayModal.visible, danaGatewayModal.paymentTransactionId, danaGatewayModal.status]);
 
   useEffect(() => {
+    if (!DANA_PROVIDER_PAYMENTS_ENABLED) {
+      return undefined;
+    }
+
     const hasPendingBackgroundMonitor = Object.values(activeDanaInvoiceMonitors || {}).some((summary) => (
       normalizeDanaQrisStatus(summary?.status) === 'pending'
     ));
@@ -9155,6 +9428,10 @@ const SalesScreen = ({ currentUser, onLogout }) => {
   }, [activeDanaInvoiceMonitors]);
 
   useEffect(() => {
+    if (!DANA_PROVIDER_PAYMENTS_ENABLED) {
+      return undefined;
+    }
+
     const monitorEntries = Object.values(activeDanaInvoiceMonitors || {}).filter((summary) => {
       const paymentTransactionId = Number(summary?.id || 0) || 0;
       return paymentTransactionId > 0 && normalizeDanaQrisStatus(summary?.status) === 'pending';
@@ -10847,7 +11124,63 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     }
   };
 
+  const invoiceRowMergeKey = (row, index = 0) => {
+    if (String(row?.__source || '') === 'queue') {
+      return `queue:${String(row?.__queue_id || row?.id || index)}`;
+    }
+    if (isReceivableApprovalInvoiceRow(row)) {
+      return `approval:${String(row?.__approval_request_id || row?.approval?.id || row?.id || index)}`;
+    }
+    const orderId = Number(row?.id || row?.order?.id || 0) || 0;
+    if (orderId > 0) {
+      return `order:${orderId}`;
+    }
+    const invoiceId = Number(row?.invoice?.id || 0) || 0;
+    if (invoiceId > 0) {
+      return `invoice:${invoiceId}`;
+    }
+    return `row:${index}:${String(row?.invoice?.invoice_no || row?.created_at || '')}`;
+  };
+
+  const mergeInvoiceRows = (baseRows = [], incomingRows = []) => {
+    const rowsByKey = new Map();
+    [...(Array.isArray(baseRows) ? baseRows : []), ...(Array.isArray(incomingRows) ? incomingRows : [])].forEach((row, index) => {
+      rowsByKey.set(invoiceRowMergeKey(row, index), row);
+    });
+    return Array.from(rowsByKey.values());
+  };
+
+  const buildInvoiceWorkspaceRequestOptions = (options = {}) => {
+    const keyword = String(options?.search ?? invoiceSearch ?? '').trim();
+    const page = Math.max(1, Math.trunc(Number(options?.page || 1)) || 1);
+    const requestOptions = {
+      perPage: 50,
+      page,
+      timeoutMs: 25000,
+      view: 'workspace',
+      area: String(options?.area || invoiceFilter || 'success'),
+    };
+
+    if (keyword) {
+      requestOptions.search = keyword;
+      return requestOptions;
+    }
+
+    const dateFrom = String(options?.dateFrom ?? invoiceDateFrom ?? '').trim();
+    const dateTo = String(options?.dateTo ?? invoiceDateTo ?? '').trim();
+    if (dateFrom) {
+      requestOptions.date_from = dateFrom;
+    }
+    if (dateTo) {
+      requestOptions.date_to = dateTo;
+    }
+    return requestOptions;
+  };
+
   const loadDraftInvoices = async (options = {}) => {
+    const appendRows = Boolean(options?.append);
+    const searchMode = String(options?.search ?? invoiceSearch ?? '').trim() !== '';
+    const requestPage = Math.max(1, Math.trunc(Number(options?.page || 1)) || 1);
     const queueRows = loadOrderQueue()
       .filter((queued) => isDraftPayload(queued?.payload))
       .map((queued) => {
@@ -10870,34 +11203,41 @@ const SalesScreen = ({ currentUser, onLogout }) => {
 
     if (!backendReady) {
       setDraftInvoices(queueRows);
+      setInvoiceListMeta({
+        currentPage: 1,
+        lastPage: 1,
+        hasMore: false,
+        total: queueRows.length,
+        searchMode,
+      });
       hydrateDanaInvoiceMonitorsFromRows(queueRows);
       return;
     }
     try {
       setIsDraftLoading(true);
-      const invoiceRequestOptions = {
-        perPage: 100,
-        maxPages: 100,
-        timeoutMs: 45000,
-        view: 'workspace',
-      };
+      const invoiceRequestOptions = buildInvoiceWorkspaceRequestOptions({
+        ...options,
+        page: requestPage,
+      });
       let rows = [];
+      let pageMeta = null;
       let invoiceLoadError = null;
 
-      try {
-        rows = await fetchAllPosOrderTransactions(invoiceRequestOptions);
-      } catch (error) {
-        invoiceLoadError = error;
-      }
-
-      if (rows.length === 0) {
+      if (invoiceRequestOptions.area !== 'approval') {
         try {
-          rows = await fetchAllPosOrders(invoiceRequestOptions);
-          invoiceLoadError = null;
-        } catch (fallbackError) {
-          invoiceLoadError = invoiceLoadError
-            ? new Error(`${invoiceLoadError.message}\nFallback daftar order juga gagal: ${fallbackError.message}`)
-            : fallbackError;
+          const response = await fetchPosOrderTransactionsPage(invoiceRequestOptions);
+          rows = Array.isArray(response?.data) ? response.data : [];
+          pageMeta = response?.meta || null;
+        } catch (error) {
+          invoiceLoadError = error;
+          try {
+            const fallbackResponse = await fetchPosOrdersPage(invoiceRequestOptions);
+            rows = Array.isArray(fallbackResponse?.data) ? fallbackResponse.data : [];
+            pageMeta = fallbackResponse?.meta || null;
+            invoiceLoadError = null;
+          } catch (fallbackError) {
+            invoiceLoadError = new Error(`${error.message}\nFallback daftar order juga gagal: ${fallbackError.message}`);
+          }
         }
       }
 
@@ -10910,8 +11250,18 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         const approvalType = normalizeApprovalType(row?.approval?.type || row?.approval_type);
         return !(approvalType === 'receivable' && approvalStatus === 'approved' && orderId > 0);
       });
-      const mergedRows = [...queueRows, ...approvalListRows, ...rows];
+      const baseRows = appendRows
+        ? (Array.isArray(draftInvoices) ? draftInvoices : [])
+        : [];
+      const mergedRows = mergeInvoiceRows(baseRows, [...queueRows, ...approvalListRows, ...rows]);
       setDraftInvoices(mergedRows);
+      setInvoiceListMeta({
+        currentPage: Number(pageMeta?.currentPage || requestPage) || requestPage,
+        lastPage: Number(pageMeta?.lastPage || requestPage) || requestPage,
+        hasMore: Boolean(pageMeta?.hasMore),
+        total: Number(pageMeta?.total || rows.length || 0) || rows.length,
+        searchMode,
+      });
       hydrateDanaInvoiceMonitorsFromRows(mergedRows);
 
       if (invoiceLoadError && mergedRows.length === 0) {
@@ -10919,6 +11269,13 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       }
     } catch (error) {
       setDraftInvoices(queueRows);
+      setInvoiceListMeta({
+        currentPage: 1,
+        lastPage: 1,
+        hasMore: false,
+        total: queueRows.length,
+        searchMode,
+      });
       hydrateDanaInvoiceMonitorsFromRows(queueRows);
       if (queueRows.length === 0) {
         openNotice('Invoice', `Gagal memuat invoice: ${error.message}`);
@@ -10929,10 +11286,15 @@ const SalesScreen = ({ currentUser, onLogout }) => {
   };
 
   useEffect(() => {
-    if (isInvoiceAreaMenu(activeMenu)) {
-      loadDraftInvoices();
+    if (!isInvoiceAreaMenu(activeMenu)) {
+      return undefined;
     }
-  }, [activeMenu, backendReady]);
+    const timeout = setTimeout(() => {
+      loadDraftInvoices({ page: 1 }).catch(() => {});
+    }, String(invoiceSearch || '').trim() ? 350 : 0);
+
+    return () => clearTimeout(timeout);
+  }, [activeMenu, backendReady, invoiceFilter, invoiceSearch, invoiceDateFrom, invoiceDateTo]);
 
   useEffect(() => {
     if (!backendReady) {
@@ -10952,7 +11314,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     }, 12000);
 
     return () => clearInterval(timer);
-  }, [activeMenu, backendReady, invoiceDetailModal.row, invoiceDetailModal.visible]);
+  }, [activeMenu, backendReady, invoiceDetailModal.row, invoiceDetailModal.visible, invoiceFilter, invoiceSearch, invoiceDateFrom, invoiceDateTo]);
 
   useEffect(() => {
     const timer = setInterval(() => {
@@ -11026,6 +11388,131 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     }
   };
 
+  const loadMoreDraftInvoices = async () => {
+    if (isDraftLoading || !invoiceListMeta.hasMore) {
+      return;
+    }
+    await loadDraftInvoices({
+      page: Number(invoiceListMeta.currentPage || 1) + 1,
+      append: true,
+    });
+  };
+
+  const buildProofingAssignmentKey = (row, routing) => {
+    const proofingId = Number(row?.id || 0) || 0;
+    const targetUserId = Number(routing?.target_user_id || 0) || 0;
+    const routingId = String(routing?.log_id || routing?.sent_at || row?.updated_at || '').trim();
+    return `${proofingId}:${targetUserId}:${routingId}`;
+  };
+
+  const isRecentProofingAssignment = (routing) => {
+    const rawDate = String(routing?.sent_at || '').trim();
+    if (!rawDate) {
+      return false;
+    }
+    const timestamp = Date.parse(rawDate.replace(' ', 'T'));
+    return Number.isFinite(timestamp) && Date.now() - timestamp <= 10 * 60 * 1000;
+  };
+
+  const buildProofingAssignmentMessage = (assignments = []) => {
+    const lines = assignments.slice(0, 3).map(({ row, routing }) => {
+      const proofingCode = String(row?.proofing_code || row?.id || '-').trim();
+      const customerName = String(row?.customer?.name || row?.order?.customer?.name || 'Pelanggan umum').trim();
+      const itemName = String(row?.item?.name || 'Item proofing').trim();
+      const senderName = String(routing?.sent_by?.name || '').trim();
+      const senderText = senderName ? ` dari ${senderName}` : '';
+      return `- ${proofingCode}: ${itemName} (${customerName})${senderText}`;
+    });
+    const moreCount = assignments.length > 3 ? `\n+ ${assignments.length - 3} task lain` : '';
+    return `Ada task proofing yang dikirim untuk Anda.\n${lines.join('\n')}${moreCount}`;
+  };
+
+  const notifyProofingAssignments = (assignments = []) => {
+    if (!Array.isArray(assignments) || assignments.length === 0) {
+      return;
+    }
+    assignments.forEach(({ key }) => {
+      proofingAssignmentNotifiedRef.current.add(key);
+    });
+    playNotificationTone('waiting_design').catch(() => {});
+    if (noticeModal.visible) {
+      return;
+    }
+    openNoticeActions(
+      'Task Proofing Masuk',
+      buildProofingAssignmentMessage(assignments),
+      [
+        { label: 'Nanti', role: 'secondary' },
+        {
+          label: 'Buka Proofing',
+          role: 'primary',
+          onPress: () => {
+            setActiveMenu('proofing');
+            setProofingStatusFilter('all');
+            setProofingSearch('');
+            loadProofingItems({ status: 'all', search: '' });
+          },
+        },
+      ],
+      null,
+      { showDefaultAction: false },
+    );
+  };
+
+  const syncProofingAssignmentNotifications = (rows = []) => {
+    if (!currentUserId) {
+      return;
+    }
+
+    const nextSnapshot = new Map();
+    const assignments = [];
+    const wasReady = proofingAssignmentSnapshotReadyRef.current;
+
+    (Array.isArray(rows) ? rows : []).forEach((row) => {
+      const proofingId = Number(row?.id || 0) || 0;
+      const routing = resolveProofingRouting(row);
+      const targetUserId = Number(routing?.target_user_id || 0) || 0;
+      if (proofingId <= 0 || targetUserId <= 0) {
+        return;
+      }
+
+      const key = buildProofingAssignmentKey(row, routing);
+      const previousKey = proofingAssignmentSnapshotRef.current.get(proofingId);
+      nextSnapshot.set(proofingId, key);
+
+      if (targetUserId !== currentUserId || previousKey === key || proofingAssignmentNotifiedRef.current.has(key)) {
+        return;
+      }
+
+      if (wasReady || isRecentProofingAssignment(routing)) {
+        assignments.push({ row, routing, key });
+      }
+    });
+
+    proofingAssignmentSnapshotRef.current = nextSnapshot;
+    proofingAssignmentSnapshotReadyRef.current = true;
+    notifyProofingAssignments(assignments);
+  };
+
+  const checkProofingAssignmentUpdates = async () => {
+    if (!backendReady || !currentUserId || proofingAssignmentPollingRef.current) {
+      return;
+    }
+    proofingAssignmentPollingRef.current = true;
+    try {
+      const payload = await fetchPosProofings({ status: 'all' });
+      const rows = toDataRows(payload);
+      syncProofingAssignmentNotifications(rows);
+      if (activeMenu === 'proofing' && proofingStatusFilter === 'all' && !proofingSearch.trim()) {
+        setProofingRows(rows);
+      }
+    } catch (_error) {
+      // Notifikasi assignment tidak boleh mengganggu halaman utama.
+    } finally {
+      proofingAssignmentPollingRef.current = false;
+    }
+  };
+
   const loadProofingItems = async (override = {}) => {
     if (!backendReady) {
       setProofingRows([]);
@@ -11040,7 +11527,9 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         status,
         search,
       });
-      setProofingRows(toDataRows(payload));
+      const rows = toDataRows(payload);
+      setProofingRows(rows);
+      syncProofingAssignmentNotifications(rows);
     } catch (error) {
       setProofingRows([]);
       openNotice('Proofing', `Gagal memuat queue proofing: ${error.message}`);
@@ -11104,6 +11593,22 @@ const SalesScreen = ({ currentUser, onLogout }) => {
 
     return () => clearTimeout(timeout);
   }, [proofingSearch, proofingStatusFilter, activeMenu]);
+  useEffect(() => {
+    if (!backendReady || !currentUserId) {
+      proofingAssignmentSnapshotRef.current = new Map();
+      proofingAssignmentSnapshotReadyRef.current = false;
+      proofingAssignmentNotifiedRef.current = new Set();
+      proofingAssignmentPollingRef.current = false;
+      return undefined;
+    }
+
+    checkProofingAssignmentUpdates();
+    const timer = setInterval(() => {
+      checkProofingAssignmentUpdates();
+    }, 12000);
+
+    return () => clearInterval(timer);
+  }, [backendReady, currentUserId, activeMenu, proofingStatusFilter, proofingSearch]);
   const checkProductionRealtimeUpdates = async () => {
     if (!backendReady || productionPollingRef.current) {
       return;
@@ -11255,10 +11760,36 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         autoCloseMs: 1400,
       });
     } catch (error) {
-      const noticeMessage = isCustomerProcessLockError(error)
+      const gateMessage = formatProductionGateError(error);
+      const noticeMessage = gateMessage || (isCustomerProcessLockError(error)
         ? buildCustomerProcessLockNotice(error, String(row?.order?.customer?.name || '').trim())
-        : String(formatBackendValidationError(error) || error?.message || 'Gagal update status produksi.').trim();
+        : String(formatBackendValidationError(error) || error?.message || 'Gagal update status produksi.').trim());
       openNotice('Produksi', `Gagal update status item #${itemId}: ${noticeMessage}`);
+    } finally {
+      setUpdatingProductionItemId(null);
+    }
+  };
+
+  const handleReleaseProductionItem = async (row) => {
+    const itemId = Number(row?.id || 0);
+    if (itemId <= 0) {
+      return;
+    }
+
+    try {
+      setUpdatingProductionItemId(itemId);
+      await releasePosProductionItem(itemId);
+      await loadProductionItems();
+      openNotice('Gerbang Produksi', `Item #${itemId} berhasil masuk antrean produksi.`, null, {
+        showDefaultAction: false,
+        autoCloseMs: 1600,
+      });
+    } catch (error) {
+      const blockerMessage = formatProductionGateError(error);
+      openNotice(
+        'Gerbang Produksi',
+        blockerMessage || String(formatBackendValidationError(error) || error?.message || 'Item belum dapat masuk produksi.'),
+      );
     } finally {
       setUpdatingProductionItemId(null);
     }
@@ -11288,6 +11819,35 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     }
   };
 
+  const handleOpenProofingUploadedFile = async (row, source = 'preview') => {
+    const proofingId = Number(row?.id || 0);
+    if (!(proofingId > 0)) {
+      return;
+    }
+
+    const normalizedSource = String(source || '').trim().toLowerCase() === 'final' ? 'final' : 'preview';
+    const fileObject = row?.[`${normalizedSource}_file`] && typeof row[`${normalizedSource}_file`] === 'object'
+      ? row[`${normalizedSource}_file`]
+      : null;
+    const fallbackUrl = normalizedSource === 'final'
+      ? (row?.final_url || row?.preview_url)
+      : (row?.preview_url || row?.final_url);
+    const targetUrl = String(fileObject?.url || fallbackUrl || '').trim();
+    if (!targetUrl) {
+      openNotice('Proofing', 'File upload proofing belum tersedia.');
+      return;
+    }
+
+    try {
+      const opened = await openExternalUrl(targetUrl);
+      if (!opened) {
+        throw new Error('Browser tidak bisa membuka file upload proofing.');
+      }
+    } catch (error) {
+      openNotice('Proofing', `Gagal membuka file proofing #${proofingId}: ${error.message}`);
+    }
+  };
+
   const handleViewProofingHistory = async (row) => {
     const proofingId = Number(row?.id || 0);
     if (!(proofingId > 0)) {
@@ -11306,6 +11866,129 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       );
     } catch (error) {
       openNotice('Proofing', `Gagal memuat history proofing #${proofingId}: ${error.message}`);
+    }
+  };
+
+  const closeProofingSendModal = () => {
+    if (proofingSendModal.isSubmitting) {
+      return;
+    }
+    setProofingSendModal(createProofingSendModalState());
+  };
+
+  const openProofingSendModal = async (row) => {
+    const proofingId = Number(row?.id || 0);
+    if (!(proofingId > 0)) {
+      return;
+    }
+
+    const routing = resolveProofingRouting(row);
+    const initialRole = normalizeProofingTargetRole(routing?.target_role || 'design');
+    const initialTargetId = Number(routing?.target_user_id || 0) || 0;
+    setProofingSendModal({
+      ...createProofingSendModalState(),
+      visible: true,
+      row,
+      targetRole: initialRole,
+      targetUserId: initialTargetId,
+      isLoadingUsers: true,
+    });
+
+    try {
+      const users = await fetchUserDirectory({ limit: 500 });
+      const filteredUsers = filterProofingTargetUsers(users, initialRole);
+      const selectedUserId = filteredUsers.some((user) => Number(user?.id || 0) === initialTargetId)
+        ? initialTargetId
+        : (Number(filteredUsers[0]?.id || 0) || 0);
+      setProofingSendModal((prev) => ({
+        ...prev,
+        users,
+        targetUserId: selectedUserId,
+        isLoadingUsers: false,
+        error: filteredUsers.length === 0
+          ? `Belum ada user dengan role ${proofingTargetRoleLabel(initialRole)}.`
+          : '',
+      }));
+    } catch (error) {
+      setProofingSendModal((prev) => ({
+        ...prev,
+        users: [],
+        targetUserId: 0,
+        isLoadingUsers: false,
+        error: `Gagal memuat daftar user: ${formatBackendValidationError(error) || error.message}`,
+      }));
+    }
+  };
+
+  const handleChangeProofingSendTargetRole = (targetRole) => {
+    const normalizedRole = normalizeProofingTargetRole(targetRole);
+    setProofingSendModal((prev) => {
+      const filteredUsers = filterProofingTargetUsers(prev.users, normalizedRole);
+      const selectedUserId = filteredUsers.some((user) => Number(user?.id || 0) === Number(prev.targetUserId || 0))
+        ? Number(prev.targetUserId || 0)
+        : (Number(filteredUsers[0]?.id || 0) || 0);
+      return {
+        ...prev,
+        targetRole: normalizedRole,
+        targetUserId: selectedUserId,
+        error: filteredUsers.length === 0
+          ? `Belum ada user dengan role ${proofingTargetRoleLabel(normalizedRole)}.`
+          : '',
+      };
+    });
+  };
+
+  const handleSubmitProofingSendTarget = async () => {
+    const row = proofingSendModal.row;
+    const proofingId = Number(row?.id || 0);
+    const targetUserId = Number(proofingSendModal.targetUserId || 0);
+    const targetRole = normalizeProofingTargetRole(proofingSendModal.targetRole);
+    if (!(proofingId > 0)) {
+      return;
+    }
+    if (!(targetUserId > 0)) {
+      setProofingSendModal((prev) => ({
+        ...prev,
+        error: 'Pilih user tujuan terlebih dahulu.',
+      }));
+      return;
+    }
+
+    try {
+      setProcessingProofingId(proofingId);
+      setProofingSendModal((prev) => ({
+        ...prev,
+        isSubmitting: true,
+        error: '',
+      }));
+      await sendPosProofingToDesign(proofingId, {
+        target_role: targetRole,
+        target_user_id: targetUserId,
+      });
+      await Promise.all([
+        loadProofingItems(),
+        loadProductionItems().catch(() => {}),
+      ]);
+      const selectedUser = proofingSendModal.users.find((user) => Number(user?.id || 0) === targetUserId);
+      const targetLabel = `${proofingTargetRoleLabel(targetRole)}${selectedUser?.name ? `: ${selectedUser.name}` : ''}`;
+      setProofingSendModal(createProofingSendModalState());
+      openNotice(
+        'Proofing',
+        `Task proofing #${proofingId} berhasil dikirim ke ${targetLabel}.`,
+        null,
+        {
+          showDefaultAction: false,
+          autoCloseMs: 1600,
+        },
+      );
+    } catch (error) {
+      setProofingSendModal((prev) => ({
+        ...prev,
+        isSubmitting: false,
+        error: `Gagal mengirim task: ${formatBackendValidationError(error) || error.message}`,
+      }));
+    } finally {
+      setProcessingProofingId(null);
     }
   };
 
@@ -11407,7 +12090,11 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         },
       );
     } catch (error) {
-      openNotice('Proofing', `Gagal melepas proofing #${proofingId} ke produksi: ${error.message}`);
+      const blockerMessage = formatProductionGateError(error);
+      openNotice(
+        'Gerbang Produksi',
+        blockerMessage || `Gagal melepas proofing #${proofingId} ke produksi: ${error.message}`,
+      );
     } finally {
       setProcessingProofingId(null);
     }
@@ -12705,7 +13392,11 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       return null;
     }
 
-    if (cartHasProofingEligibleItems && selectedProofingFlow !== PROOFING_FLOW_NONE) {
+    const proofingFlowForValidation = normalizeProofingFlow(
+      options?.proofingFlow ?? selectedProofingFlow,
+      Boolean(options?.proofingFlow) || selectedProofingFlow !== PROOFING_FLOW_NONE,
+    );
+    if (cartHasProofingEligibleItems && proofingFlowForValidation !== PROOFING_FLOW_NONE) {
       const rawCustomerPhone = String(
         selectedCustomer?.phone
         || selectedCustomer?.mobile
@@ -12717,7 +13408,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       } catch (error) {
         openNotice(
           'Flow Proofing',
-          `Nomor WhatsApp customer wajib valid sebelum order memakai flow ${proofingFlowToLabel(selectedProofingFlow)}.`,
+          `Nomor WhatsApp customer wajib valid sebelum order memakai flow ${proofingFlowToLabel(proofingFlowForValidation)}.`,
         );
         return null;
       }
@@ -12813,20 +13504,31 @@ const SalesScreen = ({ currentUser, onLogout }) => {
   };
 
   const submitTransaction = async (mode = 'draft', options = {}) => {
-    const validation = await validateTransactionBeforeSubmit(mode);
+    const validation = await validateTransactionBeforeSubmit(mode, options);
     if (!validation) {
       return null;
     }
 
     const isDraftMode = mode === 'draft';
+    const isProofingWithoutPaymentMode = mode === ORDER_SUBMIT_MODE_PROOFING;
+    const proofingFlowForSubmit = normalizeProofingFlow(
+      options?.proofingFlow ?? selectedProofingFlow,
+      Boolean(options?.proofingFlow) || selectedProofingFlow !== PROOFING_FLOW_NONE,
+    );
     const { canonicalMethodLabel, selectedMethodConfig } = validation;
+    const deferredPaymentMethodConfig = selectedMethodConfig
+      || paymentMethodConfigs.find((row) => row?.isDefault)
+      || paymentMethodConfigs.find((row) => normalizePaymentMethodType(row?.type || row?.code || row?.name) === 'cash')
+      || paymentMethodConfigs[0]
+      || null;
     const usingCustomerDeposit = isCustomerDepositPaymentMethod(canonicalMethodLabel);
     const method = String(
-      selectedMethodConfig?.code
+      deferredPaymentMethodConfig?.code
       || mapPaymentMethodToBackend(canonicalMethodLabel)
-      || '',
+      || 'cash',
     ).trim();
-    const usingDanaQris = !isDraftMode
+    const usingDanaQris = DANA_PROVIDER_PAYMENTS_ENABLED
+      && !isDraftMode
       && options?.danaQris === true
       && normalizePaymentMethodType(
         selectedMethodConfig?.type
@@ -12834,12 +13536,13 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         || canonicalMethodLabel
         || method
       ) === 'qris';
-    const usingDanaGateway = !isDraftMode
+    const usingDanaGateway = DANA_PROVIDER_PAYMENTS_ENABLED
+      && !isDraftMode
       && options?.danaGateway === true
       && isDanaGatewayPaymentMethodConfig(selectedMethodConfig, canonicalMethodLabel || method);
     const selectedBankId = Number(options?.bankAccountId || 0);
-    const currentMethodAccounts = Array.isArray(selectedMethodConfig?.accounts)
-      ? selectedMethodConfig.accounts.map((row) => normalizeBankAccountRow(row))
+    const currentMethodAccounts = Array.isArray(deferredPaymentMethodConfig?.accounts)
+      ? deferredPaymentMethodConfig.accounts.map((row) => normalizeBankAccountRow(row))
       : [];
     const selectedAccountRow = currentMethodAccounts.find((row) => Number(row?.id || 0) === selectedBankId)
       || currentMethodAccounts.find((row) => Number(row?.id || 0) === Number(selectedBankAccountId || 0))
@@ -13082,7 +13785,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
           ?? true,
         );
         const effectiveProofingFlow = originalRequiresDesign && cartHasProofingEligibleItems
-          ? normalizeProofingFlow(selectedProofingFlow, selectedProofingFlow !== PROOFING_FLOW_NONE)
+          ? normalizeProofingFlow(proofingFlowForSubmit, proofingFlowForSubmit !== PROOFING_FLOW_NONE)
           : PROOFING_FLOW_NONE;
         const effectiveProofingRequired = effectiveProofingFlow !== PROOFING_FLOW_NONE;
 
@@ -13126,10 +13829,10 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         });
       });
 
-      const paymentTransactionType = isDraftMode || usingDanaQris || usingDanaGateway
+      const paymentTransactionType = isDraftMode || isProofingWithoutPaymentMode || usingDanaQris || usingDanaGateway
         ? 'unpaid'
         : transactionType;
-      const paymentAmountPayload = isDraftMode || usingDanaQris || usingDanaGateway
+      const paymentAmountPayload = isDraftMode || isProofingWithoutPaymentMode || usingDanaQris || usingDanaGateway
         ? 0
         : transactionType === 'full'
             ? grandTotal
@@ -13145,6 +13848,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         customer_id: customerId,
         ...(Number(currentDraftSourceId || 0) > 0 ? { source_order_id: Number(currentDraftSourceId || 0) } : {}),
         ...(mode === 'draft' ? { status: 'draft' } : {}),
+        ...(isProofingWithoutPaymentMode ? { invoice_status: 'draft' } : {}),
         due_at: null,
         discount_type: discountMode === 'percent' ? 'percent' : 'amount',
         discount_value: roundMoney(
@@ -13159,9 +13863,13 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         notes: [
           selectedCustomer?.name ? `Customer: ${selectedCustomer.name}` : '',
           `Tanggal Order: ${transactionDate}`,
-          mode === 'draft' ? 'Mode: Simpan Draft' : 'Mode: Proses Orderan',
+          mode === 'draft'
+            ? 'Mode: Simpan Draft'
+            : isProofingWithoutPaymentMode
+              ? 'Mode: Lanjut Proofing'
+              : 'Mode: Proses Orderan',
           currentDraftSourceId ? `Lanjutan Draft ID: ${currentDraftSourceId}` : '',
-          cartHasProofingEligibleItems ? `Flow Proofing: ${proofingFlowToLabel(selectedProofingFlow)}` : '',
+          cartHasProofingEligibleItems ? `Flow Proofing: ${proofingFlowToLabel(proofingFlowForSubmit)}` : '',
           discountToApply > 0 ? `Diskon Order: ${discountToApply}` : '',
           paymentNotes ? `Catatan: ${paymentNotes}` : '',
         ]
@@ -13172,11 +13880,11 @@ const SalesScreen = ({ currentUser, onLogout }) => {
           transaction_type: paymentTransactionType,
           method,
           ...(!isDraftMode && !usingCustomerDeposit ? {
-            payment_method_id: Number(selectedMethodConfig?.id || 0) || null,
+            payment_method_id: Number(deferredPaymentMethodConfig?.id || 0) || null,
             payment_account_id: resolvedPaymentAccountId || null,
             bank_account_id: resolvedAccountingAccountId || null,
           } : {
-            payment_method_id: Number(selectedMethodConfig?.id || 0) || null,
+            payment_method_id: Number(deferredPaymentMethodConfig?.id || 0) || null,
           }),
           amount: roundMoney(paymentAmountPayload),
           note: paymentNotes || null,
@@ -13375,6 +14083,8 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       openNotice(
         mode === 'draft'
           ? 'Draft Berhasil Tersimpan'
+          : isProofingWithoutPaymentMode
+            ? 'Order Masuk Proofing'
           : usingCustomerDeposit
             ? 'Order Berhasil Diproses'
             : 'Order Berhasil Diproses',
@@ -13425,6 +14135,13 @@ const SalesScreen = ({ currentUser, onLogout }) => {
             backendOrderId: null,
             invoiceNo: '-',
           };
+        }
+        if (mode === ORDER_SUBMIT_MODE_PROOFING) {
+          openNotice(
+            'Proofing Butuh Backend Online',
+            'Order belum masuk proofing karena server belum terhubung. Cek koneksi/backend lalu klik Lanjut Proofing lagi.',
+          );
+          return null;
         }
         if (mode === 'process' && usingCustomerDeposit) {
           openNotice(
@@ -13864,8 +14581,11 @@ const SalesScreen = ({ currentUser, onLogout }) => {
   };
 
   const handleOpenReceivablePaymentModal = async (row) => {
+    const invoiceStatusKey = resolveInvoiceStatusKey(row?.invoice?.status);
+    const isDraftInvoicePayment = invoiceStatusKey === 'draft';
+    const paymentContextTitle = isDraftInvoicePayment ? 'Invoice Draft' : 'Piutang Pelanggan';
     if (!canUserAccessInvoiceRow(row, currentUser)) {
-      openNotice('Piutang Pelanggan', 'Invoice tidak tersedia untuk user kasir ini atau sudah tidak bisa diakses.');
+      openNotice(paymentContextTitle, 'Invoice tidak tersedia untuk user kasir ini atau sudah tidak bisa diakses.');
       return;
     }
     const invoiceId = Number(row?.invoice?.id || 0);
@@ -13877,7 +14597,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       || 0,
     );
     if (!(invoiceId > 0) || dueTotal <= 0) {
-      openNotice('Piutang Pelanggan', 'Invoice ini tidak memiliki sisa piutang untuk dibayar.');
+      openNotice(paymentContextTitle, 'Invoice ini tidak memiliki sisa tagihan untuk dibayar.');
       return;
     }
 
@@ -13898,6 +14618,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       accountOptions: [],
       isLoadingAccounts: true,
       isSubmitting: false,
+      context: isDraftInvoicePayment ? 'draft_invoice' : 'receivable',
     });
 
     try {
@@ -13916,7 +14637,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
           accountOptions: [],
           selectedAccountId: null,
         }));
-        openNotice('Piutang Pelanggan', 'Belum ada akun kas yang cocok untuk pembayaran tunai piutang.');
+        openNotice(paymentContextTitle, 'Belum ada akun kas yang cocok untuk pembayaran tunai.');
         return;
       }
       setReceivablePaymentModal((prev) => ({
@@ -13933,7 +14654,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         isLoadingAccounts: false,
         isLoadingDepositBalance: false,
       }));
-      openNotice('Piutang Pelanggan', `Gagal memuat akun pembayaran: ${error.message}`);
+      openNotice(paymentContextTitle, `Gagal memuat akun pembayaran: ${error.message}`);
     }
   };
 
@@ -14003,6 +14724,8 @@ const SalesScreen = ({ currentUser, onLogout }) => {
   };
 
   const handleSubmitReceivablePayment = async () => {
+    const isDraftInvoicePayment = receivablePaymentModal.context === 'draft_invoice';
+    const paymentContextTitle = isDraftInvoicePayment ? 'Invoice Draft' : 'Piutang Pelanggan';
     const invoiceId = Number(receivablePaymentModal.invoiceId || 0);
     const accountId = Number(receivablePaymentModal.selectedAccountId || 0);
     const usingDeposit = isCustomerDepositPaymentMethod(receivablePaymentModal.method);
@@ -14012,24 +14735,24 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     const dueTotal = roundMoney(Number(receivablePaymentModal.dueTotal || 0));
 
     if (!(invoiceId > 0)) {
-      openNotice('Piutang Pelanggan', 'Invoice piutang tidak valid.');
+      openNotice(paymentContextTitle, 'Invoice tidak valid.');
       return;
     }
     if (amount <= 0) {
-      openNotice('Piutang Pelanggan', 'Nominal pembayaran piutang wajib diisi.');
+      openNotice(paymentContextTitle, 'Nominal pembayaran wajib diisi.');
       return;
     }
     if (amount > dueTotal) {
-      openNotice('Piutang Pelanggan', 'Nominal pembayaran melebihi sisa piutang pelanggan.');
+      openNotice(paymentContextTitle, 'Nominal pembayaran melebihi sisa tagihan.');
       return;
     }
     const availableDepositBalance = roundMoney(Number(receivablePaymentModal.customerDepositBalance || 0));
     if (usingDeposit && availableDepositBalance <= 0) {
-      openNotice('Piutang Pelanggan', 'Saldo pelanggan tidak tersedia.');
+      openNotice(paymentContextTitle, 'Saldo pelanggan tidak tersedia.');
       return;
     }
     if (!usingDeposit && !(accountId > 0)) {
-      openNotice('Piutang Pelanggan', 'Pilih akun pembayaran terlebih dahulu.');
+      openNotice(paymentContextTitle, 'Pilih akun pembayaran terlebih dahulu.');
       return;
     }
 
@@ -14075,8 +14798,8 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         }
       }
       openNotice(
-        'Piutang Pelanggan',
-        `Pembayaran piutang untuk ${receivablePaymentModal.customerName} sebesar ${formatRupiah(effectiveAmount)} berhasil dicatat.`,
+        paymentContextTitle,
+        `Pembayaran ${isDraftInvoicePayment ? 'invoice draft' : 'piutang'} untuk ${receivablePaymentModal.customerName} sebesar ${formatRupiah(effectiveAmount)} berhasil dicatat.`,
         null,
         { autoCloseMs: 2200 },
       );
@@ -14085,7 +14808,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         ...prev,
         isSubmitting: false,
       }));
-      openNotice('Piutang Pelanggan', formatReceivablePaymentError(error));
+      openNotice(paymentContextTitle, formatReceivablePaymentError(error));
     }
   };
 
@@ -14249,6 +14972,31 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     await handleSaveTransaction();
   };
 
+  const handleContinueProofingWithoutPayment = async () => {
+    if (isSubmitting) {
+      openNotice('Informasi', 'Transaksi sedang diproses, mohon tunggu.');
+      return;
+    }
+    if (!cartHasProofingEligibleItems) {
+      openNotice('Flow Proofing', 'Keranjang ini belum memiliki item yang bisa masuk proofing.');
+      return;
+    }
+
+    setSelectedProofingFlow(PROOFING_FLOW_PROOFING_FIRST);
+    const result = await submitTransaction(ORDER_SUBMIT_MODE_PROOFING, {
+      skipPaymentMethodValidation: true,
+      proofingFlow: PROOFING_FLOW_PROOFING_FIRST,
+    });
+    if (result?.ok) {
+      setModalDetailPesanan(false);
+      setModalPilihPembayaran(false);
+      setActiveMenu('proofing');
+      setProofingStatusFilter('all');
+      setProofingSearch('');
+      await loadProofingItems({ status: 'all', search: '' });
+    }
+  };
+
   const handleOpenBankPickerFromPreview = async (action = 'save') => {
     if (isSubmitting || isOrderPreviewSubmitting) {
       openNotice('Informasi', 'Transaksi sedang diproses, mohon tunggu.');
@@ -14371,9 +15119,14 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     [currentUser, draftInvoices],
   );
   const dateFilteredInvoiceRows = useMemo(
-    () => (Array.isArray(visibleInvoiceRows) ? visibleInvoiceRows : [])
-      .filter((row) => isInvoiceRowInDateRange(row, invoiceDateFrom, invoiceDateTo)),
-    [invoiceDateFrom, invoiceDateTo, visibleInvoiceRows],
+    () => {
+      const rows = Array.isArray(visibleInvoiceRows) ? visibleInvoiceRows : [];
+      if (String(invoiceSearch || '').trim()) {
+        return rows;
+      }
+      return rows.filter((row) => isInvoiceRowInDateRange(row, invoiceDateFrom, invoiceDateTo));
+    },
+    [invoiceDateFrom, invoiceDateTo, invoiceSearch, visibleInvoiceRows],
   );
   const activeManualApprovalLinks = useMemo(() => {
     const orderIds = new Set();
@@ -15199,24 +15952,91 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       auditedCount: 0,
     });
   }, [closingDamageItems]);
-  const buildClosingReportHtml = () => {
-    if (!closingReport) {
+  const buildClosingReportHtml = (reportOverride = null, damageItemsOverride = null, reportDateOverride = null) => {
+    const report = reportOverride || closingReport;
+    if (!report) {
       return '';
     }
-    const reportDate = String(closingReport?.date || closingReportDate || '-');
+    const reportDate = String(report?.date || reportDateOverride || closingReportDate || '-');
+    const paymentRows = Array.isArray(report?.payments?.breakdown) ? report.payments.breakdown : [];
+    const paymentMethodSummary = paymentRows.reduce((totals, row) => {
+      const amount = roundMoney(Number(row?.total_amount || 0));
+      const bucket = mapPaymentMethodTypeToClosingBucket(
+        row?.method
+        || row?.payment_method
+        || row?.payment_type
+        || row?.type
+        || '',
+      );
+      totals[bucket] = roundMoney((totals[bucket] || 0) + amount);
+      return totals;
+    }, { cash: 0, transfer: 0, qris: 0, card: 0, other: 0 });
+    const cashInHandSummary = {
+      cashSales: roundMoney(Number(report?.payments?.cash_total || 0)),
+      cashReceivable: roundMoney(Number(report?.receivable_collections?.cash_total || 0)),
+      cashIncomeOther: roundMoney(Number(report?.external_cash?.income_total || 0)),
+      cashExpenseOther: roundMoney(Number(report?.external_cash?.expense_total || 0)),
+    };
+    cashInHandSummary.physicalCashExpected = roundMoney(
+      cashInHandSummary.cashSales
+      + cashInHandSummary.cashReceivable
+      + cashInHandSummary.cashIncomeOther
+      - cashInHandSummary.cashExpenseOther
+    );
+    const nonCashSummary = {
+      nonCashSales: roundMoney(Number(report?.payments?.non_cash_total || 0)),
+      nonCashReceivable: roundMoney(Number(report?.receivable_collections?.non_cash_total || 0)),
+    };
+    nonCashSummary.total = roundMoney(nonCashSummary.nonCashSales + nonCashSummary.nonCashReceivable);
+    const receivableSettlementRows = Array.isArray(report?.receivable_collections?.settlements) ? report.receivable_collections.settlements : [];
+    const receivableBreakdownRows = Array.isArray(report?.receivable_collections?.breakdown) ? report.receivable_collections.breakdown : [];
+    const gross = roundMoney(Number(report?.sales?.gross_total || 0));
+    const lunas = roundMoney(Number(
+      report?.sales?.omzet_lunas_total
+      ?? report?.sales?.paid_total_from_invoice
+      ?? 0
+    ));
+    const omzetSummary = {
+      gross,
+      lunas,
+      piutang: roundMoney(Number(
+        report?.sales?.omzet_piutang_total
+        ?? report?.sales?.outstanding_total
+        ?? Math.max(gross - lunas, 0)
+      )),
+      invoiceLunasCount: Math.max(0, Number(report?.sales?.invoice_lunas_count || 0) || 0),
+      invoicePiutangCount: Math.max(0, Number(report?.sales?.invoice_piutang_count || 0) || 0),
+    };
+    const damageItems = Array.isArray(damageItemsOverride) ? damageItemsOverride : closingDamageItems;
+    const damageSummary = damageItems.reduce((acc, row) => {
+      const qty = Math.max(0, Number(row?.qty || 0)) || 0;
+      const estimatedTotalValue = roundMoney(Number(row?.estimatedTotalValue || 0));
+      acc.itemCount += 1;
+      acc.totalQty += qty;
+      acc.totalEstimatedValue = roundMoney(acc.totalEstimatedValue + estimatedTotalValue);
+      if (String(row?.auditStatus || '').trim().toLowerCase() !== 'reported') {
+        acc.auditedCount += 1;
+      }
+      return acc;
+    }, {
+      itemCount: 0,
+      totalQty: 0,
+      totalEstimatedValue: 0,
+      auditedCount: 0,
+    });
     const cashierName = String(currentUser?.name || 'Kasir').trim() || 'Kasir';
     const receiptSettings = normalizeReceiptSettings(posSettings);
     const logoUrl = String(receiptSettings?.receipt_logo_url || '').trim();
     const brandName = String(receiptSettings?.brand_name || 'SIDOMULYO ADVERTISING').trim() || 'SIDOMULYO ADVERTISING';
     const brandTagline = String(receiptSettings?.brand_tagline || '').trim();
-    const paymentLines = closingPaymentRows.length > 0
-      ? closingPaymentRows.map((row) => `<div class="line"><span>${escapeHtml(formatClosingBreakdownLabel(row, bankAccounts))}</span><strong>${escapeHtml(formatRupiah(row?.total_amount || 0))}</strong></div>`).join('')
+    const paymentLines = paymentRows.length > 0
+      ? paymentRows.map((row) => `<div class="line"><span>${escapeHtml(formatClosingBreakdownLabel(row, bankAccounts))}</span><strong>${escapeHtml(formatRupiah(row?.total_amount || 0))}</strong></div>`).join('')
       : '<div class="muted">Belum ada pembayaran penjualan hari ini</div>';
-    const receivableLines = closingReceivableBreakdownRows.length > 0
-      ? closingReceivableBreakdownRows.map((row) => `<div class="line"><span>${escapeHtml(formatClosingBreakdownLabel(row, bankAccounts))}</span><strong>${escapeHtml(formatRupiah(row?.total_amount || 0))}</strong></div>`).join('')
+    const receivableLines = receivableBreakdownRows.length > 0
+      ? receivableBreakdownRows.map((row) => `<div class="line"><span>${escapeHtml(formatClosingBreakdownLabel(row, bankAccounts))}</span><strong>${escapeHtml(formatRupiah(row?.total_amount || 0))}</strong></div>`).join('')
       : '<div class="muted">Belum ada pelunasan piutang hari ini</div>';
-    const receivableRefs = closingReceivableSettlementRows.length > 0
-      ? closingReceivableSettlementRows.slice(0, 5).map((row) => `
+    const receivableRefs = receivableSettlementRows.length > 0
+      ? receivableSettlementRows.slice(0, 5).map((row) => `
         <div class="mini-item">
           <div><strong>${escapeHtml(String(row?.invoice_no || '-'))}</strong></div>
           <div class="muted">${escapeHtml(String(row?.customer_name || 'Pelanggan umum'))} | ${escapeHtml(formatClosingBreakdownLabel(row, bankAccounts))}</div>
@@ -15224,8 +16044,8 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         </div>
       `).join('')
       : '<div class="muted">Tidak ada referensi pelunasan piutang</div>';
-    const damageLines = closingDamageItems.length > 0
-      ? closingDamageItems.map((row, index) => `
+    const damageLines = damageItems.length > 0
+      ? damageItems.map((row, index) => `
         <div class="mini-item">
           <div><strong>${index + 1}. ${escapeHtml(String(row?.productName || '-'))}</strong></div>
           <div class="muted">Qty: ${escapeHtml(String(row?.qty || 0))} | Estimasi: ${escapeHtml(formatRupiah(row?.estimatedTotalValue || 0))}</div>
@@ -15409,37 +16229,37 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     <div class="meta">Tanggal: ${escapeHtml(reportDate)}</div>
     <div class="meta">Kasir: ${escapeHtml(cashierName)}</div>
     <h2>Omzet</h2>
-    <div class="line"><span>Omzet Total Invoice</span><strong>${escapeHtml(formatRupiah(closingOmzetSummary.gross))}</strong></div>
-    <div class="line"><span>Omset Lunas</span><strong>${escapeHtml(formatRupiah(closingOmzetSummary.lunas))}</strong></div>
-    <div class="line"><span>Omset Piutang</span><strong>${escapeHtml(formatRupiah(closingOmzetSummary.piutang))}</strong></div>
-    <div class="line"><span>Bayar Penjualan Hari Ini</span><strong>${escapeHtml(formatRupiah(closingReport?.sales?.payment_received_total || 0))}</strong></div>
-    <div class="line"><span>Invoice Lunas</span><strong>${escapeHtml(String(closingOmzetSummary.invoiceLunasCount || 0))}</strong></div>
-    <div class="line"><span>Invoice Piutang</span><strong>${escapeHtml(String(closingOmzetSummary.invoicePiutangCount || 0))}</strong></div>
+    <div class="line"><span>Omzet Total Invoice</span><strong>${escapeHtml(formatRupiah(omzetSummary.gross))}</strong></div>
+    <div class="line"><span>Omset Lunas</span><strong>${escapeHtml(formatRupiah(omzetSummary.lunas))}</strong></div>
+    <div class="line"><span>Omset Piutang</span><strong>${escapeHtml(formatRupiah(omzetSummary.piutang))}</strong></div>
+    <div class="line"><span>Bayar Penjualan Hari Ini</span><strong>${escapeHtml(formatRupiah(report?.sales?.payment_received_total || 0))}</strong></div>
+    <div class="line"><span>Invoice Lunas</span><strong>${escapeHtml(String(omzetSummary.invoiceLunasCount || 0))}</strong></div>
+    <div class="line"><span>Invoice Piutang</span><strong>${escapeHtml(String(omzetSummary.invoicePiutangCount || 0))}</strong></div>
 
     <h2>Pelunasan Piutang</h2>
-    <div class="line"><span>Total Pelunasan</span><strong>${escapeHtml(formatRupiah(closingReport?.receivable_collections?.total || 0))}</strong></div>
-    <div class="line"><span>Cash</span><strong>${escapeHtml(formatRupiah(closingReport?.receivable_collections?.cash_total || 0))}</strong></div>
-    <div class="line"><span>Non Cash</span><strong>${escapeHtml(formatRupiah(closingReport?.receivable_collections?.non_cash_total || 0))}</strong></div>
+    <div class="line"><span>Total Pelunasan</span><strong>${escapeHtml(formatRupiah(report?.receivable_collections?.total || 0))}</strong></div>
+    <div class="line"><span>Cash</span><strong>${escapeHtml(formatRupiah(report?.receivable_collections?.cash_total || 0))}</strong></div>
+    <div class="line"><span>Non Cash</span><strong>${escapeHtml(formatRupiah(report?.receivable_collections?.non_cash_total || 0))}</strong></div>
     ${receivableLines}
 
     <h2>Pembayaran</h2>
-    <div class="line"><span>Cash Sales</span><strong>${escapeHtml(formatRupiah(closingReport?.payments?.cash_total || 0))}</strong></div>
-    <div class="line"><span>Transfer Sales</span><strong>${escapeHtml(formatRupiah(closingPaymentMethodSummary.transfer))}</strong></div>
-    <div class="line"><span>QRIS Sales</span><strong>${escapeHtml(formatRupiah(closingPaymentMethodSummary.qris))}</strong></div>
-    <div class="line"><span>Card Sales</span><strong>${escapeHtml(formatRupiah(closingPaymentMethodSummary.card))}</strong></div>
-    <div class="line"><span>Non Cash Sales</span><strong>${escapeHtml(formatRupiah(closingReport?.payments?.non_cash_total || 0))}</strong></div>
-    ${closingPaymentMethodSummary.other > 0 ? `<div class="line"><span>Metode Lain</span><strong>${escapeHtml(formatRupiah(closingPaymentMethodSummary.other))}</strong></div>` : ''}
+    <div class="line"><span>Cash Sales</span><strong>${escapeHtml(formatRupiah(report?.payments?.cash_total || 0))}</strong></div>
+    <div class="line"><span>Transfer Sales</span><strong>${escapeHtml(formatRupiah(paymentMethodSummary.transfer))}</strong></div>
+    <div class="line"><span>QRIS Sales</span><strong>${escapeHtml(formatRupiah(paymentMethodSummary.qris))}</strong></div>
+    <div class="line"><span>Card Sales</span><strong>${escapeHtml(formatRupiah(paymentMethodSummary.card))}</strong></div>
+    <div class="line"><span>Non Cash Sales</span><strong>${escapeHtml(formatRupiah(report?.payments?.non_cash_total || 0))}</strong></div>
+    ${paymentMethodSummary.other > 0 ? `<div class="line"><span>Metode Lain</span><strong>${escapeHtml(formatRupiah(paymentMethodSummary.other))}</strong></div>` : ''}
     ${paymentLines}
 
     <h2>Kasir vs Rekening</h2>
-    <div class="line"><span>Tunai di Kasir</span><strong>${escapeHtml(formatRupiah(closingCashInHandSummary.physicalCashExpected))}</strong></div>
-    <div class="line"><span>Non Tunai Rekening</span><strong>${escapeHtml(formatRupiah(closingNonCashSummary.total))}</strong></div>
+    <div class="line"><span>Tunai di Kasir</span><strong>${escapeHtml(formatRupiah(cashInHandSummary.physicalCashExpected))}</strong></div>
+    <div class="line"><span>Non Tunai Rekening</span><strong>${escapeHtml(formatRupiah(nonCashSummary.total))}</strong></div>
 
     <h2>Barang Reject / Rusak</h2>
-    <div class="line"><span>Jumlah Item</span><strong>${escapeHtml(String(closingDamageSummary.itemCount || 0))}</strong></div>
-    <div class="line"><span>Total Qty</span><strong>${escapeHtml(String(closingDamageSummary.totalQty || 0))}</strong></div>
-    <div class="line"><span>Estimasi Nilai</span><strong>${escapeHtml(formatRupiah(closingDamageSummary.totalEstimatedValue || 0))}</strong></div>
-    <div class="line"><span>Sudah Diaudit</span><strong>${escapeHtml(String(closingDamageSummary.auditedCount || 0))}</strong></div>
+    <div class="line"><span>Jumlah Item</span><strong>${escapeHtml(String(damageSummary.itemCount || 0))}</strong></div>
+    <div class="line"><span>Total Qty</span><strong>${escapeHtml(String(damageSummary.totalQty || 0))}</strong></div>
+    <div class="line"><span>Estimasi Nilai</span><strong>${escapeHtml(formatRupiah(damageSummary.totalEstimatedValue || 0))}</strong></div>
+    <div class="line"><span>Sudah Diaudit</span><strong>${escapeHtml(String(damageSummary.auditedCount || 0))}</strong></div>
     ${damageLines}
 
     <h2>Referensi Piutang</h2>
@@ -15449,12 +16269,29 @@ const SalesScreen = ({ currentUser, onLogout }) => {
 </html>`;
   };
 
-  const handlePrintClosingReport = () => {
-    if (!closingReport) {
+  const handlePrintClosingReport = async (overrideDate = null) => {
+    const explicitDate = (typeof overrideDate === 'string' || typeof overrideDate === 'number')
+      ? String(overrideDate).trim()
+      : '';
+    const reportDate = explicitDate || String(closingReportDate || formatIsoDate(new Date())).trim();
+    let reportToPrint = closingReport;
+    let damageItemsToPrint = closingDamageItems;
+    const currentReportDate = String(reportToPrint?.date || '').trim();
+    const shouldLoadReport = Boolean(explicitDate)
+      || !reportToPrint
+      || (reportDate && currentReportDate && currentReportDate !== reportDate);
+
+    if (shouldLoadReport) {
+      const workspace = await loadClosingWorkspace(reportDate);
+      reportToPrint = workspace?.report || null;
+      damageItemsToPrint = Array.isArray(workspace?.damageItems) ? workspace.damageItems : [];
+    }
+
+    if (!reportToPrint) {
       openNotice('Laporan Close Order', 'Generate laporan dulu sebelum dicetak.');
       return;
     }
-    const html = buildClosingReportHtml();
+    const html = buildClosingReportHtml(reportToPrint, damageItemsToPrint, reportDate);
     if (!html) {
       openNotice('Laporan Close Order', 'HTML laporan belum berhasil dibuat.');
       return;
@@ -15504,6 +16341,14 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     : (manualApprovalMode === 'approve'
       ? (manualApprovalTypeKey === 'receivable_limit' ? 'Setujui Plafon' : 'Setujui Approval')
       : (manualApprovalMode === 'reject' ? 'Tolak Approval' : 'Tandai Selesai'));
+  const proofingSendTargetUsers = filterProofingTargetUsers(
+    proofingSendModal.users,
+    proofingSendModal.targetRole,
+  );
+  const proofingSendSelectedUser = proofingSendTargetUsers.find(
+    (user) => Number(user?.id || 0) === Number(proofingSendModal.targetUserId || 0),
+  );
+  const proofingSendRow = proofingSendModal.row || {};
 
   if (isPreparingApp) {
     return (
@@ -15543,6 +16388,95 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       </View>
     );
   }
+
+  const renderMainMenuTab = ({ key, label, iconSource, active, onPress }) => (
+    <Pressable
+      key={key}
+      style={[styles.greenTab, active ? styles.greenTabActive : null]}
+      onPress={onPress}
+    >
+      <View style={styles.greenTabContent}>
+        <View style={[styles.greenTabIcon, active ? styles.greenTabIconActive : null]}>
+          <Image source={iconSource} style={styles.greenTabIconImage} resizeMode="contain" />
+        </View>
+        <Text style={[styles.greenTabText, active ? styles.greenTabTextActive : null]}>
+          {label}
+        </Text>
+      </View>
+    </Pressable>
+  );
+  const mainMenuTabs = [
+    {
+      key: 'pos',
+      label: 'Input Order',
+      iconSource: require('../../assets/menu-icons/input-order.svg'),
+      active: activeMenu === 'pos',
+      onPress: () => setActiveMenu('pos'),
+    },
+    {
+      key: 'invoice',
+      label: 'Invoice',
+      iconSource: require('../../assets/menu-icons/invoice.svg'),
+      active: isInvoiceAreaMenu(activeMenu),
+      onPress: () => openInvoiceAreaMenu(resolveInvoiceMenuForFilter(invoiceFilter)),
+    },
+    {
+      key: 'proofing',
+      label: 'Proofing',
+      iconSource: require('../../assets/menu-icons/proofing.svg'),
+      active: activeMenu === 'proofing',
+      onPress: () => setActiveMenu('proofing'),
+    },
+    {
+      key: 'production',
+      label: 'Produksi',
+      iconSource: require('../../assets/menu-icons/production.svg'),
+      active: activeMenu === 'production',
+      onPress: () => setActiveMenu('production'),
+    },
+    {
+      key: 'purchase_material',
+      label: 'Pembelian Bahan',
+      iconSource: require('../../assets/menu-icons/purchase-material.svg'),
+      active: activeMenu === 'purchase_material',
+      onPress: () => setActiveMenu('purchase_material'),
+    },
+    {
+      key: 'expense',
+      label: 'Pengeluaran',
+      iconSource: require('../../assets/menu-icons/expense.svg'),
+      active: activeMenu === 'expense',
+      onPress: () => setActiveMenu('expense'),
+    },
+    {
+      key: 'closing_store',
+      label: 'Closing Toko',
+      iconSource: require('../../assets/menu-icons/closing-store.svg'),
+      active: activeMenu === 'closing_store',
+      onPress: () => setActiveMenu('closing_store'),
+    },
+    {
+      key: 'closing_archive',
+      label: 'Arsip Closing',
+      iconSource: require('../../assets/menu-icons/closing-archive.svg'),
+      active: activeMenu === 'closing_archive',
+      onPress: () => setActiveMenu('closing_archive'),
+    },
+    {
+      key: 'report',
+      label: 'Laporan',
+      iconSource: require('../../assets/menu-icons/report.svg'),
+      active: activeMenu === 'report',
+      onPress: () => setActiveMenu('report'),
+    },
+    {
+      key: 'settings',
+      label: 'Pengaturan',
+      iconSource: require('../../assets/menu-icons/settings.svg'),
+      active: activeMenu === 'settings',
+      onPress: () => setActiveMenu('settings'),
+    },
+  ];
 
   return (
     <View style={styles.screen}>
@@ -15600,66 +16534,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       >
         <View style={styles.frame}>
           <View style={styles.tabsRow}>
-            <Pressable
-              style={[styles.greenTab, activeMenu === 'pos' ? styles.greenTabActive : null]}
-              onPress={() => setActiveMenu('pos')}
-            >
-              <Text style={styles.greenTabText}>Input Order</Text>
-            </Pressable>
-            <Pressable
-              style={[styles.greenTab, isInvoiceAreaMenu(activeMenu) ? styles.greenTabActive : null]}
-              onPress={() => openInvoiceAreaMenu(resolveInvoiceMenuForFilter(invoiceFilter))}
-            >
-              <Text style={styles.greenTabText}>Invoice</Text>
-            </Pressable>
-            <Pressable
-              style={[styles.greenTab, activeMenu === 'proofing' ? styles.greenTabActive : null]}
-              onPress={() => setActiveMenu('proofing')}
-            >
-              <Text style={styles.greenTabText}>Proofing</Text>
-            </Pressable>
-            <Pressable
-              style={[styles.greenTab, activeMenu === 'production' ? styles.greenTabActive : null]}
-              onPress={() => setActiveMenu('production')}
-            >
-              <Text style={styles.greenTabText}>Produksi</Text>
-            </Pressable>
-            <Pressable
-              style={[styles.greenTab, activeMenu === 'purchase_material' ? styles.greenTabActive : null]}
-              onPress={() => setActiveMenu('purchase_material')}
-            >
-              <Text style={styles.greenTabText}>Pembelian Bahan</Text>
-            </Pressable>
-            <Pressable
-              style={[styles.greenTab, activeMenu === 'expense' ? styles.greenTabActive : null]}
-              onPress={() => setActiveMenu('expense')}
-            >
-              <Text style={styles.greenTabText}>Pengeluaran</Text>
-            </Pressable>
-            <Pressable
-              style={[styles.greenTab, activeMenu === 'closing_store' ? styles.greenTabActive : null]}
-              onPress={() => setActiveMenu('closing_store')}
-            >
-              <Text style={styles.greenTabText}>Closing Toko</Text>
-            </Pressable>
-            <Pressable
-              style={[styles.greenTab, activeMenu === 'closing_archive' ? styles.greenTabActive : null]}
-              onPress={() => setActiveMenu('closing_archive')}
-            >
-              <Text style={styles.greenTabText}>Arsip Closing</Text>
-            </Pressable>
-            <Pressable
-              style={[styles.greenTab, activeMenu === 'report' ? styles.greenTabActive : null]}
-              onPress={() => setActiveMenu('report')}
-            >
-              <Text style={styles.greenTabText}>Laporan</Text>
-            </Pressable>
-            <Pressable
-              style={[styles.greenTab, activeMenu === 'settings' ? styles.greenTabActive : null]}
-              onPress={() => setActiveMenu('settings')}
-            >
-              <Text style={styles.greenTabText}>Pengaturan</Text>
-            </Pressable>
+            {mainMenuTabs.map(renderMainMenuTab)}
           </View>
 
           {activeMenu === 'pos' ? (
@@ -15992,6 +16867,8 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                     const dueTotal = Number(row?.invoice?.due_total || 0) || 0;
                     const paidTotal = Number(row?.invoice?.paid_total || 0) || 0;
                     const canPayReceivable = Boolean(row?.invoice?.can_pay);
+                    const canContinueDraftRow = isDraftRow && (row?.__source === 'queue' || isDraftCandidate(row));
+                    const canDeleteDraftRow = canContinueDraftRow;
                     const isPaidInvoice = paymentLifecycle.key === 'paid';
                     const hasApprovedReceivableApproval = Boolean(
                       approvalInfo
@@ -16063,6 +16940,8 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                         canCreateManualApproval={canCreateManualApproval}
                         canApproveManualApprovalRow={canApproveManualApprovalRow}
                         canResolveManualApprovalRow={canResolveManualApprovalRow}
+                        canContinueDraft={canContinueDraftRow}
+                        canDeleteDraft={canDeleteDraftRow}
                         canPayReceivable={canPayReceivable}
                         canOpenProviderPayment={providerPaymentCanResume}
                         onContinueDraft={() => handleContinueDraft(row)}
@@ -16078,6 +16957,22 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                       />
                   );
                 })}
+                {invoiceListMeta.hasMore ? (
+                  <View style={styles.invoiceLoadMoreWrap}>
+                    <Text style={styles.invoiceLoadMoreMeta}>
+                      {invoiceListMeta.searchMode
+                        ? 'Search mengambil data dari server. Masih ada hasil lain.'
+                        : `Menampilkan page ${invoiceListMeta.currentPage} dari ${invoiceListMeta.lastPage}.`}
+                    </Text>
+                    <Pressable
+                      style={[styles.refreshButton, isDraftLoading ? styles.draftActionDisabled : null]}
+                      disabled={isDraftLoading}
+                      onPress={loadMoreDraftInvoices}
+                    >
+                      <Text style={styles.refreshButtonText}>{isDraftLoading ? 'Memuat...' : 'Muat Lagi'}</Text>
+                    </Pressable>
+                  </View>
+                ) : null}
               </InvoiceWorkspaceContent>
             </View>
           ) : activeMenu === 'production' ? (
@@ -16090,6 +16985,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
               onChangeSearchText={setProductionSearch}
               onRefresh={loadProductionItems}
               onUpdateStatus={handleUpdateProductionStatus}
+              onReleaseToProduction={handleReleaseProductionItem}
               updatingItemId={updatingProductionItemId}
             />
           ) : activeMenu === 'proofing' ? (
@@ -16101,9 +16997,11 @@ const SalesScreen = ({ currentUser, onLogout }) => {
               searchText={proofingSearch}
               onChangeSearchText={setProofingSearch}
               onRefresh={loadProofingItems}
+              onSendToDesign={openProofingSendModal}
               onUploadPreview={(row) => handleUploadProofingFile(row, 'preview')}
               onUploadFinal={(row) => handleUploadProofingFile(row, 'final')}
               onOpenPublicLink={handleOpenProofingPublicLink}
+              onOpenPreviewFile={handleOpenProofingUploadedFile}
               onViewHistory={handleViewProofingHistory}
               onSendWhatsapp={handleSendProofingWhatsapp}
               onReleaseToProduction={handleReleaseProofingToProduction}
@@ -16125,6 +17023,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
               currentUser={currentUser}
               isActive={activeMenu === 'closing_store'}
               onNotify={openNotice}
+              onPrintReport={handlePrintClosingReport}
             />
           ) : activeMenu === 'closing_archive' ? (
             <ClosingArchivePanel
@@ -16132,44 +17031,65 @@ const SalesScreen = ({ currentUser, onLogout }) => {
               onNotify={openNotice}
             />
           ) : activeMenu === 'report' ? (
-            <View style={styles.draftPanel}>
-              <View style={styles.draftHeaderRow}>
-                <View style={styles.draftInfo}>
-                  <Text style={styles.debugTitle}>Laporan Close Order</Text>
-                  <Text style={styles.debugText}>
+            <View style={[styles.draftPanel, styles.reportDashboardPanel]}>
+              <View style={styles.reportHero}>
+                <View style={styles.reportHeroIconWrap}>
+                  <Image
+                    source={require('../../assets/menu-icons/report.svg')}
+                    style={styles.reportHeroIcon}
+                    resizeMode="contain"
+                  />
+                </View>
+                <View style={styles.reportHeroCopy}>
+                  <Text style={styles.reportHeroKicker}>SIDOMULYO POS</Text>
+                  <Text style={styles.reportHeroTitle}>DASHBOARD LAPORAN</Text>
+                  <Text style={styles.reportHeroSubtitle}>
                     Laporan harian order, pembayaran, piutang, dan pergerakan kas yang siap dicetak untuk finance.
                   </Text>
                 </View>
-                <View style={styles.headerActions}>
-                  <Pressable
-                    style={styles.refreshButton}
-                    onPress={() => loadClosingWorkspace()}
-                  >
-                    <Text style={styles.refreshButtonText}>{isClosingReportLoading ? 'Memuat...' : 'Refresh'}</Text>
+                <Pressable
+                  style={styles.reportHeroButton}
+                  onPress={() => loadClosingWorkspace()}
+                >
+                  <Text style={styles.reportHeroButtonText}>{isClosingReportLoading ? 'Memuat...' : 'Refresh'}</Text>
+                </Pressable>
+              </View>
+
+              <View style={styles.reportToolbar}>
+                <View style={styles.reportToolbarField}>
+                  <Text style={styles.reportToolbarLabel}>Tanggal Laporan</Text>
+                  <TextInput
+                    value={closingReportDate}
+                    onChangeText={setClosingReportDate}
+                    placeholder="YYYY-MM-DD"
+                    placeholderTextColor="#73839d"
+                    style={[styles.invoiceSearchInput, styles.reportDateInput, styles.reportToolbarInput]}
+                  />
+                </View>
+                <View style={styles.reportToolbarActions}>
+                  <Pressable style={styles.refreshButton} onPress={() => loadClosingWorkspace(closingReportDate)}>
+                    <Text style={styles.refreshButtonText}>Generate</Text>
+                  </Pressable>
+                  <Pressable style={[styles.refreshButton, styles.reportPrintButton]} onPress={() => handlePrintClosingReport()}>
+                    <Text style={styles.refreshButtonText}>Print Laporan</Text>
                   </Pressable>
                 </View>
               </View>
 
-              <View style={styles.filterRow}>
-                <TextInput
-                  value={closingReportDate}
-                  onChangeText={setClosingReportDate}
-                  placeholder="YYYY-MM-DD"
-                  placeholderTextColor="#6c7485"
-                  style={[styles.invoiceSearchInput, styles.reportDateInput]}
-                />
-                <Pressable style={styles.refreshButton} onPress={() => loadClosingWorkspace(closingReportDate)}>
-                  <Text style={styles.refreshButtonText}>Generate</Text>
-                </Pressable>
-                <Pressable style={styles.refreshButton} onPress={handlePrintClosingReport}>
-                  <Text style={styles.refreshButtonText}>Print Laporan</Text>
-                </Pressable>
-              </View>
-
               {isClosingReportLoading ? (
-                <Text style={styles.debugText}>Sedang menyiapkan laporan close order...</Text>
+                <View style={styles.reportStateCard}>
+                  <Text style={styles.reportStateTitle}>Sedang menyiapkan laporan close order...</Text>
+                  <Text style={styles.reportStateText}>Data sedang disusun dari order, pembayaran, piutang, dan kas.</Text>
+                </View>
               ) : closingReport ? (
                 <>
+                  <View style={styles.reportBlockHeader}>
+                    <View>
+                      <Text style={styles.reportBlockTitle}>Ringkasan Omzet</Text>
+                      <Text style={styles.reportBlockSubtitle}>Tanggal laporan: {String(closingReport?.date || closingReportDate || '-')}</Text>
+                    </View>
+                    <Text style={styles.reportBlockBadge}>Closing Finance</Text>
+                  </View>
                   <View style={styles.reportSummaryGrid}>
                     <View style={[styles.reportSummaryCard, styles.reportSummaryCardInfo]}>
                       <Text style={styles.reportSummaryLabel}>Omzet Total Invoice</Text>
@@ -16197,6 +17117,12 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                     </View>
                   </View>
 
+                  <View style={styles.reportBlockHeader}>
+                    <View>
+                      <Text style={styles.reportBlockTitle}>Breakdown Pembayaran</Text>
+                      <Text style={styles.reportBlockSubtitle}>Ringkasan metode bayar untuk omzet hari ini.</Text>
+                    </View>
+                  </View>
                   <View style={styles.reportSummaryGrid}>
                     <View style={[styles.reportSummaryCard, styles.reportSummaryCardCash]}>
                       <Text style={styles.reportSummaryLabel}>Cash Sales</Text>
@@ -16222,6 +17148,12 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                     ) : null}
                   </View>
 
+                  <View style={styles.reportBlockHeader}>
+                    <View>
+                      <Text style={styles.reportBlockTitle}>Posisi Kas & Rekening</Text>
+                      <Text style={styles.reportBlockSubtitle}>Pembeda uang fisik kasir dan dana non tunai yang masuk rekening.</Text>
+                    </View>
+                  </View>
                   <View style={styles.reportSummaryGrid}>
                     <View style={[styles.reportSummaryCard, styles.reportSummaryCardCashStrong]}>
                       <Text style={styles.reportSummaryLabel}>Tunai Harus Ada di Kasir</Text>
@@ -16233,21 +17165,28 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                     </View>
                   </View>
 
+                  <View style={styles.reportBlockHeader}>
+                    <View>
+                      <Text style={styles.reportBlockTitle}>Detail Laporan</Text>
+                      <Text style={styles.reportBlockSubtitle}>Audit ringan untuk finance sebelum dicetak.</Text>
+                    </View>
+                  </View>
+                  <View style={styles.reportSectionGrid}>
                     <View style={styles.reportSectionCard}>
-                      <Text style={styles.debugTitle}>Breakdown Pembayaran Omzet Hari Ini</Text>
+                      <Text style={styles.reportSectionTitle}>Breakdown Pembayaran Omzet Hari Ini</Text>
                     {closingPaymentRows.length > 0 ? closingPaymentRows.map((row, index) => (
                       <View key={`payment-${index}-${row?.method || 'other'}`} style={styles.reportLineRow}>
                         <Text style={styles.reportLineLabel}>{formatClosingBreakdownLabel(row, bankAccounts)} ({row?.total_tx || 0} tx)</Text>
                         <Text style={styles.reportLineValue}>{formatRupiah(row?.total_amount || 0)}</Text>
                       </View>
                     )) : (
-                      <Text style={styles.debugText}>Belum ada pembayaran di tanggal ini.</Text>
+                      <Text style={styles.reportEmptyText}>Belum ada pembayaran di tanggal ini.</Text>
                     )}
                   </View>
 
                   <View style={[styles.reportSectionCard, styles.reportSectionCardCash]}>
-                    <Text style={styles.debugTitle}>Posisi Uang Kasir vs Rekening</Text>
-                    <Text style={styles.debugText}>
+                    <Text style={styles.reportSectionTitle}>Posisi Uang Kasir vs Rekening</Text>
+                    <Text style={styles.reportSectionHint}>
                       Section ini membantu membedakan uang tunai fisik yang seharusnya ada di laci kasir dan uang non tunai yang dibayar ke rekening.
                     </Text>
                     <View style={styles.reportLineRow}>
@@ -16277,8 +17216,8 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                   </View>
 
                     <View style={styles.reportSectionCard}>
-                      <Text style={styles.debugTitle}>Pelunasan Piutang</Text>
-                    <Text style={styles.debugText}>
+                      <Text style={styles.reportSectionTitle}>Pelunasan Piutang</Text>
+                    <Text style={styles.reportSectionHint}>
                       Uang masuk dari invoice lama yang dibayar hari ini. Nilai ini menambah arus kas, tetapi tidak menambah omzet hari ini.
                     </Text>
                     <View style={styles.reportLineRow}>
@@ -16314,12 +17253,12 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                         ))}
                       </View>
                     ) : (
-                      <Text style={styles.debugText}>Belum ada pelunasan piutang di tanggal ini.</Text>
+                      <Text style={styles.reportEmptyText}>Belum ada pelunasan piutang di tanggal ini.</Text>
                     )}
                   </View>
 
                   <View style={styles.reportSectionCard}>
-                    <Text style={styles.debugTitle}>Status Penjualan & Piutang</Text>
+                    <Text style={styles.reportSectionTitle}>Status Penjualan & Piutang</Text>
                     <View style={styles.reportLineRow}>
                       <Text style={styles.reportLineLabel}>Jumlah invoice</Text>
                       <Text style={styles.reportLineValue}>{closingReport?.sales?.invoice_count || 0}</Text>
@@ -16345,7 +17284,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                   </View>
 
                   <View style={styles.reportSectionCard}>
-                    <Text style={styles.debugTitle}>Barang Reject / Rusak</Text>
+                    <Text style={styles.reportSectionTitle}>Barang Reject / Rusak</Text>
                     <View style={styles.reportLineRow}>
                       <Text style={styles.reportLineLabel}>Jumlah item dilaporkan</Text>
                       <Text style={styles.reportLineValue}>{closingDamageSummary.itemCount}</Text>
@@ -16379,25 +17318,29 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                         ))}
                       </View>
                     ) : (
-                      <Text style={styles.debugText}>Tidak ada barang reject / rusak yang ikut pada laporan close order ini.</Text>
+                      <Text style={styles.reportEmptyText}>Tidak ada barang reject / rusak yang ikut pada laporan close order ini.</Text>
                     )}
                   </View>
 
                   <View style={styles.reportSectionCard}>
-                    <Text style={styles.debugTitle}>Produk Terlaris Hari Ini</Text>
+                    <Text style={styles.reportSectionTitle}>Produk Terlaris Hari Ini</Text>
                     {closingTopProducts.length > 0 ? closingTopProducts.map((row, index) => (
                       <View key={`top-product-${row?.product_id || index}`} style={styles.reportLineRow}>
                         <Text style={styles.reportLineLabel}>{index + 1}. {row?.product_name || '-'}</Text>
                         <Text style={styles.reportLineValue}>{row?.total_qty || 0} pcs | {formatRupiah(row?.total_amount || 0)}</Text>
                       </View>
                     )) : (
-                      <Text style={styles.debugText}>Belum ada data produk terlaris.</Text>
+                      <Text style={styles.reportEmptyText}>Belum ada data produk terlaris.</Text>
                     )}
+                  </View>
                   </View>
 
                 </>
               ) : (
-                <Text style={styles.debugText}>Belum ada laporan yang ditampilkan. Pilih tanggal lalu tekan `Generate`.</Text>
+                <View style={styles.reportStateCard}>
+                  <Text style={styles.reportStateTitle}>Belum ada laporan yang ditampilkan.</Text>
+                  <Text style={styles.reportStateText}>Pilih tanggal lalu tekan Generate untuk memuat dashboard laporan.</Text>
+                </View>
               )}
             </View>
           ) : activeMenu === 'settings' ? (
@@ -16496,7 +17439,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
           <View style={[styles.popupCard, styles.processOrderCard]}>
             <Text style={styles.popupTitle}>Detail Pesanan</Text>
             <Text style={styles.processOrderHint}>
-              Periksa item, qty, harga, diskon, dan total akhir dulu. Metode pembayaran dipilih di langkah berikutnya agar kasir tidak salah kirim pembayaran.
+              Periksa item, qty, harga, diskon, dan total akhir dulu. Jika customer belum bayar tetapi butuh proofing, gunakan Lanjut Proofing agar invoice tetap draft.
             </Text>
             <Text style={styles.popupMessage}>Pelanggan: {orderPreviewSnapshot.customerName}</Text>
             <Text style={styles.popupMessage}>Tanggal: {orderPreviewSnapshot.transactionDate}</Text>
@@ -16611,12 +17554,26 @@ const SalesScreen = ({ currentUser, onLogout }) => {
               >
                 <Text style={[styles.popupButtonText, styles.popupButtonTextSecondary]}>Cetak Nota SPK</Text>
               </Pressable>
+              {cartHasProofingEligibleItems ? (
+                <Pressable
+                  style={[
+                    styles.popupButton,
+                    styles.processOrderProofingButton,
+                    styles.processOrderActionButtonCompact,
+                    isSubmitting ? styles.draftActionDisabled : null,
+                  ]}
+                  disabled={isSubmitting}
+                  onPress={handleContinueProofingWithoutPayment}
+                >
+                  <Text style={styles.popupButtonText}>Lanjut Proofing</Text>
+                </Pressable>
+              ) : null}
               <Pressable
                 style={[styles.popupButton, styles.processOrderActionButtonCompact]}
                 disabled={isSubmitting}
                 onPress={handleOpenPaymentMethodModalFromDetail}
               >
-                <Text style={styles.popupButtonText}>Lanjut Pilih Pembayaran</Text>
+                <Text style={styles.popupButtonText}>Proses Orderan</Text>
               </Pressable>
             </View>
           </View>
@@ -17411,13 +18368,17 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       >
         <View style={styles.popupBackdrop}>
           <View style={[styles.popupCard, styles.bankPickerCard]}>
-            <Text style={styles.popupTitle}>Bayar Piutang Pelanggan</Text>
+            <Text style={styles.popupTitle}>
+              {receivablePaymentModal.context === 'draft_invoice' ? 'Lanjut Pembayaran Invoice Draft' : 'Bayar Piutang Pelanggan'}
+            </Text>
             <Text style={styles.popupMessage}>
               Customer: {receivablePaymentModal.customerName}
               {receivablePaymentModal.customerPhone ? ` | ${receivablePaymentModal.customerPhone}` : ''}
             </Text>
             <Text style={styles.popupMessage}>Invoice: {receivablePaymentModal.invoiceNo || '-'}</Text>
-            <Text style={styles.popupMessage}>Sisa piutang: {formatRupiah(receivablePaymentModal.dueTotal || 0)}</Text>
+            <Text style={styles.popupMessage}>
+              {receivablePaymentModal.context === 'draft_invoice' ? 'Sisa tagihan' : 'Sisa piutang'}: {formatRupiah(receivablePaymentModal.dueTotal || 0)}
+            </Text>
 
             <View style={styles.receivablePaymentForm}>
               <Text style={styles.reportInputLabel}>Metode Bayar</Text>
@@ -18035,6 +18996,126 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       </Modal>
 
       <Modal
+        visible={proofingSendModal.visible}
+        transparent
+        animationType="fade"
+        onRequestClose={closeProofingSendModal}
+      >
+        <View style={styles.popupBackdrop}>
+          <View style={[styles.popupCard, styles.proofingSendCard]}>
+            <Text style={styles.popupTitle}>Kirim Task Proofing</Text>
+            <Text style={styles.popupMessage}>
+              {`Pilih tujuan untuk proofing ${String(proofingSendRow?.proofing_code || proofingSendRow?.id || '-')} - ${String(proofingSendRow?.item?.name || 'Item proofing')}.`}
+            </Text>
+
+            <Text style={styles.reportInputLabel}>Tujuan</Text>
+            <View style={styles.methodQuickRowWrap}>
+              {PROOFING_SEND_TARGETS.map((target) => {
+                const active = normalizeProofingTargetRole(proofingSendModal.targetRole) === target.key;
+                return (
+                  <Pressable
+                    key={target.key}
+                    style={[
+                      styles.receivableMethodChip,
+                      active ? styles.receivableMethodChipActive : null,
+                      proofingSendModal.isSubmitting ? styles.receivableMethodChipDisabled : null,
+                    ]}
+                    disabled={proofingSendModal.isSubmitting}
+                    onPress={() => handleChangeProofingSendTargetRole(target.key)}
+                  >
+                    <Text
+                      style={[
+                        styles.receivableMethodChipText,
+                        active ? styles.receivableMethodChipTextActive : null,
+                        proofingSendModal.isSubmitting ? styles.receivableMethodChipTextDisabled : null,
+                      ]}
+                    >
+                      {target.label}
+                    </Text>
+                  </Pressable>
+                );
+              })}
+            </View>
+
+            <View style={styles.proofingSendHeaderRow}>
+              <Text style={styles.reportInputLabel}>
+                {`Pilih User ${proofingTargetRoleLabel(proofingSendModal.targetRole)}`}
+              </Text>
+              {proofingSendSelectedUser ? (
+                <Text style={styles.proofingSendSelectedText}>
+                  {`Dipilih: ${proofingSendSelectedUser.name}`}
+                </Text>
+              ) : null}
+            </View>
+
+            <ScrollView style={styles.proofingSendUserList} nestedScrollEnabled>
+              {proofingSendModal.isLoadingUsers ? (
+                <Text style={styles.proofingSendEmptyText}>Memuat daftar user...</Text>
+              ) : proofingSendTargetUsers.length === 0 ? (
+                <Text style={styles.proofingSendEmptyText}>
+                  {`Belum ada user role ${proofingTargetRoleLabel(proofingSendModal.targetRole)} di directory.`}
+                </Text>
+              ) : (
+                proofingSendTargetUsers.map((user) => {
+                  const userId = Number(user?.id || 0);
+                  const active = userId === Number(proofingSendModal.targetUserId || 0);
+                  return (
+                    <Pressable
+                      key={String(userId)}
+                      style={[
+                        styles.proofingSendUserRow,
+                        active ? styles.proofingSendUserRowActive : null,
+                      ]}
+                      disabled={proofingSendModal.isSubmitting}
+                      onPress={() => setProofingSendModal((prev) => ({ ...prev, targetUserId: userId, error: '' }))}
+                    >
+                      <View>
+                        <Text style={styles.proofingSendUserName}>{String(user?.name || '-')}</Text>
+                        <Text style={styles.proofingSendUserMeta}>
+                          {[user?.role_name, user?.outlet_name, user?.email].filter(Boolean).join(' | ') || '-'}
+                        </Text>
+                      </View>
+                      <Text style={styles.proofingSendCheck}>{active ? 'Dipilih' : 'Pilih'}</Text>
+                    </Pressable>
+                  );
+                })
+              )}
+            </ScrollView>
+
+            {proofingSendModal.error ? (
+              <View style={styles.reportWarningBox}>
+                <Text style={styles.receivableHelperText}>{proofingSendModal.error}</Text>
+              </View>
+            ) : null}
+
+            <View style={styles.popupActions}>
+              <Pressable
+                style={[styles.popupButton, styles.popupButtonSecondary]}
+                disabled={proofingSendModal.isSubmitting}
+                onPress={closeProofingSendModal}
+              >
+                <Text style={[styles.popupButtonText, styles.popupButtonTextSecondary]}>Batal</Text>
+              </Pressable>
+              <Pressable
+                style={[
+                  styles.popupButton,
+                  (proofingSendModal.isSubmitting || proofingSendModal.isLoadingUsers || !(Number(proofingSendModal.targetUserId || 0) > 0))
+                    ? styles.draftActionDisabled
+                    : null,
+                ]}
+                disabled={proofingSendModal.isSubmitting || proofingSendModal.isLoadingUsers || !(Number(proofingSendModal.targetUserId || 0) > 0)}
+                onPress={handleSubmitProofingSendTarget}
+              >
+                <Text style={styles.popupButtonText}>
+                  {proofingSendModal.isSubmitting ? 'Mengirim...' : 'Kirim Task'}
+                </Text>
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      <Modal
         visible={noticeModal.visible}
         transparent
         animationType="fade"
@@ -18102,14 +19183,14 @@ const SalesScreen = ({ currentUser, onLogout }) => {
 const styles = StyleSheet.create({
   screen: {
     flex: 1,
-    backgroundColor: '#d9dadc',
+    backgroundColor: '#edf4ff',
   },
   topBlueLine: {
-    backgroundColor: '#0f45af',
-    paddingHorizontal: 10,
-    paddingVertical: 4,
+    backgroundColor: '#0755b8',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
     borderBottomWidth: 1,
-    borderBottomColor: '#0b3282',
+    borderBottomColor: '#043f92',
     zIndex: 40,
   },
   topBlueLineContent: {
@@ -18146,30 +19227,60 @@ const styles = StyleSheet.create({
     width: '100%',
     flex: 1,
     borderWidth: 1,
-    borderColor: '#a9a9a9',
-    backgroundColor: '#e3e3e3',
-    padding: 10,
+    borderColor: '#c8d8f2',
+    backgroundColor: '#f8fbff',
+    borderRadius: 16,
+    padding: 12,
   },
   tabsRow: {
     flexDirection: 'row',
     alignItems: 'center',
     marginBottom: 8,
-    gap: 4,
+    gap: 6,
     flexWrap: 'wrap',
   },
   greenTab: {
-    backgroundColor: '#2f64ef',
-    paddingHorizontal: 10,
-    paddingVertical: 4,
-    borderRadius: 4,
+    borderWidth: 1,
+    borderColor: '#c8d8f2',
+    backgroundColor: '#ffffff',
+    paddingHorizontal: 9,
+    paddingVertical: 7,
+    borderRadius: 12,
   },
   greenTabActive: {
-    backgroundColor: '#1f4cc5',
+    borderColor: '#0755b8',
+    backgroundColor: '#0755b8',
+  },
+  greenTabContent: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 7,
+  },
+  greenTabIcon: {
+    width: 28,
+    height: 24,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#c8d8f2',
+    backgroundColor: '#eef4ff',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  greenTabIconActive: {
+    borderColor: 'rgba(255,255,255,0.62)',
+    backgroundColor: '#ffffff',
+  },
+  greenTabIconImage: {
+    width: 16,
+    height: 16,
   },
   greenTabText: {
-    color: '#ffffff',
-    fontWeight: '700',
+    color: '#174a8c',
+    fontWeight: '900',
     fontSize: 12,
+  },
+  greenTabTextActive: {
+    color: '#ffffff',
   },
   topRightActions: {
     flexDirection: 'row',
@@ -18298,16 +19409,17 @@ const styles = StyleSheet.create({
   tagihanPanel: {
     flex: 1,
     borderWidth: 1,
-    borderColor: '#b3b3b3',
-    backgroundColor: 'rgba(255,255,255,0.28)',
+    borderColor: '#c8d8f2',
+    backgroundColor: '#ffffff',
+    borderRadius: 14,
     alignItems: 'center',
     justifyContent: 'center',
     minHeight: 154,
   },
   tagihanText: {
-    color: '#ff0000',
+    color: '#d92d20',
     fontSize: 24,
-    fontWeight: '800',
+    fontWeight: '900',
   },
   payloadFlag: {
     marginTop: 6,
@@ -18338,8 +19450,8 @@ const styles = StyleSheet.create({
     marginBottom: 8,
   },
   healthOnline: {
-    borderColor: '#1f4cc5',
-    backgroundColor: '#2f64ef',
+    borderColor: '#043f92',
+    backgroundColor: '#0755b8',
   },
   healthOffline: {
     borderColor: '#8a1717',
@@ -18353,8 +19465,9 @@ const styles = StyleSheet.create({
   debugPanel: {
     marginTop: 8,
     borderWidth: 1,
-    borderColor: '#999999',
-    backgroundColor: 'rgba(255,255,255,0.55)',
+    borderColor: '#c8d8f2',
+    backgroundColor: '#ffffff',
+    borderRadius: 14,
     padding: 8,
   },
   printerToolsCard: {
@@ -18369,6 +19482,7 @@ const styles = StyleSheet.create({
   },
   printerStatusBadge: {
     borderWidth: 1,
+    borderRadius: 999,
     paddingHorizontal: 8,
     paddingVertical: 4,
   },
@@ -18395,6 +19509,7 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: '#c7d3ef',
     backgroundColor: '#f6f8ff',
+    borderRadius: 10,
     paddingHorizontal: 10,
     paddingVertical: 8,
     marginBottom: 8,
@@ -18424,8 +19539,9 @@ const styles = StyleSheet.create({
   },
   printerSecondaryButton: {
     borderWidth: 1,
-    borderColor: '#9aa3b5',
-    backgroundColor: '#eef1f6',
+    borderColor: '#b9c8e1',
+    backgroundColor: '#f5f9ff',
+    borderRadius: 8,
     paddingHorizontal: 10,
     paddingVertical: 7,
   },
@@ -18438,6 +19554,7 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: '#b63a3a',
     backgroundColor: '#d94a4a',
+    borderRadius: 8,
     paddingHorizontal: 10,
     paddingVertical: 7,
   },
@@ -18449,9 +19566,29 @@ const styles = StyleSheet.create({
   draftPanel: {
     marginTop: 8,
     borderWidth: 1,
-    borderColor: '#999999',
-    backgroundColor: 'rgba(255,255,255,0.55)',
+    borderColor: '#c8d8f2',
+    backgroundColor: '#ffffff',
+    borderRadius: 14,
     padding: 10,
+  },
+  invoiceLoadMoreWrap: {
+    marginTop: 12,
+    paddingVertical: 10,
+    paddingHorizontal: 8,
+    borderWidth: 1,
+    borderColor: '#c9d5ea',
+    backgroundColor: '#f5f8ff',
+    borderRadius: 12,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 10,
+  },
+  invoiceLoadMoreMeta: {
+    flex: 1,
+    color: '#465774',
+    fontSize: 11,
+    fontWeight: '700',
   },
   draftHeaderRow: {
     flexDirection: 'row',
@@ -18467,19 +19604,20 @@ const styles = StyleSheet.create({
   },
   filterButton: {
     borderWidth: 1,
-    borderColor: '#9c9c9c',
-    backgroundColor: '#f1f1f1',
-    paddingHorizontal: 8,
-    paddingVertical: 5,
+    borderColor: '#d4dcea',
+    backgroundColor: '#f7f9fd',
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 7,
   },
   filterButtonActive: {
-    borderColor: '#2250c9',
-    backgroundColor: '#2f64ef',
+    borderColor: '#0755b8',
+    backgroundColor: '#0755b8',
   },
   filterButtonText: {
     fontSize: 11,
-    color: '#2c2c2c',
-    fontWeight: '700',
+    color: '#445878',
+    fontWeight: '800',
   },
   filterButtonTextActive: {
     color: '#ffffff',
@@ -18491,10 +19629,11 @@ const styles = StyleSheet.create({
   },
   refreshButton: {
     borderWidth: 1,
-    borderColor: '#2250c9',
-    backgroundColor: '#2f64ef',
-    paddingHorizontal: 10,
-    paddingVertical: 5,
+    borderColor: '#0755b8',
+    backgroundColor: '#0755b8',
+    borderRadius: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 7,
   },
   refreshButtonText: {
     color: '#ffffff',
@@ -18503,12 +19642,13 @@ const styles = StyleSheet.create({
   },
   invoiceSearchInput: {
     borderWidth: 1,
-    borderColor: '#bdbdbd',
-    backgroundColor: '#ffffff',
-    color: '#1f1f1f',
+    borderColor: '#d4dcea',
+    backgroundColor: '#fbfdff',
+    borderRadius: 8,
+    color: '#14233d',
     fontSize: 12,
-    paddingHorizontal: 10,
-    paddingVertical: 7,
+    paddingHorizontal: 12,
+    paddingVertical: 9,
     marginBottom: 8,
   },
   receivableDueText: {
@@ -18520,6 +19660,7 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: '#1d7a45',
     backgroundColor: '#2d9d58',
+    borderRadius: 8,
     paddingHorizontal: 10,
     paddingVertical: 7,
   },
@@ -18541,12 +19682,13 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: '#b7c1d5',
     backgroundColor: '#f4f6fb',
+    borderRadius: 8,
     paddingHorizontal: 8,
     paddingVertical: 5,
   },
   receivableMethodChipActive: {
-    borderColor: '#2f64ef',
-    backgroundColor: '#2f64ef',
+    borderColor: '#0755b8',
+    backgroundColor: '#0755b8',
   },
   receivableMethodChipDisabled: {
     borderColor: '#ccd3e1',
@@ -18596,6 +19738,168 @@ const styles = StyleSheet.create({
     lineHeight: 15,
     color: '#5b6780',
   },
+  reportDashboardPanel: {
+    padding: 12,
+    backgroundColor: '#f8fbff',
+    borderColor: '#c8d8f2',
+    gap: 12,
+  },
+  reportHero: {
+    borderRadius: 14,
+    backgroundColor: '#0755b8',
+    paddingHorizontal: 16,
+    paddingVertical: 14,
+    flexDirection: 'row',
+    alignItems: 'center',
+    flexWrap: 'wrap',
+    gap: 12,
+    shadowColor: '#0f2c5c',
+    shadowOpacity: 0.12,
+    shadowRadius: 12,
+    shadowOffset: { width: 0, height: 4 },
+  },
+  reportHeroIconWrap: {
+    width: 44,
+    height: 44,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.55)',
+    backgroundColor: '#ffffff',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  reportHeroIcon: {
+    width: 24,
+    height: 24,
+  },
+  reportHeroCopy: {
+    flex: 1,
+    minWidth: 250,
+  },
+  reportHeroKicker: {
+    color: '#d9e7ff',
+    fontSize: 10,
+    fontWeight: '900',
+    letterSpacing: 0.8,
+  },
+  reportHeroTitle: {
+    marginTop: 2,
+    color: '#ffffff',
+    fontSize: 22,
+    fontWeight: '900',
+    letterSpacing: 0.4,
+  },
+  reportHeroSubtitle: {
+    marginTop: 4,
+    color: '#e7f0ff',
+    fontSize: 11,
+    lineHeight: 16,
+    fontWeight: '700',
+  },
+  reportHeroButton: {
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.55)',
+    backgroundColor: '#ffffff',
+    borderRadius: 10,
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+  },
+  reportHeroButtonText: {
+    color: '#0755b8',
+    fontWeight: '900',
+    fontSize: 11,
+  },
+  reportToolbar: {
+    borderWidth: 1,
+    borderColor: '#d4dcea',
+    backgroundColor: '#ffffff',
+    borderRadius: 14,
+    padding: 12,
+    flexDirection: 'row',
+    alignItems: 'flex-end',
+    justifyContent: 'space-between',
+    flexWrap: 'wrap',
+    gap: 10,
+  },
+  reportToolbarField: {
+    flex: 1,
+    minWidth: 220,
+  },
+  reportToolbarLabel: {
+    marginBottom: 6,
+    color: '#174a8c',
+    fontSize: 11,
+    fontWeight: '900',
+    textTransform: 'uppercase',
+    letterSpacing: 0.4,
+  },
+  reportToolbarInput: {
+    marginBottom: 0,
+    backgroundColor: '#fbfdff',
+  },
+  reportToolbarActions: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+  reportPrintButton: {
+    backgroundColor: '#159b56',
+    borderColor: '#159b56',
+  },
+  reportStateCard: {
+    borderWidth: 1,
+    borderColor: '#d4dcea',
+    backgroundColor: '#ffffff',
+    borderRadius: 14,
+    paddingHorizontal: 16,
+    paddingVertical: 18,
+    alignItems: 'center',
+  },
+  reportStateTitle: {
+    color: '#173c87',
+    fontSize: 14,
+    fontWeight: '900',
+    textAlign: 'center',
+  },
+  reportStateText: {
+    marginTop: 5,
+    color: '#5b6780',
+    fontSize: 11,
+    lineHeight: 16,
+    fontWeight: '700',
+    textAlign: 'center',
+  },
+  reportBlockHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+  reportBlockTitle: {
+    color: '#182b4d',
+    fontSize: 14,
+    fontWeight: '900',
+  },
+  reportBlockSubtitle: {
+    marginTop: 2,
+    color: '#667897',
+    fontSize: 10,
+    lineHeight: 15,
+    fontWeight: '700',
+  },
+  reportBlockBadge: {
+    borderWidth: 1,
+    borderColor: '#bfd5ff',
+    backgroundColor: '#eff6ff',
+    borderRadius: 999,
+    color: '#0755b8',
+    fontSize: 10,
+    fontWeight: '900',
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    overflow: 'hidden',
+  },
   reportDateInput: {
     minWidth: 160,
     marginBottom: 0,
@@ -18604,17 +19908,22 @@ const styles = StyleSheet.create({
   reportSummaryGrid: {
     flexDirection: 'row',
     flexWrap: 'wrap',
-    gap: 8,
-    marginBottom: 10,
+    gap: 10,
   },
   reportSummaryCard: {
     flexGrow: 1,
-    minWidth: 180,
+    flexBasis: 180,
+    minWidth: 170,
     borderWidth: 1,
-    borderColor: '#c8d0e6',
+    borderColor: '#d4dcea',
     backgroundColor: '#ffffff',
-    paddingHorizontal: 10,
-    paddingVertical: 9,
+    borderRadius: 13,
+    paddingHorizontal: 12,
+    paddingVertical: 11,
+    shadowColor: '#0f2c5c',
+    shadowOpacity: 0.06,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 2 },
   },
   reportSummaryCardInfo: {
     borderColor: '#c8d8f2',
@@ -18646,15 +19955,16 @@ const styles = StyleSheet.create({
   },
   reportSummaryLabel: {
     fontSize: 10,
-    color: '#5d6780',
+    lineHeight: 14,
+    color: '#50617f',
     textTransform: 'uppercase',
-    fontWeight: '700',
+    fontWeight: '900',
   },
   reportSummaryValue: {
-    marginTop: 4,
-    fontSize: 15,
-    fontWeight: '800',
-    color: '#183c88',
+    marginTop: 6,
+    fontSize: 16,
+    fontWeight: '900',
+    color: '#0755b8',
   },
   reportPositiveValue: {
     color: '#1f7a42',
@@ -18671,6 +19981,7 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: '#c1cadf',
     backgroundColor: '#ffffff',
+    borderRadius: 8,
     color: '#1d2433',
     paddingHorizontal: 10,
     paddingVertical: 8,
@@ -18684,6 +19995,7 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: '#e0b35d',
     backgroundColor: '#fff7e7',
+    borderRadius: 10,
     paddingHorizontal: 10,
     paddingVertical: 8,
     marginTop: 8,
@@ -18708,6 +20020,7 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: '#b9c4de',
     backgroundColor: '#f3f6fc',
+    borderRadius: 8,
     paddingHorizontal: 10,
     paddingVertical: 6,
   },
@@ -18717,8 +20030,8 @@ const styles = StyleSheet.create({
     gap: 6,
   },
   reportChipActive: {
-    borderColor: '#2250c9',
-    backgroundColor: '#2f64ef',
+    borderColor: '#0755b8',
+    backgroundColor: '#0755b8',
   },
   reportChipText: {
     fontSize: 11,
@@ -18748,23 +20061,55 @@ const styles = StyleSheet.create({
   reportChipBadgeTextActive: {
     color: '#ffffff',
   },
+  reportSectionGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 10,
+  },
   reportSectionCard: {
+    flexGrow: 1,
+    flexShrink: 1,
+    flexBasis: 360,
+    minWidth: 300,
     borderWidth: 1,
-    borderColor: '#c8d0e6',
+    borderColor: '#d4dcea',
     backgroundColor: '#ffffff',
-    padding: 10,
-    marginBottom: 10,
+    borderRadius: 14,
+    padding: 12,
+    shadowColor: '#0f2c5c',
+    shadowOpacity: 0.06,
+    shadowRadius: 9,
+    shadowOffset: { width: 0, height: 2 },
   },
   reportSectionCardCash: {
     borderColor: '#b8dfc7',
     backgroundColor: '#f7fcf8',
+  },
+  reportSectionTitle: {
+    marginBottom: 8,
+    color: '#182b4d',
+    fontSize: 13,
+    fontWeight: '900',
+  },
+  reportSectionHint: {
+    marginBottom: 8,
+    color: '#667897',
+    fontSize: 10,
+    lineHeight: 15,
+    fontWeight: '700',
+  },
+  reportEmptyText: {
+    color: '#667897',
+    fontSize: 11,
+    lineHeight: 16,
+    fontWeight: '700',
   },
   reportLineRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'flex-start',
     gap: 10,
-    paddingVertical: 4,
+    paddingVertical: 7,
     borderBottomWidth: 1,
     borderBottomColor: '#edf1f8',
   },
@@ -18777,11 +20122,14 @@ const styles = StyleSheet.create({
   reportLineLabel: {
     flex: 1,
     fontSize: 11,
+    lineHeight: 16,
     color: '#25324d',
+    fontWeight: '700',
   },
   reportLineValue: {
     fontSize: 11,
-    fontWeight: '700',
+    lineHeight: 16,
+    fontWeight: '900',
     color: '#173c87',
     textAlign: 'right',
   },
@@ -18805,18 +20153,21 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: '#e1e5ef',
     backgroundColor: '#f8faff',
-    paddingHorizontal: 9,
-    paddingVertical: 7,
+    borderRadius: 12,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
   },
   reportNestedTitle: {
     fontSize: 11,
-    fontWeight: '700',
+    fontWeight: '900',
     color: '#20365f',
   },
   reportNestedMeta: {
     marginTop: 2,
     fontSize: 10,
+    lineHeight: 15,
     color: '#5b6780',
+    fontWeight: '700',
   },
   reportSummaryText: {
     fontSize: 11,
@@ -18825,8 +20176,9 @@ const styles = StyleSheet.create({
   },
   draftCard: {
     borderWidth: 1,
-    borderColor: '#c2c2c2',
+    borderColor: '#dce5f4',
     backgroundColor: '#ffffff',
+    borderRadius: 12,
     padding: 8,
     flexDirection: 'row',
     alignItems: 'center',
@@ -18839,12 +20191,12 @@ const styles = StyleSheet.create({
   draftTitle: {
     fontSize: 12,
     fontWeight: '800',
-    color: '#1f1f1f',
+    color: '#173c87',
     marginBottom: 2,
   },
   draftMeta: {
     fontSize: 11,
-    color: '#3a3a3a',
+    color: '#435674',
   },
   draftSnapshotBadge: {
     alignSelf: 'flex-start',
@@ -18893,6 +20245,7 @@ const styles = StyleSheet.create({
   },
   invoicePaymentBadge: {
     borderWidth: 1,
+    borderRadius: 999,
     paddingHorizontal: 8,
     paddingVertical: 4,
   },
@@ -18926,6 +20279,7 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: '#d4d9e6',
     backgroundColor: '#f7f9fc',
+    borderRadius: 999,
     paddingHorizontal: 8,
     paddingVertical: 4,
     maxWidth: '100%',
@@ -18941,8 +20295,9 @@ const styles = StyleSheet.create({
   },
   continueDraftButton: {
     borderWidth: 1,
-    borderColor: '#2250c9',
-    backgroundColor: '#2f64ef',
+    borderColor: '#0755b8',
+    backgroundColor: '#0755b8',
+    borderRadius: 8,
     paddingHorizontal: 10,
     paddingVertical: 6,
     alignItems: 'center',
@@ -18956,6 +20311,7 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: '#a16207',
     backgroundColor: '#f5b928',
+    borderRadius: 8,
     paddingHorizontal: 10,
     paddingVertical: 6,
     alignItems: 'center',
@@ -18969,6 +20325,7 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: '#1d7a45',
     backgroundColor: '#2d9d58',
+    borderRadius: 8,
     paddingHorizontal: 10,
     paddingVertical: 6,
     alignItems: 'center',
@@ -18982,6 +20339,7 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: '#982222',
     backgroundColor: '#c53333',
+    borderRadius: 8,
     paddingHorizontal: 10,
     paddingVertical: 6,
     alignItems: 'center',
@@ -19052,9 +20410,10 @@ const styles = StyleSheet.create({
     width: '100%',
     maxWidth: 460,
     borderWidth: 1,
-    borderColor: '#a9a9a9',
-    backgroundColor: '#e3e3e3',
-    padding: 12,
+    borderColor: '#c8d8f2',
+    backgroundColor: '#ffffff',
+    borderRadius: 16,
+    padding: 14,
     alignItems: 'center',
   },
   popupCardSuccess: {
@@ -19097,11 +20456,72 @@ const styles = StyleSheet.create({
     maxWidth: 760,
     maxHeight: '86%',
   },
+  proofingSendCard: {
+    maxWidth: 640,
+    maxHeight: '86%',
+    alignItems: 'stretch',
+    gap: 8,
+  },
+  proofingSendHeaderRow: {
+    marginTop: 6,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 8,
+  },
+  proofingSendSelectedText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#1f7a42',
+  },
+  proofingSendUserList: {
+    maxHeight: 260,
+    width: '100%',
+    borderWidth: 1,
+    borderColor: '#c1cadf',
+    backgroundColor: '#ffffff',
+    borderRadius: 10,
+  },
+  proofingSendUserRow: {
+    paddingHorizontal: 10,
+    paddingVertical: 9,
+    borderBottomWidth: 1,
+    borderBottomColor: '#e4e9f4',
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    gap: 8,
+  },
+  proofingSendUserRowActive: {
+    backgroundColor: '#edf4ff',
+  },
+  proofingSendUserName: {
+    fontSize: 12,
+    fontWeight: '800',
+    color: '#1d2433',
+  },
+  proofingSendUserMeta: {
+    marginTop: 2,
+    fontSize: 10,
+    color: '#5b6881',
+  },
+  proofingSendCheck: {
+    fontSize: 11,
+    fontWeight: '800',
+    color: '#0755b8',
+  },
+  proofingSendEmptyText: {
+    paddingHorizontal: 10,
+    paddingVertical: 14,
+    fontSize: 12,
+    color: '#5b6881',
+  },
   invoiceDetailList: {
     maxHeight: 500,
     borderWidth: 1,
-    borderColor: '#c9c9c9',
+    borderColor: '#dce5f4',
     backgroundColor: '#ffffff',
+    borderRadius: 12,
     paddingHorizontal: 10,
   },
   invoiceDetailListContent: {
@@ -19110,8 +20530,9 @@ const styles = StyleSheet.create({
   },
   invoiceItemCard: {
     borderWidth: 1,
-    borderColor: '#d5d5d5',
+    borderColor: '#dce5f4',
     backgroundColor: '#f8f9fb',
+    borderRadius: 10,
     padding: 8,
     marginTop: 8,
   },
@@ -19156,6 +20577,7 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: '#d7e2f3',
     backgroundColor: '#ffffff',
+    borderRadius: 10,
   },
   invoiceBundleTitle: {
     fontSize: 11,
@@ -19211,6 +20633,7 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: '#d6dfef',
     backgroundColor: '#f7faff',
+    borderRadius: 10,
     paddingHorizontal: 10,
     paddingVertical: 8,
     gap: 3,
@@ -19232,14 +20655,15 @@ const styles = StyleSheet.create({
   },
   manualApprovalTypeButton: {
     borderWidth: 1,
-    borderColor: '#b9c1cf',
-    backgroundColor: '#f7f7f7',
+    borderColor: '#d4dcea',
+    backgroundColor: '#f7f9fd',
+    borderRadius: 8,
     paddingHorizontal: 10,
     paddingVertical: 7,
   },
   manualApprovalTypeButtonActive: {
-    borderColor: '#2250c9',
-    backgroundColor: '#2f64ef',
+    borderColor: '#0755b8',
+    backgroundColor: '#0755b8',
   },
   manualApprovalTypeButtonText: {
     fontSize: 11,
@@ -19262,17 +20686,18 @@ const styles = StyleSheet.create({
   },
   pickupLabel: {
     fontSize: 11,
-    color: '#2f2f2f',
-    fontWeight: '700',
+    color: '#435674',
+    fontWeight: '800',
   },
   pickupInput: {
     borderWidth: 1,
-    borderColor: '#b7b7b7',
-    backgroundColor: '#f7f5eb',
-    color: '#1f1f1f',
+    borderColor: '#d4dcea',
+    backgroundColor: '#fbfdff',
+    borderRadius: 8,
+    color: '#14233d',
     fontSize: 12,
-    paddingHorizontal: 8,
-    paddingVertical: 6,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
   },
   pickupInputNote: {
     minHeight: 62,
@@ -19280,8 +20705,9 @@ const styles = StyleSheet.create({
   },
   bankPickerLoadingWrap: {
     borderWidth: 1,
-    borderColor: '#bcbcbc',
+    borderColor: '#dce5f4',
     backgroundColor: '#ffffff',
+    borderRadius: 12,
     paddingVertical: 16,
     paddingHorizontal: 12,
     alignItems: 'center',
@@ -19294,6 +20720,7 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: '#b8c7ef',
     backgroundColor: '#eef3ff',
+    borderRadius: 12,
     paddingHorizontal: 10,
     paddingVertical: 8,
   },
@@ -19324,8 +20751,9 @@ const styles = StyleSheet.create({
     maxHeight: 280,
     marginBottom: 10,
     borderWidth: 1,
-    borderColor: '#bcbcbc',
+    borderColor: '#dce5f4',
     backgroundColor: '#ffffff',
+    borderRadius: 12,
   },
   bankPickerItem: {
     borderBottomWidth: 1,
@@ -19371,8 +20799,9 @@ const styles = StyleSheet.create({
     marginTop: 8,
     marginBottom: 10,
     borderWidth: 1,
-    borderColor: '#bcbcbc',
+    borderColor: '#dce5f4',
     backgroundColor: '#ffffff',
+    borderRadius: 12,
     padding: 8,
   },
   processOrderItemListContent: {
@@ -19393,8 +20822,9 @@ const styles = StyleSheet.create({
   receiptPreviewCard: {
     maxWidth: 360,
     borderWidth: 1,
-    borderColor: '#d5d5d5',
+    borderColor: '#dce5f4',
     backgroundColor: '#ffffff',
+    borderRadius: 12,
     paddingHorizontal: 10,
     paddingVertical: 12,
     alignItems: 'center',
@@ -19414,8 +20844,9 @@ const styles = StyleSheet.create({
   },
   previewItemCard: {
     borderWidth: 1,
-    borderColor: '#d2d2d2',
-    backgroundColor: '#f9f9f9',
+    borderColor: '#dce5f4',
+    backgroundColor: '#f8fbff',
+    borderRadius: 10,
     padding: 8,
     marginBottom: 7,
   },
@@ -19445,6 +20876,7 @@ const styles = StyleSheet.create({
   },
   previewFlowBadge: {
     borderWidth: 1,
+    borderRadius: 999,
     paddingHorizontal: 8,
     paddingVertical: 4,
   },
@@ -19478,6 +20910,7 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: '#d4d9e6',
     backgroundColor: '#f7f9fc',
+    borderRadius: 999,
     paddingHorizontal: 8,
     paddingVertical: 4,
     maxWidth: '100%',
@@ -19494,6 +20927,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
     paddingVertical: 10,
     borderWidth: 1,
+    borderRadius: 12,
     gap: 6,
   },
   processOrderSelectionCardReady: {
@@ -19545,6 +20979,7 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: '#d7e1f5',
     backgroundColor: '#f3f7ff',
+    borderRadius: 10,
     fontSize: 11,
     lineHeight: 17,
     color: '#35507a',
@@ -19603,6 +21038,10 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     paddingHorizontal: 10,
+  },
+  processOrderProofingButton: {
+    borderColor: '#19a35b',
+    backgroundColor: '#19a35b',
   },
   processOrderSummaryCard: {
     width: '100%',
@@ -19664,14 +21103,15 @@ const styles = StyleSheet.create({
   },
   popupButton: {
     borderWidth: 1,
-    borderColor: '#2250c9',
-    backgroundColor: '#2f64ef',
+    borderColor: '#0755b8',
+    backgroundColor: '#0755b8',
+    borderRadius: 8,
     paddingHorizontal: 12,
     paddingVertical: 7,
   },
   popupButtonSecondary: {
-    borderColor: '#8b8b8b',
-    backgroundColor: '#f2f2f2',
+    borderColor: '#b9c8e1',
+    backgroundColor: '#f5f9ff',
   },
   popupButtonDanger: {
     borderColor: '#982222',

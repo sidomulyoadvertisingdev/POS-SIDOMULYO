@@ -214,22 +214,20 @@ const resolveProofingReleaseState = (row = {}) => {
   const proofingApproved = resolveProofingStatusKey(row?.status) === 'approved';
   const releasedProductionStatus = resolveReleasedProductionStatus(row);
   const releasedToProduction = isReleasedToProduction(row);
-  const canRelease = !releasedToProduction && (
-    row?.can_release_to_production === true || (proofingApproved && paymentState.paymentReady)
-  );
+  const precheckReady = row?.can_release_to_production === true || (proofingApproved && paymentState.paymentReady);
+  const canRelease = !releasedToProduction;
   let blockingHint = '';
   let releasedLabel = '';
 
   if (releasedToProduction) {
     releasedLabel = `Sudah masuk produksi${releasedProductionStatus ? `: ${formatProductionStatusLabel(releasedProductionStatus)}` : ''}`;
-  } else if (!canRelease) {
-    blockingHint = !proofingApproved
-      ? 'Tombol produksi aktif setelah proofing approved dan syarat pembayaran terpenuhi.'
-      : 'Proofing sudah approved, tetapi pembayaran invoice belum terbaca lunas.';
+  } else if (!precheckReady) {
+    blockingHint = 'Gerbang backend akan memeriksa proofing, file final, invoice, pembayaran, spesifikasi, dan approval saat tombol ditekan.';
   }
 
   return {
     canRelease,
+    precheckReady,
     proofingApproved,
     paymentReady: paymentState.paymentReady,
     paymentStatusLabel: formatProofingPaymentStatusLabel(paymentState),
@@ -240,7 +238,28 @@ const resolveProofingReleaseState = (row = {}) => {
   };
 };
 
+const formatProductionGateError = (errorOrPayload = {}) => {
+  const payload = errorOrPayload?.body && typeof errorOrPayload.body === 'object'
+    ? errorOrPayload.body
+    : errorOrPayload;
+  const blockers = Array.isArray(payload?.blockers)
+    ? payload.blockers
+    : (Array.isArray(payload?.production_gate?.blockers) ? payload.production_gate.blockers : []);
+
+  if (blockers.length > 0) {
+    return blockers
+      .map((blocker) => `${String(blocker?.code || 'BLK').trim()}: ${String(blocker?.message || '').trim()}`.trim())
+      .join('\n');
+  }
+
+  const validationMessages = Array.isArray(payload?.errors?.production_gate)
+    ? payload.errors.production_gate
+    : [];
+  return validationMessages.map((message) => String(message || '').trim()).filter(Boolean).join('\n');
+};
+
 module.exports = {
+  formatProductionGateError,
   formatProductionStatusLabel,
   resolveProductionStatusKey,
   resolveProofingPaymentState,

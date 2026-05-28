@@ -63,6 +63,8 @@ const InvoiceWorkspaceRowCard = ({
   canCreateManualApproval,
   canApproveManualApprovalRow,
   canResolveManualApprovalRow,
+  canContinueDraft,
+  canDeleteDraft,
   canPayReceivable,
   canOpenProviderPayment,
   onContinueDraft,
@@ -224,33 +226,55 @@ const InvoiceWorkspaceRowCard = ({
     <View style={styles.draftActionColumn}>
       {isDraftRow ? (
         <>
-          <Pressable
-            style={[
-              styles.continueDraftButton,
-              isDeleting ? styles.draftActionDisabled : null,
-            ]}
-            disabled={isDeleting}
-            onPress={onContinueDraft}
-          >
-            <Text style={styles.continueDraftButtonText}>Lanjutkan</Text>
-          </Pressable>
-          <Pressable
-            style={[
-              styles.deleteDraftButton,
-              isDeleting ? styles.draftActionDisabled : null,
-            ]}
-            disabled={isDeleting}
-            onPress={onDeleteDraft}
-          >
-            {isDeleting ? (
-              <View style={styles.inlineLoadingButtonContent}>
-                <SyncLoadingAnimation size={20} />
-                <Text style={styles.deleteDraftButtonText}>Memproses...</Text>
-              </View>
-            ) : (
-              <Text style={styles.deleteDraftButtonText}>Hapus</Text>
-            )}
-          </Pressable>
+          {canContinueDraft ? (
+            <Pressable
+              style={[
+                styles.continueDraftButton,
+                isDeleting ? styles.draftActionDisabled : null,
+              ]}
+              disabled={isDeleting}
+              onPress={onContinueDraft}
+            >
+              <Text style={styles.continueDraftButtonText}>Lanjutkan</Text>
+            </Pressable>
+          ) : (
+            <Pressable style={styles.continueDraftButton} onPress={onViewDetail}>
+              <Text style={styles.continueDraftButtonText}>Detail</Text>
+            </Pressable>
+          )}
+          {!canContinueDraft && dueTotal > 0 ? (
+            <Pressable
+              style={[
+                styles.receivablePayButton,
+                !canPayReceivable ? styles.draftActionDisabled : null,
+              ]}
+              disabled={!canPayReceivable}
+              onPress={onOpenReceivablePayment}
+            >
+              <Text style={styles.receivablePayButtonText}>
+                {canPayReceivable ? 'Lanjut Pembayaran' : 'Belum Bisa Dibayar'}
+              </Text>
+            </Pressable>
+          ) : null}
+          {canDeleteDraft ? (
+            <Pressable
+              style={[
+                styles.deleteDraftButton,
+                isDeleting ? styles.draftActionDisabled : null,
+              ]}
+              disabled={isDeleting}
+              onPress={onDeleteDraft}
+            >
+              {isDeleting ? (
+                <View style={styles.inlineLoadingButtonContent}>
+                  <SyncLoadingAnimation size={20} />
+                  <Text style={styles.deleteDraftButtonText}>Memproses...</Text>
+                </View>
+              ) : (
+                <Text style={styles.deleteDraftButtonText}>Hapus</Text>
+              )}
+            </Pressable>
+          ) : null}
         </>
       ) : (
         <>

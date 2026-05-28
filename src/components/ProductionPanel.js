@@ -63,6 +63,7 @@ const ProductionPanel = ({
   onChangeSearchText,
   onRefresh,
   onUpdateStatus,
+  onReleaseToProduction,
   updatingItemId,
 }) => {
   const items = Array.isArray(rows) ? rows : [];
@@ -143,6 +144,7 @@ const ProductionPanel = ({
             const isUpdating = Number(updatingItemId || 0) === rowId;
             const canMoveToBatch = status === 'waiting_production';
             const canMoveToPrinted = status === 'in_batch';
+            const usesProofing = row?.proofing_required === true || Boolean(row?.proofing);
 
             return (
               <View key={String(rowId || `prod-${index}`)} style={styles.card}>
@@ -174,8 +176,20 @@ const ProductionPanel = ({
                       <Text style={styles.actionButtonText}>{isUpdating ? 'Memproses...' : 'Tandai Printed'}</Text>
                     </Pressable>
                   ) : null}
-                  {status === 'waiting_design' ? (
-                    <Text style={styles.hintText}>Butuh upload design dulu.</Text>
+                  {status === 'waiting_design' && !usesProofing ? (
+                    <>
+                      <Pressable
+                        style={[styles.actionButton, isUpdating ? styles.actionDisabled : null]}
+                        disabled={isUpdating}
+                        onPress={() => onReleaseToProduction?.(row)}
+                      >
+                        <Text style={styles.actionButtonText}>{isUpdating ? 'Memproses...' : 'Masuk Produksi'}</Text>
+                      </Pressable>
+                      <Text style={styles.hintText}>Backend akan memeriksa seluruh syarat gate.</Text>
+                    </>
+                  ) : null}
+                  {status === 'waiting_design' && usesProofing ? (
+                    <Text style={styles.hintText}>Release item ini melalui menu Proofing.</Text>
                   ) : null}
                 </View>
               </View>
@@ -191,9 +205,10 @@ const styles = StyleSheet.create({
   panel: {
     marginTop: 8,
     borderWidth: 1,
-    borderColor: '#999999',
-    backgroundColor: 'rgba(255,255,255,0.55)',
-    padding: 10,
+    borderColor: '#c8d8f2',
+    backgroundColor: '#ffffff',
+    borderRadius: 14,
+    padding: 12,
   },
   headerRow: {
     flexDirection: 'row',
@@ -203,15 +218,16 @@ const styles = StyleSheet.create({
   },
   title: {
     fontSize: 12,
-    fontWeight: '700',
-    color: '#1f1f1f',
+    fontWeight: '900',
+    color: '#173c87',
   },
   refreshButton: {
     borderWidth: 1,
-    borderColor: '#2250c9',
-    backgroundColor: '#2f64ef',
-    paddingHorizontal: 10,
-    paddingVertical: 5,
+    borderColor: '#0755b8',
+    backgroundColor: '#0755b8',
+    borderRadius: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 7,
   },
   refreshButtonText: {
     color: '#ffffff',
@@ -226,17 +242,18 @@ const styles = StyleSheet.create({
   },
   counterText: {
     fontSize: 11,
-    color: '#2f2f2f',
-    fontWeight: '600',
+    color: '#435674',
+    fontWeight: '800',
   },
   searchInput: {
     borderWidth: 1,
-    borderColor: '#bdbdbd',
-    backgroundColor: '#ffffff',
-    color: '#1f1f1f',
+    borderColor: '#d4dcea',
+    backgroundColor: '#fbfdff',
+    borderRadius: 8,
+    color: '#14233d',
     fontSize: 12,
-    paddingHorizontal: 10,
-    paddingVertical: 7,
+    paddingHorizontal: 12,
+    paddingVertical: 9,
     marginBottom: 8,
   },
   filterRow: {
@@ -247,19 +264,20 @@ const styles = StyleSheet.create({
   },
   filterButton: {
     borderWidth: 1,
-    borderColor: '#9c9c9c',
-    backgroundColor: '#f1f1f1',
-    paddingHorizontal: 8,
-    paddingVertical: 5,
+    borderColor: '#d4dcea',
+    backgroundColor: '#f7f9fd',
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 7,
   },
   filterButtonActive: {
-    borderColor: '#2250c9',
-    backgroundColor: '#2f64ef',
+    borderColor: '#0755b8',
+    backgroundColor: '#0755b8',
   },
   filterButtonText: {
     fontSize: 11,
-    color: '#2c2c2c',
-    fontWeight: '700',
+    color: '#445878',
+    fontWeight: '800',
   },
   filterButtonTextActive: {
     color: '#ffffff',
@@ -273,9 +291,10 @@ const styles = StyleSheet.create({
   },
   card: {
     borderWidth: 1,
-    borderColor: '#c2c2c2',
+    borderColor: '#dce5f4',
     backgroundColor: '#ffffff',
-    padding: 8,
+    borderRadius: 12,
+    padding: 10,
     flexDirection: 'row',
     justifyContent: 'space-between',
     gap: 8,
@@ -287,16 +306,17 @@ const styles = StyleSheet.create({
   cardTitle: {
     fontSize: 12,
     fontWeight: '800',
-    color: '#1f1f1f',
+    color: '#173c87',
   },
   cardMeta: {
     fontSize: 11,
-    color: '#343434',
+    color: '#435674',
   },
   badge: {
     alignSelf: 'flex-start',
     paddingHorizontal: 8,
     paddingVertical: 3,
+    borderRadius: 999,
     marginTop: 2,
   },
   badgeWaitingDesign: {
@@ -327,8 +347,9 @@ const styles = StyleSheet.create({
   },
   actionButton: {
     borderWidth: 1,
-    borderColor: '#2250c9',
-    backgroundColor: '#2f64ef',
+    borderColor: '#0755b8',
+    backgroundColor: '#0755b8',
+    borderRadius: 8,
     paddingHorizontal: 8,
     paddingVertical: 6,
     alignItems: 'center',

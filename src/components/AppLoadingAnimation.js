@@ -6,7 +6,7 @@ export const APP_LOADING_ANIMATION_URL = 'https://lottie.host/33168019-ea65-4267
 
 export default function AppLoadingAnimation({
   size = 112,
-  fallbackColor = '#2f64ef',
+  fallbackColor = '#0755b8',
   style = null,
 }) {
   const indicatorSize = size <= 28 ? 'small' : 'large';

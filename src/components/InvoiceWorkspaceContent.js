@@ -108,6 +108,7 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: '#c7d7ef',
     backgroundColor: '#f7fbff',
+    borderRadius: 12,
     padding: 10,
     marginBottom: 10,
   },
@@ -144,7 +145,7 @@ const styles = StyleSheet.create({
   emptyText: {
     fontSize: 11,
     lineHeight: 16,
-    color: '#3a3a3a',
+    color: '#667897',
   },
   list: {
     gap: 8,

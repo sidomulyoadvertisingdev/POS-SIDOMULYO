@@ -72,14 +72,13 @@ const chooseBrowserFile = () => new Promise((resolve, reject) => {
   input.click();
 });
 
-const ClosingStorePanel = ({ currentUser, isActive, onNotify }) => {
+const ClosingStorePanel = ({ currentUser, isActive, onNotify, onPrintReport }) => {
   const [date, setDate] = useState(todayIso());
   const [payload, setPayload] = useState(null);
   const [users, setUsers] = useState([]);
   const [loading, setLoading] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [uploadingKey, setUploadingKey] = useState('');
-  const [openingCash, setOpeningCash] = useState('');
   const [physicalCash, setPhysicalCash] = useState('');
   const [cashReason, setCashReason] = useState('');
   const [responsibleUserId, setResponsibleUserId] = useState(null);
@@ -103,7 +102,7 @@ const ClosingStorePanel = ({ currentUser, isActive, onNotify }) => {
   const closingId = Number(closing?.id || 0);
   const existingCash = summary?.cash_validation?.data || null;
   const expectedMovement = Number(summary?.cash_validation?.expected_cash_movement || 0);
-  const expectedCashPreview = parseAmount(openingCash) + expectedMovement;
+  const expectedCashPreview = expectedMovement;
   const physicalCashValue = parseAmount(physicalCash);
   const cashDifferencePreview = physicalCashValue - expectedCashPreview;
   const openOrders = Array.isArray(summary?.open_orders) ? summary.open_orders : [];
@@ -138,12 +137,10 @@ const ClosingStorePanel = ({ currentUser, isActive, onNotify }) => {
     const cash = nextPayload?.summary?.cash_validation?.data || null;
     setCashEvidence(null);
     if (cash) {
-      setOpeningCash(sanitizeAmount(cash.opening_cash));
       setPhysicalCash(sanitizeAmount(cash.physical_cash));
       setCashReason(safeText(cash.reason));
       setResponsibleUserId(Number(cash.responsible_user_id || 0) || null);
     } else {
-      setOpeningCash('');
       setPhysicalCash('');
       setCashReason('');
       setResponsibleUserId(null);
@@ -208,7 +205,6 @@ const ClosingStorePanel = ({ currentUser, isActive, onNotify }) => {
     try {
       setSubmitting(true);
       const nextPayload = await saveStoreClosingCashValidation(closingId, {
-        opening_cash: parseAmount(openingCash),
         physical_cash: physicalCashValue,
         reason: cashReason,
         responsible_user_id: responsibleUserId,
@@ -484,7 +480,6 @@ const ClosingStorePanel = ({ currentUser, isActive, onNotify }) => {
             <View style={styles.card}>
               <Text style={styles.sectionTitle}>Validasi Cash</Text>
               <Text style={styles.meta}>Pergerakan cash transaksi: {formatRupiah(expectedMovement)}</Text>
-              <TextInput value={openingCash} onChangeText={(value) => setOpeningCash(sanitizeAmount(value))} style={styles.input} placeholder="Cash awal laci" editable={!isLocked} />
               <TextInput value={physicalCash} onChangeText={(value) => setPhysicalCash(sanitizeAmount(value))} style={styles.input} placeholder="Cash fisik saat closing" editable={!isLocked} />
               <Text style={styles.meta}>Cash seharusnya: {formatRupiah(expectedCashPreview)}</Text>
               <Text style={[styles.cashDiff, cashDifferencePreview === 0 ? styles.goodText : styles.badText]}>
@@ -624,6 +619,15 @@ const ClosingStorePanel = ({ currentUser, isActive, onNotify }) => {
               <View style={styles.finalSnapshot}>
                 <Text style={styles.sectionTitle}>Laporan Final Terkunci</Text>
                 <Text style={styles.meta}>Snapshot final {closing?.date || '-'} dikunci pada {closing?.finalized_at || '-'}. Perubahan berikutnya dicatat sebagai case koreksi.</Text>
+                <View style={styles.finalSnapshotActions}>
+                  <Pressable
+                    style={styles.primaryButton}
+                    onPress={() => onPrintReport?.(closing?.date || date)}
+                    disabled={!onPrintReport}
+                  >
+                    <Text style={styles.primaryButtonText}>Print Laporan</Text>
+                  </Pressable>
+                </View>
               </View>
               <View style={styles.twoColumns}>
                 <View style={styles.card}>
@@ -770,50 +774,50 @@ const EvidenceRow = ({ label, value, loading, onUpload, disabled }) => (
 );
 
 const styles = StyleSheet.create({
-  panel: { gap: 14, padding: 16, borderRadius: 18, borderWidth: 1, borderColor: '#d7dfd2', backgroundColor: '#f7f8f2' },
+  panel: { gap: 14, padding: 16, borderRadius: 18, borderWidth: 1, borderColor: '#c8d8f2', backgroundColor: '#ffffff' },
   header: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', gap: 14 },
-  title: { fontSize: 21, fontWeight: '900', color: '#203128' },
-  subtitle: { fontSize: 12, lineHeight: 18, color: '#58675f', maxWidth: 660 },
+  title: { fontSize: 21, fontWeight: '900', color: '#173c87' },
+  subtitle: { fontSize: 12, lineHeight: 18, color: '#667897', maxWidth: 660 },
   status: { paddingHorizontal: 14, paddingVertical: 8, borderRadius: 999 },
   statusReady: { backgroundColor: '#e1f2d6' },
   statusSafe: { backgroundColor: '#1d6c43' },
   statusCorrection: { backgroundColor: '#f3dcae' },
   statusBlocked: { backgroundColor: '#ffe5cf' },
-  statusText: { fontSize: 12, fontWeight: '900', color: '#24362d' },
+  statusText: { fontSize: 12, fontWeight: '900', color: '#173c87' },
   actions: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, alignItems: 'center' },
-  dateInput: { borderWidth: 1, borderColor: '#bdc9bf', backgroundColor: '#fff', borderRadius: 10, paddingHorizontal: 12, paddingVertical: 9, minWidth: 130 },
+  dateInput: { borderWidth: 1, borderColor: '#d4dcea', backgroundColor: '#fbfdff', borderRadius: 10, paddingHorizontal: 12, paddingVertical: 9, minWidth: 130 },
   summaryGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 10 },
-  summaryCard: { flexGrow: 1, minWidth: 145, padding: 12, borderRadius: 14, backgroundColor: '#e7f0e0', borderWidth: 1, borderColor: '#cad9bd' },
+  summaryCard: { flexGrow: 1, minWidth: 145, padding: 12, borderRadius: 14, backgroundColor: '#f1f6ff', borderWidth: 1, borderColor: '#c8d8f2' },
   summaryWarning: { backgroundColor: '#fff2df', borderColor: '#edd2a7' },
-  summaryLabel: { fontSize: 11, fontWeight: '800', color: '#5b6b63' },
-  summaryValue: { marginTop: 6, fontSize: 17, fontWeight: '900', color: '#203128' },
+  summaryLabel: { fontSize: 11, fontWeight: '800', color: '#435674' },
+  summaryValue: { marginTop: 6, fontSize: 17, fontWeight: '900', color: '#173c87' },
   blockerCard: { padding: 14, borderRadius: 14, borderWidth: 1, borderColor: '#f4b88b', backgroundColor: '#fff0e4', gap: 5 },
   blockerText: { fontSize: 12, lineHeight: 17, color: '#8a3d16', fontWeight: '700' },
   twoColumns: { flexDirection: 'row', flexWrap: 'wrap', gap: 12 },
-  card: { flexGrow: 1, minWidth: 300, padding: 14, borderRadius: 14, borderWidth: 1, borderColor: '#d9e0d7', backgroundColor: '#fff', gap: 9 },
-  sectionTitle: { fontSize: 15, fontWeight: '900', color: '#24362d' },
-  meta: { fontSize: 11, lineHeight: 16, color: '#617269' },
-  input: { borderWidth: 1, borderColor: '#d0d8d0', backgroundColor: '#fbfcfa', borderRadius: 10, paddingHorizontal: 11, paddingVertical: 9, fontSize: 12, color: '#203128' },
+  card: { flexGrow: 1, minWidth: 300, padding: 14, borderRadius: 14, borderWidth: 1, borderColor: '#dce5f4', backgroundColor: '#fff', gap: 9 },
+  sectionTitle: { fontSize: 15, fontWeight: '900', color: '#173c87' },
+  meta: { fontSize: 11, lineHeight: 16, color: '#667897' },
+  input: { borderWidth: 1, borderColor: '#d4dcea', backgroundColor: '#fbfdff', borderRadius: 10, paddingHorizontal: 11, paddingVertical: 9, fontSize: 12, color: '#14233d' },
   multiline: { minHeight: 54, textAlignVertical: 'top' },
   cashDiff: { fontSize: 13, fontWeight: '900' },
   goodText: { color: '#1d6c43' },
   badText: { color: '#aa4a1d' },
-  primaryButton: { backgroundColor: '#276641', paddingHorizontal: 14, paddingVertical: 11, borderRadius: 10, alignItems: 'center' },
+  primaryButton: { backgroundColor: '#0755b8', paddingHorizontal: 14, paddingVertical: 11, borderRadius: 10, alignItems: 'center' },
   primaryButtonText: { color: '#fff', fontSize: 12, fontWeight: '900' },
-  secondaryButton: { borderWidth: 1, borderColor: '#aebdaf', backgroundColor: '#f2f6ee', paddingHorizontal: 12, paddingVertical: 9, borderRadius: 10, alignItems: 'center' },
-  secondaryButtonText: { color: '#2d513b', fontSize: 11, fontWeight: '900' },
+  secondaryButton: { borderWidth: 1, borderColor: '#b9c8e1', backgroundColor: '#f5f9ff', paddingHorizontal: 12, paddingVertical: 9, borderRadius: 10, alignItems: 'center' },
+  secondaryButtonText: { color: '#174a8c', fontSize: 11, fontWeight: '900' },
   picRow: { flexDirection: 'row', gap: 6, paddingVertical: 2 },
   wrapRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 6 },
-  choice: { borderRadius: 999, borderWidth: 1, borderColor: '#d0d8d0', paddingHorizontal: 10, paddingVertical: 6 },
-  choiceActive: { borderColor: '#276641', backgroundColor: '#dfeddd' },
-  choiceText: { fontSize: 10, fontWeight: '800', color: '#304b3b' },
+  choice: { borderRadius: 999, borderWidth: 1, borderColor: '#d4dcea', paddingHorizontal: 10, paddingVertical: 6 },
+  choiceActive: { borderColor: '#0755b8', backgroundColor: '#eef4ff' },
+  choiceText: { fontSize: 10, fontWeight: '800', color: '#174a8c' },
   checkRow: { flexDirection: 'row', alignItems: 'center', gap: 9, paddingVertical: 4 },
-  checkbox: { width: 20, height: 20, borderWidth: 1, borderColor: '#adbcae', borderRadius: 6, alignItems: 'center', justifyContent: 'center' },
-  checkboxChecked: { backgroundColor: '#276641', borderColor: '#276641' },
+  checkbox: { width: 20, height: 20, borderWidth: 1, borderColor: '#b9c8e1', borderRadius: 6, alignItems: 'center', justifyContent: 'center' },
+  checkboxChecked: { backgroundColor: '#0755b8', borderColor: '#0755b8' },
   checkboxText: { color: '#fff', fontSize: 12, fontWeight: '900' },
   checkTextWrap: { flex: 1 },
-  checkLabel: { fontSize: 12, fontWeight: '800', color: '#24362d' },
-  finalButton: { marginTop: 7, backgroundColor: '#173c2a', paddingVertical: 12, borderRadius: 11, alignItems: 'center' },
+  checkLabel: { fontSize: 12, fontWeight: '800', color: '#173c87' },
+  finalButton: { marginTop: 7, backgroundColor: '#043f92', paddingVertical: 12, borderRadius: 11, alignItems: 'center' },
   finalButtonText: { color: '#fff', fontSize: 13, fontWeight: '900' },
   disabledButton: { opacity: 0.45 },
   issueCard: { padding: 11, borderRadius: 11, borderWidth: 1, borderColor: '#e1e6df', backgroundColor: '#fafbf8', gap: 7 },
@@ -821,6 +825,7 @@ const styles = StyleSheet.create({
   issueTitle: { fontSize: 12, color: '#263d30', fontWeight: '900' },
   evidenceRow: { flexDirection: 'row', gap: 10, alignItems: 'center', borderBottomWidth: 1, borderBottomColor: '#edf0ea', paddingVertical: 7 },
   finalSnapshot: { padding: 14, borderRadius: 14, borderWidth: 1, borderColor: '#9bbf9d', backgroundColor: '#e6f0e5', gap: 5 },
+  finalSnapshotActions: { marginTop: 6, flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
   modalBackdrop: { flex: 1, backgroundColor: 'rgba(20, 32, 25, 0.52)', justifyContent: 'center', alignItems: 'center', padding: 18 },
   modalBackdropDismiss: { ...StyleSheet.absoluteFillObject },
   finalizeModalCard: { width: '100%', maxWidth: 470, padding: 20, borderRadius: 22, borderWidth: 1, borderColor: '#d2ddd3', backgroundColor: '#fffefb', shadowColor: '#122419', shadowOpacity: 0.18, shadowRadius: 22, shadowOffset: { width: 0, height: 12 }, elevation: 8, gap: 13 },

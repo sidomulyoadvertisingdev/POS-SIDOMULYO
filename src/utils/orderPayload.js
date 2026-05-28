@@ -1,6 +1,7 @@
 import { appEnv } from '../config/appEnv';
 
 const normalizeText = (value) => String(value || '').trim().toLowerCase();
+const normalizePaymentAliasKey = (value) => normalizeText(value).replace(/[-\s]+/g, '_');
 const toPositiveInt = (value) => {
   const parsed = Number.parseInt(String(value || '').trim(), 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
@@ -47,6 +48,7 @@ export const mapPaymentStatusToTransactionType = (paymentStatus) => {
 
 export const mapPaymentMethodToBackend = (paymentMethod) => {
   const text = normalizeText(paymentMethod);
+  const aliasKey = normalizePaymentAliasKey(paymentMethod);
   if (['saldo pelanggan', 'deposit customer', 'customer deposit', 'customer_deposit', 'deposit', 'customer_balance'].includes(text)) {
     return 'customer_balance';
   }
@@ -59,7 +61,7 @@ export const mapPaymentMethodToBackend = (paymentMethod) => {
   if (['dana_gateway', 'dana payment gateway', 'payment gateway dana', 'gateway_dana'].includes(text)) {
     return 'dana_gateway';
   }
-  if (['qris', 'qr', 'qris payment'].includes(text)) {
+  if (['qris', 'qr', 'qris payment'].includes(text) || ['qris_dana', 'dana_qris', 'qr_dana', 'dana_qr'].includes(aliasKey)) {
     return 'qris';
   }
   if (['card', 'kartu', 'debit', 'credit card'].includes(text)) {
