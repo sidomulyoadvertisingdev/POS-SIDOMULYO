@@ -2183,6 +2183,116 @@ const pickBrowserFile = ({ accept = '' } = {}) => new Promise((resolve, reject) 
   input.onerror = () => reject(new Error('Gagal membuka pemilih file.'));
   input.click();
 });
+const PROOFING_UPLOAD_SERVER_LIMIT_BYTES = 950 * 1024;
+const PROOFING_PREVIEW_MAX_DIMENSION = 1800;
+const formatFileSize = (bytes) => {
+  const size = Number(bytes || 0);
+  if (size >= 1024 * 1024) {
+    return `${(size / (1024 * 1024)).toFixed(size >= 10 * 1024 * 1024 ? 0 : 1)} MB`;
+  }
+  return `${Math.max(1, Math.round(size / 1024))} KB`;
+};
+const isBrowserImageFile = (file) => {
+  const type = String(file?.type || '').toLowerCase();
+  const name = String(file?.name || '').toLowerCase();
+  return type.startsWith('image/')
+    || /\.(jpe?g|png|webp)$/i.test(name);
+};
+const loadImageElementFromFile = (file) => new Promise((resolve, reject) => {
+  if (typeof Image === 'undefined' || typeof URL === 'undefined') {
+    reject(new Error('Browser belum mendukung kompres gambar otomatis.'));
+    return;
+  }
+
+  const image = new Image();
+  const objectUrl = URL.createObjectURL(file);
+  image.onload = () => {
+    URL.revokeObjectURL(objectUrl);
+    resolve(image);
+  };
+  image.onerror = () => {
+    URL.revokeObjectURL(objectUrl);
+    reject(new Error('Foto preview tidak bisa dibaca. Coba simpan sebagai JPG/PNG lalu upload ulang.'));
+  };
+  image.src = objectUrl;
+});
+const compressProofingPreviewImage = async (file) => {
+  if (
+    typeof document === 'undefined'
+    || typeof Blob === 'undefined'
+    || typeof File === 'undefined'
+    || typeof HTMLCanvasElement === 'undefined'
+  ) {
+    return file;
+  }
+
+  const image = await loadImageElementFromFile(file);
+  const sourceWidth = Math.max(1, Number(image.naturalWidth || image.width || 1));
+  const sourceHeight = Math.max(1, Number(image.naturalHeight || image.height || 1));
+  const scale = Math.min(1, PROOFING_PREVIEW_MAX_DIMENSION / Math.max(sourceWidth, sourceHeight));
+  const targetWidth = Math.max(1, Math.round(sourceWidth * scale));
+  const targetHeight = Math.max(1, Math.round(sourceHeight * scale));
+  const canvas = document.createElement('canvas');
+  canvas.width = targetWidth;
+  canvas.height = targetHeight;
+  const context = canvas.getContext('2d');
+  if (!context) {
+    return file;
+  }
+  context.drawImage(image, 0, 0, targetWidth, targetHeight);
+
+  const toBlob = (quality) => new Promise((resolve) => {
+    canvas.toBlob(resolve, 'image/jpeg', quality);
+  });
+  const qualities = [0.82, 0.72, 0.62, 0.52, 0.42];
+  let bestBlob = null;
+  for (const quality of qualities) {
+    const blob = await toBlob(quality);
+    if (!blob) {
+      continue;
+    }
+    bestBlob = blob;
+    if (blob.size <= PROOFING_UPLOAD_SERVER_LIMIT_BYTES) {
+      break;
+    }
+  }
+
+  if (!bestBlob || bestBlob.size >= Number(file?.size || 0)) {
+    return file;
+  }
+
+  const baseName = String(file?.name || 'preview-proofing')
+    .replace(/\.[^.]+$/, '')
+    .trim() || 'preview-proofing';
+  return new File([bestBlob], `${baseName}.jpg`, {
+    type: 'image/jpeg',
+    lastModified: Date.now(),
+  });
+};
+const prepareProofingUploadFile = async (file, mode = 'preview') => {
+  if (!file) {
+    return file;
+  }
+
+  const isPreview = mode !== 'final';
+  const isImage = isBrowserImageFile(file);
+  if (isPreview && isImage && Number(file.size || 0) > PROOFING_UPLOAD_SERVER_LIMIT_BYTES) {
+    const compressed = await compressProofingPreviewImage(file);
+    if (Number(compressed?.size || 0) <= PROOFING_UPLOAD_SERVER_LIMIT_BYTES) {
+      return compressed;
+    }
+  }
+
+  if (Number(file.size || 0) > PROOFING_UPLOAD_SERVER_LIMIT_BYTES) {
+    throw new Error(
+      `Ukuran file ${formatFileSize(file.size)} terlalu besar untuk server upload saat ini. `
+      + `Batas aman sementara ${formatFileSize(PROOFING_UPLOAD_SERVER_LIMIT_BYTES)}. `
+      + 'Kompres file dulu atau naikkan limit upload nginx/backend.',
+    );
+  }
+
+  return file;
+};
 const enforceDesignFirstFlow = (backendItem = {}) => {
   const requiresProduction = String(backendItem?.production_status || '').toLowerCase() !== 'not_required'
     ? Boolean(backendItem?.requires_production ?? true)
@@ -5907,6 +6017,12 @@ const SalesScreen = ({ currentUser, onLogout }) => {
   const [currentQueuedDraftQueueId, setCurrentQueuedDraftQueueId] = useState(null);
   const [invoiceSuccessCacheRows, setInvoiceSuccessCacheRows] = useState(() => loadInvoiceSuccessCache());
   const [draftInvoices, setDraftInvoices] = useState([]);
+  const [invoiceWorkspaceRowsByArea, setInvoiceWorkspaceRowsByArea] = useState(() => ({
+    draft: [],
+    success: loadInvoiceSuccessCache(),
+    approval: [],
+    receivable: [],
+  }));
   const [invoiceListMeta, setInvoiceListMeta] = useState({
     currentPage: 1,
     lastPage: 1,
@@ -6708,6 +6824,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
   const receivableApprovalSnapshotRef = useRef(new Map());
   const receivableApprovalSnapshotReadyRef = useRef(false);
   const receivableApprovalPollingRef = useRef(false);
+  const invoiceDashboardSnapshotLoadingRef = useRef(false);
   const customerReceivableNoticeKeyRef = useRef('');
   const customerReceivableSummaryRequestRef = useRef(0);
   const masterSyncInFlightRef = useRef(false);
@@ -8580,6 +8697,431 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         proofingNotes,
       }),
     };
+  };
+
+  const formatBillingAmount = (value) => {
+    const amount = Math.round(Number(value || 0));
+    return amount.toString().replace(/\B(?=(\d{3})+(?!\d))/g, '.');
+  };
+  const formatBillingDateTime = (value) => {
+    const parsed = value ? new Date(value) : new Date();
+    const date = Number.isNaN(parsed.getTime()) ? new Date() : parsed;
+    const months = [
+      'Januari',
+      'Februari',
+      'Maret',
+      'April',
+      'Mei',
+      'Juni',
+      'Juli',
+      'Agustus',
+      'September',
+      'Oktober',
+      'November',
+      'Desember',
+    ];
+    const day = String(date.getDate()).padStart(2, '0');
+    const month = months[date.getMonth()] || '';
+    const year = String(date.getFullYear());
+    const hour = String(date.getHours()).padStart(2, '0');
+    const minute = String(date.getMinutes()).padStart(2, '0');
+    return `${day} ${month} ${year} ${hour}:${minute}`;
+  };
+  const buildBillingNoteNumber = (sourceRow) => {
+    const dateRaw = String(sourceRow?.created_at || sourceRow?.invoice?.created_at || new Date().toISOString());
+    const date = Number.isNaN(Date.parse(dateRaw)) ? new Date() : new Date(dateRaw);
+    const ymd = `${date.getFullYear()}${String(date.getMonth() + 1).padStart(2, '0')}${String(date.getDate()).padStart(2, '0')}`;
+    const suffixSource = String(
+      sourceRow?.invoice?.invoice_no
+      || sourceRow?.order_number
+      || sourceRow?.id
+      || Date.now()
+    ).replace(/[^a-z0-9]/gi, '').slice(-5).toUpperCase();
+    return `TAG-${ymd}-${suffixSource || 'POS'}`;
+  };
+  const resolveBillingNoteAmounts = (sourceRow, items = []) => {
+    const total = roundMoney(Number(
+      sourceRow?.invoice?.total
+      || sourceRow?.total
+      || sourceRow?.grand_total
+      || calculateDraftItemsTotal(items)
+      || 0
+    ));
+    const paid = roundMoney(Number(
+      sourceRow?.invoice?.paid_total
+      || sourceRow?.paid_total
+      || sourceRow?.payment?.paid_total
+      || sourceRow?.payment?.amount
+      || 0
+    ));
+    const explicitDue = roundMoney(Number(sourceRow?.invoice?.due_total || sourceRow?.due_total || 0));
+    const isDraftLike = isDraftInvoiceRow(sourceRow)
+      || normalizeProofingFlow(sourceRow?.proofing_flow, Boolean(sourceRow?.proofing_required)) !== PROOFING_FLOW_NONE;
+    const due = explicitDue > 0
+      ? explicitDue
+      : roundMoney(Math.max(total - paid, 0));
+    return {
+      total,
+      paid,
+      due: due > 0 ? due : (isDraftLike && paid <= 0 && total > 0 ? total : 0),
+    };
+  };
+  const resolveBillingSourceFromRow = async (row) => {
+    const proofingOrder = row?.order && typeof row.order === 'object' ? row.order : null;
+    const orderId = Number(row?.id || proofingOrder?.id || row?.order_id || row?.orderId || 0) || 0;
+    const proofingOrderId = Number(proofingOrder?.id || row?.order_id || row?.orderId || 0) || 0;
+    const targetOrderId = proofingOrderId || orderId;
+    let sourceRow = row;
+    if (targetOrderId > 0) {
+      try {
+        const detailPayload = await fetchPosOrderDetail(targetOrderId);
+        sourceRow = normalizeOrderDetailRow(detailPayload, proofingOrder || row) || proofingOrder || row;
+      } catch (_error) {
+        sourceRow = proofingOrder || row;
+      }
+    } else if (proofingOrder) {
+      sourceRow = proofingOrder;
+    }
+
+    const invoice = sourceRow?.invoice && typeof sourceRow.invoice === 'object'
+      ? sourceRow.invoice
+      : (row?.invoice && typeof row.invoice === 'object' ? row.invoice : null);
+    const customer = sourceRow?.customer && typeof sourceRow.customer === 'object'
+      ? sourceRow.customer
+      : (
+        row?.customer && typeof row.customer === 'object'
+          ? row.customer
+          : (proofingOrder?.customer && typeof proofingOrder.customer === 'object' ? proofingOrder.customer : null)
+      );
+    const cashier = sourceRow?.cashier && typeof sourceRow.cashier === 'object'
+      ? sourceRow.cashier
+      : (
+        row?.cashier && typeof row.cashier === 'object'
+          ? row.cashier
+          : (proofingOrder?.cashier && typeof proofingOrder.cashier === 'object' ? proofingOrder.cashier : null)
+      );
+    const items = Array.isArray(sourceRow?.items) && sourceRow.items.length > 0
+      ? sourceRow.items
+      : (
+        Array.isArray(proofingOrder?.items) && proofingOrder.items.length > 0
+          ? proofingOrder.items
+          : (row?.item && typeof row.item === 'object' ? [row.item] : [])
+      );
+
+    return {
+      ...sourceRow,
+      id: Number(sourceRow?.id || proofingOrder?.id || row?.order_id || row?.orderId || row?.id || 0) || sourceRow?.id,
+      invoice,
+      customer,
+      cashier,
+      items,
+      proofing: row?.proofing_code || row?.proofing_url ? row : sourceRow?.proofing,
+    };
+  };
+  const getBillingPaymentOptions = () => {
+    const transferRows = (Array.isArray(bankAccounts) ? bankAccounts : []).filter((row) => {
+      const text = normalizeText([
+        row?.displayTitle,
+        row?.displayName,
+        row?.bank_name,
+        row?.bankName,
+        row?.account_name,
+        row?.accountName,
+        row?.account_number,
+        row?.accountNumber,
+        row?.code,
+      ].filter(Boolean).join(' '));
+      return text.includes('bca') || text.includes('bank') || text.includes('transfer');
+    });
+    const qrisRow = (Array.isArray(bankAccounts) ? bankAccounts : []).find((row) => {
+      const text = normalizeText([
+        row?.displayTitle,
+        row?.displayName,
+        row?.bank_name,
+        row?.bankName,
+        row?.account_name,
+        row?.accountName,
+        row?.code,
+        row?.payment_method,
+      ].filter(Boolean).join(' '));
+      return text.includes('qris') || text.includes('qr');
+    }) || null;
+    const transferLines = transferRows.length > 0
+      ? transferRows.slice(0, 3).map((row) => {
+        const bank = toLabel(row?.bank_name, row?.bankName, row?.code, 'Transfer');
+        const number = toLabel(row?.account_number, row?.accountNumber, row?.number, '');
+        const name = toLabel(row?.account_name, row?.accountName, row?.name, 'Sidomulyo');
+        return `${bank}${number ? ` : ${number}` : ''}${name ? ` a.n. ${name}` : ''}`;
+      })
+      : ['Transfer BCA : 1234567890 a.n. Sidomulyo'];
+    const qrisImageUrl = String(
+      qrisRow?.qr_image_url
+      || qrisRow?.qrImageUrl
+      || qrisRow?.qris_image_url
+      || qrisRow?.qrisImageUrl
+      || ''
+    ).trim();
+    return {
+      transferLines,
+      qrisImageUrl,
+    };
+  };
+  const buildBillingNotePayload = async (row) => {
+    const sourceRow = await resolveBillingSourceFromRow(row);
+    const items = Array.isArray(sourceRow?.items) ? sourceRow.items : [];
+    const amounts = resolveBillingNoteAmounts(sourceRow, items);
+    if (!(amounts.due > 0)) {
+      throw new Error('Nota tagihan hanya untuk invoice/proofing yang belum lunas atau draft yang belum dibayar.');
+    }
+    const receiptSettings = normalizeReceiptSettings(posSettings);
+    const mappedItems = items.map((item, index) => mapReceiptItemFromSource(item, index));
+    const paymentOptions = getBillingPaymentOptions();
+    const paymentMethodLabel = paymentOptions.transferLines?.[0]
+      ? String(paymentOptions.transferLines[0]).split(':')[0].trim()
+      : 'Tunai / Transfer / QRIS';
+    return {
+      sourceRow,
+      items: mappedItems,
+      amounts,
+      paymentOptions,
+      store: {
+        logoUrl: receiptSettings.receipt_logo_url || resolveDefaultReceiptLogoUrl(),
+        name: receiptSettings.brand_name || 'SIDOMULYO ADVERTISING & PRINTING',
+        tagline: receiptSettings.brand_tagline || 'Advertising & Printing Solution',
+        address: receiptSettings.receipt_store_address || 'Jl. Kartini No.108 Salatiga',
+        phone: receiptSettings.receipt_store_phone || 'WA: 0888-0888-8880 | IG: @sidomulyoprintingadvertising',
+        hotline: toLabel(
+          posSettings?.receipt_hotline,
+          posSettings?.hotline,
+          posSettings?.receipt?.hotline,
+          '+62 888-6858-761',
+        ),
+        reviewQrUrl: toLabel(
+          posSettings?.receipt_review_qr_url,
+          posSettings?.review_qr_url,
+          posSettings?.receipt?.review_qr_url,
+          paymentOptions.qrisImageUrl,
+          '',
+        ),
+      },
+      transaction: {
+        billingNo: buildBillingNoteNumber(sourceRow),
+        orderNo: String(sourceRow?.order_number || sourceRow?.id || '-').trim() || '-',
+        invoiceNo: String(sourceRow?.invoice?.invoice_no || '-').trim() || '-',
+        date: formatBillingDateTime(sourceRow?.created_at || sourceRow?.invoice?.created_at),
+        printedAt: formatBillingDateTime(new Date()),
+        cashier: String(sourceRow?.cashier?.name || currentUser?.name || 'Kasir').trim(),
+        customer: String(sourceRow?.customer?.name || 'Pelanggan umum').trim(),
+        customerPhone: String(sourceRow?.customer?.phone || sourceRow?.customer?.mobile || sourceRow?.customer?.whatsapp || '').trim(),
+        paymentMethodLabel,
+        note: stripWorkflowSystemNotes(sourceRow?.payment?.note || sourceRow?.note || sourceRow?.notes || ''),
+      },
+    };
+  };
+  const renderBillingItemHtml = (item) => {
+    const detailRows = [
+      item.size && item.size !== '-' ? ['Ukuran Produksi / Ket.', item.size] : null,
+      item.material && item.material !== '-' ? ['Bahan', item.material] : null,
+      item.finishing && item.finishing !== '-' ? ['Finishing', item.finishing] : null,
+      item.lbMax && item.lbMax !== '-' ? ['LB Max', item.lbMax] : null,
+      item.pages && item.pages > 1 ? ['Halaman', item.pages] : null,
+      item.notes && item.notes !== '-' ? ['Catatan item', item.notes] : null,
+    ].filter(Boolean);
+    return `
+      <div class="billing-item">
+        <div class="item-grid">
+          <div class="item-name">${escapeHtml(item.name)}</div>
+          <div class="item-qty">${escapeHtml(String(item.qty || 0))}</div>
+          <div class="item-price">${escapeHtml(formatBillingAmount(item.price))}</div>
+          <div class="item-total">${escapeHtml(formatBillingAmount(item.total))}</div>
+        </div>
+        ${detailRows.length > 0 ? `<div class="item-details">${detailRows.map(([label, value]) => `<div class="detail-row"><span>${escapeHtml(label)}</span><b>:</b><em>${escapeHtml(value)}</em></div>`).join('')}</div>` : ''}
+      </div>
+    `;
+  };
+  const buildBillingNoteHtml = (payload) => {
+    const note = String(payload?.transaction?.note || '').trim();
+    const qrisImageUrl = String(payload?.paymentOptions?.qrisImageUrl || '').trim();
+    const reviewQrUrl = String(payload?.store?.reviewQrUrl || qrisImageUrl || '').trim();
+    const paidTotal = Number(payload?.amounts?.paid || 0) || 0;
+    const dueTotal = Number(payload?.amounts?.due || 0) || 0;
+    const totalAmount = Number(payload?.amounts?.total || 0) || dueTotal;
+    const title = 'Nota Tagihan';
+    const watermark = dueTotal > 0 ? 'TAGIHAN' : 'LUNAS';
+    const paymentMethodLabel = String(payload?.transaction?.paymentMethodLabel || '').trim() || 'Tunai / Transfer / QRIS';
+    return `<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Tagihan Pesanan ${escapeHtml(payload?.transaction?.billingNo || '')}</title>
+  <style>
+    @page { size: 80mm auto; margin: 3mm; }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: #f3f3f3; color: #050505; font-family: "Arial Narrow", Arial, Helvetica, sans-serif; }
+    .sheet { position: relative; overflow: hidden; width: 80mm; min-height: 100vh; margin: 0 auto; background: #fff; padding: 3mm 2.5mm 2.5mm; }
+    .watermark { position: absolute; inset: 42mm auto auto 8mm; z-index: 0; color: rgba(0,0,0,0.055); font-size: 35mm; font-weight: 900; letter-spacing: 2mm; transform: rotate(-33deg); transform-origin: center; white-space: nowrap; pointer-events: none; }
+    .content { position: relative; z-index: 1; }
+    .brand { text-align: center; border-bottom: 2.2px solid #111; padding-bottom: 5px; }
+    .logo { max-width: 47mm; max-height: 18mm; object-fit: contain; display: block; margin: 0 auto 1px; filter: grayscale(1) contrast(1.35); }
+    .brand-name { font-size: 15px; font-weight: 900; letter-spacing: 0.4px; text-transform: uppercase; line-height: 1.05; }
+    .brand-address { font-size: 12px; margin-top: 4px; line-height: 1.12; }
+    .brand-phone { font-size: 11px; margin-top: 4px; line-height: 1.15; white-space: nowrap; }
+    .title { text-align: center; font-size: 18px; font-weight: 900; letter-spacing: 0.8px; padding: 6px 0 5px; border-bottom: 2.2px solid #111; text-transform: uppercase; }
+    .meta { display: grid; grid-template-columns: 1fr 1fr; gap: 5mm; padding: 5px 0 6px; border-bottom: 2.2px solid #111; }
+    .meta-row { display: grid; grid-template-columns: 17mm 3mm minmax(0, 1fr); font-size: 11px; line-height: 1.55; break-inside: avoid; }
+    .meta-row strong { font-weight: 700; }
+    .items-head, .item-grid { display: grid; grid-template-columns: minmax(0, 1fr) 9mm 18mm 21mm; gap: 1.5mm; align-items: start; }
+    .items-head { font-size: 11px; font-weight: 900; padding: 5px 0 4px; border-bottom: 2px solid #111; }
+    .billing-item { padding: 5px 0 6px; border-bottom: 1.5px dashed #111; break-inside: avoid; }
+    .item-grid { font-size: 11px; line-height: 1.15; }
+    .item-name { font-weight: 900; }
+    .item-qty, .item-price, .item-total { text-align: right; white-space: nowrap; }
+    .item-details { margin-top: 4px; font-size: 10.8px; line-height: 1.35; }
+    .detail-row { display: grid; grid-template-columns: 27mm 3mm minmax(0, 1fr); }
+    .detail-row b { font-weight: 400; }
+    .detail-row em { font-style: normal; }
+    .summary { padding: 7px 0 5px; border-bottom: 2.2px solid #111; }
+    .summary-main { display: grid; grid-template-columns: 1fr auto; gap: 8px; align-items: baseline; font-weight: 900; }
+    .summary-main .label { font-size: 16px; }
+    .summary-main .value { font-size: 18px; }
+    .summary-row { display: grid; grid-template-columns: 31mm 3mm minmax(0, 1fr); align-items: baseline; font-size: 11px; line-height: 1.45; }
+    .summary-row .amount { text-align: right; }
+    .summary-row.due { font-weight: 900; }
+    .note { border-bottom: 2.2px solid #111; padding: 5px 0; font-size: 10.8px; line-height: 1.35; }
+    .terms { padding: 6px 0; border-bottom: 1.5px dashed #111; font-size: 10.7px; line-height: 1.35; }
+    .terms strong { font-weight: 900; }
+    .review { text-align: center; padding: 5px 0 4px; }
+    .review-title { font-size: 11.5px; font-weight: 900; margin-bottom: 4px; }
+    .review img { width: 22mm; height: 22mm; object-fit: contain; filter: grayscale(1) contrast(1.45); }
+    .qr-fallback { width: 22mm; height: 22mm; margin: 0 auto; border: 2px solid #111; display: grid; place-items: center; font-size: 10px; font-weight: 900; background:
+      linear-gradient(90deg, #111 10%, transparent 10% 20%, #111 20% 28%, transparent 28% 42%, #111 42% 50%, transparent 50% 64%, #111 64% 76%, transparent 76%),
+      linear-gradient(#111 10%, transparent 10% 22%, #111 22% 34%, transparent 34% 48%, #111 48% 60%, transparent 60% 72%, #111 72% 84%, transparent 84%);
+      background-size: 5mm 5mm;
+      color: #fff;
+    }
+    .hotline { display: flex; align-items: center; justify-content: center; gap: 6px; font-size: 11px; padding: 2px 0 5px; border-bottom: 2.2px solid #111; }
+    .wa-icon { width: 6mm; height: 6mm; border: 1.7px solid #111; border-radius: 999px; display: inline-flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 900; line-height: 1; }
+    .footer { text-align: center; font-size: 11px; font-weight: 900; padding-top: 5px; }
+    @media print { body { background: #fff; } .sheet { margin: 0; width: 100%; min-height: auto; } }
+  </style>
+</head>
+<body>
+  <div class="sheet">
+    <div class="watermark">${escapeHtml(watermark)}</div>
+    <div class="content">
+      <div class="brand">
+        ${payload?.store?.logoUrl ? `<img class="logo" src="${escapeHtml(payload.store.logoUrl)}" />` : ''}
+        <div class="brand-name">${escapeHtml(payload?.store?.name || 'SIDOMULYO ADVERTISING & PRINTING')}</div>
+        <div class="brand-address">${escapeHtml(payload?.store?.address || '')}</div>
+        <div class="brand-phone">${escapeHtml(payload?.store?.phone || '')}</div>
+      </div>
+      <div class="title">${escapeHtml(title)}</div>
+      <div class="meta">
+        <div>
+          <div class="meta-row"><span>No. Nota</span><span>:</span><strong>${escapeHtml(payload?.transaction?.billingNo || '-')}</strong></div>
+          <div class="meta-row"><span>Tanggal</span><span>:</span><span>${escapeHtml(payload?.transaction?.date || '-')}</span></div>
+          <div class="meta-row"><span>Pelanggan</span><span>:</span><strong>${escapeHtml(payload?.transaction?.customer || '-')}</strong></div>
+          <div class="meta-row"><span>Dicetak</span><span>:</span><span>${escapeHtml(payload?.transaction?.printedAt || '-')}</span></div>
+        </div>
+        <div>
+          <div class="meta-row"><span>No. Order</span><span>:</span><strong>${escapeHtml(payload?.transaction?.orderNo || '-')}</strong></div>
+          <div class="meta-row"><span>Kasir</span><span>:</span><span>${escapeHtml(payload?.transaction?.cashier || '-')}</span></div>
+          <div class="meta-row"><span>No. HP</span><span>:</span><span>${escapeHtml(payload?.transaction?.customerPhone || '-')}</span></div>
+        </div>
+      </div>
+      <div class="items-head"><div>Nama Item</div><div class="item-qty">Qty</div><div class="item-price">Harga</div><div class="item-total">Subtotal</div></div>
+      ${(payload?.items || []).map((item) => renderBillingItemHtml(item)).join('')}
+      <div class="summary">
+        <div class="summary-main"><div class="label">Total</div><div class="value">${escapeHtml(formatBillingAmount(totalAmount))}</div></div>
+        <div class="summary-row"><span>Pembayaran</span><span></span><span class="amount">${escapeHtml(formatBillingAmount(paidTotal))}</span></div>
+        ${paidTotal > 0 ? `<div class="summary-row due"><span>Sisa Tagihan</span><span></span><span class="amount">${escapeHtml(formatBillingAmount(dueTotal))}</span></div>` : ''}
+        <div class="summary-row"><span>Metode Bayar</span><span>:</span><span>${escapeHtml(paymentMethodLabel)}</span></div>
+      </div>
+      <div class="note">Catatan : ${escapeHtml(note || '-')}</div>
+      <div class="terms">
+        <strong>Pesanan diproses setelah pembayaran diterima.</strong><br />
+        Customer wajib mengecek file, tulisan, ukuran, jumlah, dan desain sebelum produksi.<br />
+        <strong>Kesalahan file/design yg sudah di approve dan ttd di form proofing, design bukan tanggung jawab Sidomulyo.</strong><br />
+        Bukti pembayaran wajib dikirim ke WhatsApp untuk mendapatkan Nota Lunas.
+      </div>
+      <div class="review">
+        <div class="review-title">Ulas kami untuk selalu bertumbuh</div>
+        ${reviewQrUrl ? `<img src="${escapeHtml(reviewQrUrl)}" />` : '<div class="qr-fallback">QR</div>'}
+      </div>
+      <div class="hotline"><span class="wa-icon">☎</span><span>No. Hotline Service ${escapeHtml(payload?.store?.hotline || '+62 888-6858-761')}</span></div>
+      <div class="footer">Terima kasih telah memilih kami</div>
+    </div>
+  </div>
+</body>
+</html>`;
+  };
+  const buildBillingNoteShareText = (payload) => {
+    const itemLines = (payload?.items || []).map((item, index) => [
+      `${index + 1}. ${item.name}`,
+      `   Qty ${item.qty} x ${formatBillingAmount(item.price)} = ${formatBillingAmount(item.total)}`,
+      item.size && item.size !== '-' ? `   Ukuran: ${item.size}` : '',
+      item.material && item.material !== '-' ? `   Bahan: ${item.material}` : '',
+      item.finishing && item.finishing !== '-' ? `   Finishing: ${item.finishing}` : '',
+      item.notes && item.notes !== '-' ? `   Catatan: ${item.notes}` : '',
+    ].filter(Boolean).join('\n'));
+    const transferLines = Array.isArray(payload?.paymentOptions?.transferLines) ? payload.paymentOptions.transferLines : [];
+    return [
+      '*TAGIHAN PESANAN SIDOMULYO*',
+      `No. Tagihan: ${payload?.transaction?.billingNo || '-'}`,
+      `No. Order: ${payload?.transaction?.orderNo || '-'}`,
+      `Invoice: ${payload?.transaction?.invoiceNo || '-'}`,
+      `Tanggal: ${payload?.transaction?.date || '-'}`,
+      `Pelanggan: ${payload?.transaction?.customer || '-'}`,
+      '',
+      '*Detail Item*',
+      itemLines.join('\n'),
+      '',
+      `*Total Tagihan: ${formatBillingAmount(payload?.amounts?.due || 0)}*`,
+      '',
+      '*Pilihan Pembayaran*',
+      '- Tunai',
+      ...transferLines.map((line) => `- ${line}`),
+      '- QRIS',
+      '',
+      payload?.transaction?.note ? `Catatan: ${payload.transaction.note}` : '',
+      '',
+      'Pesanan diproses setelah pembayaran diterima.',
+      'Tolong diperiksa dan dicek dengan teliti.',
+    ].filter((line) => line !== '').join('\n');
+  };
+  const handlePrintBillingNote = async (row) => {
+    try {
+      const payload = await buildBillingNotePayload(row);
+      const html = buildBillingNoteHtml(payload);
+      printHtmlDocument(html, 'Nota Tagihan');
+    } catch (error) {
+      openNotice('Nota Tagihan', error.message || 'Gagal membuat nota tagihan.');
+    }
+  };
+  const handleShareBillingNote = async (row) => {
+    try {
+      const payload = await buildBillingNotePayload(row);
+      const text = buildBillingNoteShareText(payload);
+      await copyTextToClipboard(text);
+      const rawPhone = String(payload?.transaction?.customerPhone || '').trim();
+      let normalizedPhone = '';
+      try {
+        normalizedPhone = rawPhone ? normalizeIndonesianPhone(rawPhone, { allowEmpty: true }) : '';
+      } catch (_error) {
+        normalizedPhone = '';
+      }
+      if (normalizedPhone) {
+        const opened = await openExternalUrl(`https://wa.me/${normalizedPhone.replace(/^\+/, '')}?text=${encodeURIComponent(text)}`);
+        if (opened) {
+          return;
+        }
+      }
+      openNotice('Nota Tagihan', 'Teks nota tagihan sudah disalin. Tinggal paste ke WhatsApp customer.', null, {
+        autoCloseMs: 2200,
+      });
+    } catch (error) {
+      openNotice('Nota Tagihan', error.message || 'Gagal share nota tagihan.');
+    }
   };
 
   const buildBrowserReceiptPreviewHtml = (receiptData, profileInput = null) => {
@@ -11281,6 +11823,41 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     return nextCache;
   };
 
+  const updateInvoiceWorkspaceAreaSnapshot = (rows = [], options = {}) => {
+    const area = String(options?.area || '').trim();
+    const replaceAreas = new Set(
+      (Array.isArray(options?.replaceAreas) ? options.replaceAreas : [area])
+        .map((key) => String(key || '').trim())
+        .filter(Boolean),
+    );
+    const incomingRows = Array.isArray(rows) ? rows : [];
+    const nextByArea = {
+      draft: incomingRows.filter((row) => isDraftInvoiceRow(row)),
+      success: incomingRows.filter((row) => isInvoiceSuccessRow(row)),
+      approval: incomingRows.filter((row) => isReceivableApprovalInvoiceRow(row)),
+      receivable: incomingRows.filter((row) => isReceivableInvoiceRow(row)),
+    };
+
+    setInvoiceWorkspaceRowsByArea((prev) => {
+      const current = prev && typeof prev === 'object' ? prev : {};
+      const next = {
+        draft: Array.isArray(current.draft) ? current.draft : [],
+        success: Array.isArray(current.success) ? current.success : [],
+        approval: Array.isArray(current.approval) ? current.approval : [],
+        receivable: Array.isArray(current.receivable) ? current.receivable : [],
+      };
+
+      Object.keys(nextByArea).forEach((key) => {
+        const shouldReplace = replaceAreas.has(key);
+        next[key] = shouldReplace
+          ? nextByArea[key]
+          : mergeInvoiceRows(next[key], nextByArea[key]);
+      });
+
+      return next;
+    });
+  };
+
   const loadDraftInvoices = async (options = {}) => {
     const appendRows = Boolean(options?.append);
     const searchMode = String(options?.search ?? invoiceSearch ?? '').trim() !== '';
@@ -11307,6 +11884,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
 
     if (!backendReady) {
       setDraftInvoices(queueRows);
+      updateInvoiceWorkspaceAreaSnapshot(queueRows, { area: 'draft' });
       setInvoiceListMeta({
         currentPage: 1,
         lastPage: 1,
@@ -11332,6 +11910,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       const cachedRows = invoiceSuccessCacheRows.length > 0 ? invoiceSuccessCacheRows : loadInvoiceSuccessCache();
       if (cachedRows.length > 0) {
         setDraftInvoices(cachedRows);
+        updateInvoiceWorkspaceAreaSnapshot(cachedRows, { area: 'success' });
         setInvoiceListMeta({
           currentPage: 1,
           lastPage: 1,
@@ -11385,6 +11964,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       const mergedRows = mergeInvoiceRows(baseRows, [...queueRows, ...approvalListRows, ...rows]);
       const nextSuccessCache = syncInvoiceSuccessCacheFromRows(mergedRows);
       setDraftInvoices(mergedRows);
+      updateInvoiceWorkspaceAreaSnapshot(mergedRows, { area: invoiceRequestOptions.area });
       setInvoiceListMeta({
         currentPage: Number(pageMeta?.currentPage || requestPage) || requestPage,
         lastPage: Number(pageMeta?.lastPage || requestPage) || requestPage,
@@ -11401,6 +11981,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       }
     } catch (error) {
       setDraftInvoices(queueRows);
+      updateInvoiceWorkspaceAreaSnapshot(queueRows, { area: 'draft' });
       setInvoiceListMeta({
         currentPage: 1,
         lastPage: 1,
@@ -11419,6 +12000,87 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     }
   };
 
+  const loadInvoiceDashboardSnapshots = async () => {
+    if (!backendReady || invoiceDashboardSnapshotLoadingRef.current) {
+      return;
+    }
+
+    invoiceDashboardSnapshotLoadingRef.current = true;
+    try {
+      const queueRows = loadOrderQueue()
+        .filter((queued) => isDraftPayload(queued?.payload))
+        .map((queued) => {
+          const queuedItems = Array.isArray(queued?.payload?.items) ? queued.payload.items : [];
+          return {
+            id: `queue-${queued.id}`,
+            __queue_id: queued.id,
+            status: 'queued_offline',
+            created_at: queued.created_at,
+            notes: queued?.payload?.notes || '',
+            customer: null,
+            invoice: null,
+            items: queuedItems,
+            __source: 'queue',
+            __queue_payload: queued?.payload || null,
+            __queue_total: calculateDraftItemsTotal(queuedItems),
+          };
+        });
+
+      const loadAreaRows = async (area) => {
+        const requestOptions = buildInvoiceWorkspaceRequestOptions({
+          area,
+          page: 1,
+        });
+
+        try {
+          const response = await fetchPosOrderTransactionsPage(requestOptions);
+          return Array.isArray(response?.data) ? response.data : [];
+        } catch (_error) {
+          const fallbackResponse = await fetchPosOrdersPage(requestOptions);
+          return Array.isArray(fallbackResponse?.data) ? fallbackResponse.data : [];
+        }
+      };
+
+      const [draftRows, successRows, receivableRows, approvalRows] = await Promise.all([
+        loadAreaRows('draft').catch(() => []),
+        loadAreaRows('success').catch(() => []),
+        loadAreaRows('receivable').catch(() => []),
+        fetchReceivableApprovalRows().catch(() => []),
+      ]);
+      const approvalListRows = approvalRows.filter((row) => {
+        const approvalStatus = normalizeReceivableApprovalStatus(row?.approval?.status || row?.status);
+        const orderId = Number(row?.approval?.orderId || row?.order?.id || 0) || 0;
+        const approvalType = normalizeApprovalType(row?.approval?.type || row?.approval_type);
+        return !(approvalType === 'receivable' && approvalStatus === 'approved' && orderId > 0);
+      });
+
+      setReceivableApprovalRows(approvalRows);
+      syncReceivableApprovalSnapshot(approvalRows);
+      updateInvoiceWorkspaceAreaSnapshot(mergeInvoiceRows(queueRows, draftRows), {
+        area: 'draft',
+        replaceAreas: ['draft'],
+      });
+      updateInvoiceWorkspaceAreaSnapshot(successRows, {
+        area: 'success',
+        replaceAreas: ['success'],
+      });
+      updateInvoiceWorkspaceAreaSnapshot(approvalListRows, {
+        area: 'approval',
+        replaceAreas: ['approval'],
+      });
+      updateInvoiceWorkspaceAreaSnapshot(receivableRows, {
+        area: 'receivable',
+        replaceAreas: ['receivable'],
+      });
+      syncInvoiceSuccessCacheFromRows(successRows);
+      hydrateDanaInvoiceMonitorsFromRows([...draftRows, ...successRows, ...receivableRows]);
+    } catch (_error) {
+      // Snapshot dashboard bersifat pendukung; daftar aktif dan Refresh manual tetap jadi sumber utama.
+    } finally {
+      invoiceDashboardSnapshotLoadingRef.current = false;
+    }
+  };
+
   useEffect(() => {
     if (!isInvoiceAreaMenu(activeMenu)) {
       return undefined;
@@ -11429,6 +12091,18 @@ const SalesScreen = ({ currentUser, onLogout }) => {
 
     return () => clearTimeout(timeout);
   }, [activeMenu, backendReady, invoiceFilter, invoiceSearch, invoiceDateFrom, invoiceDateTo]);
+
+  useEffect(() => {
+    if (!isInvoiceAreaMenu(activeMenu) || !backendReady) {
+      return undefined;
+    }
+
+    const timeout = setTimeout(() => {
+      loadInvoiceDashboardSnapshots().catch(() => {});
+    }, 500);
+
+    return () => clearTimeout(timeout);
+  }, [activeMenu, backendReady, invoiceSearch, invoiceDateFrom, invoiceDateTo]);
 
   useEffect(() => {
     if (!backendReady) {
@@ -12172,12 +12846,13 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       if (!file) {
         return;
       }
+      const uploadFile = await prepareProofingUploadFile(file, mode);
 
       setProcessingProofingId(proofingId);
       if (mode === 'final') {
-        await uploadPosProofingFinalFile(proofingId, file);
+        await uploadPosProofingFinalFile(proofingId, uploadFile);
       } else {
-        await uploadPosProofingPreview(proofingId, file);
+        await uploadPosProofingPreview(proofingId, uploadFile);
       }
       await loadProofingItems();
       openNotice(
@@ -15321,30 +15996,67 @@ const SalesScreen = ({ currentUser, onLogout }) => {
 
     return { orderIds, invoiceIds };
   }, [receivableApprovalRows]);
+  const invoiceSummaryRowsByArea = useMemo(() => {
+    const keyword = normalizeText(invoiceSearch);
+    const matchesSearch = (row) => {
+      if (!keyword) {
+        return true;
+      }
+      const customerName = normalizeText(row?.customer?.name || '');
+      const customerPhone = normalizeText(row?.customer?.phone || '');
+      const invoiceNo = normalizeText(row?.invoice?.invoice_no || '');
+      const orderId = normalizeText(row?.id || row?.order?.id || '');
+      const approvalLabel = normalizeText(row?.approval?.requestLabel || '');
+      const approvalType = normalizeText(row?.approval?.typeLabel || row?.approval?.type || '');
+      const approvalContext = normalizeText(row?.approval?.contextLabel || '');
+      const approvalNote = normalizeText(row?.approval?.decisionNote || '');
+      return customerName.includes(keyword)
+        || customerPhone.includes(keyword)
+        || invoiceNo.includes(keyword)
+        || orderId.includes(keyword)
+        || approvalLabel.includes(keyword)
+        || approvalType.includes(keyword)
+        || approvalContext.includes(keyword)
+        || approvalNote.includes(keyword);
+    };
+    const normalizeRows = (rows = [], predicate = () => true) => (
+      filterInvoiceRowsForUser(rows, currentUser)
+        .filter((row) => isInvoiceRowInDateRange(row, invoiceDateFrom, invoiceDateTo))
+        .filter(matchesSearch)
+        .filter(predicate)
+    );
+    const snapshot = invoiceWorkspaceRowsByArea && typeof invoiceWorkspaceRowsByArea === 'object'
+      ? invoiceWorkspaceRowsByArea
+      : {};
+    const visibleRows = Array.isArray(visibleInvoiceRows) ? visibleInvoiceRows : [];
+
+    return {
+      draft: normalizeRows(
+        mergeInvoiceRows(snapshot.draft, visibleRows.filter((row) => isDraftInvoiceRow(row))),
+        (row) => isDraftInvoiceRow(row),
+      ),
+      success: normalizeRows(
+        mergeInvoiceRows(snapshot.success, visibleRows.filter((row) => isInvoiceSuccessRow(row))),
+        (row) => isInvoiceSuccessRow(row),
+      ),
+      approval: normalizeRows(
+        mergeInvoiceRows(snapshot.approval, visibleRows.filter((row) => isReceivableApprovalInvoiceRow(row))),
+        (row) => {
+          const approvalStatus = normalizeReceivableApprovalStatus(row?.approval?.status || row?.status);
+          return isReceivableApprovalInvoiceRow(row) && approvalStatus !== 'resolved';
+        },
+      ),
+      receivable: normalizeRows(
+        mergeInvoiceRows(snapshot.receivable, visibleRows.filter((row) => isReceivableInvoiceRow(row))),
+        (row) => isReceivableInvoiceRow(row),
+      ),
+    };
+  }, [currentUser, invoiceDateFrom, invoiceDateTo, invoiceSearch, invoiceWorkspaceRowsByArea, visibleInvoiceRows]);
   const invoiceAreaSummary = useMemo(() => {
-    const rows = Array.isArray(dateFilteredInvoiceRows) ? dateFilteredInvoiceRows : [];
-    const totals = rows.reduce((acc, row) => {
-      const totalAmount = resolveInvoiceRowTotalAmount(row);
-      if (isDraftInvoiceRow(row)) {
-        acc.draftCount += 1;
-        acc.draftAmount += totalAmount;
-      }
-      if (isInvoiceSuccessRow(row)) {
-        acc.successCount += 1;
-        acc.successAmount += totalAmount;
-      }
-      if (isReceivableApprovalInvoiceRow(row)) {
-        const approvalStatus = normalizeReceivableApprovalStatus(row?.approval?.status || row?.status);
-        if (approvalStatus !== 'resolved') {
-          acc.approvalCount += 1;
-        }
-      }
-      if (isReceivableInvoiceRow(row)) {
-        acc.receivableCount += 1;
-        acc.receivableDueTotal += Number(row?.invoice?.due_total || 0);
-      }
-      return acc;
-    }, {
+    const summaryRows = invoiceSummaryRowsByArea && typeof invoiceSummaryRowsByArea === 'object'
+      ? invoiceSummaryRowsByArea
+      : {};
+    const totals = {
       draftCount: 0,
       draftAmount: 0,
       successCount: 0,
@@ -15352,6 +16064,22 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       approvalCount: 0,
       receivableCount: 0,
       receivableDueTotal: 0,
+    };
+    (Array.isArray(summaryRows.draft) ? summaryRows.draft : []).forEach((row) => {
+      const totalAmount = resolveInvoiceRowTotalAmount(row);
+      totals.draftCount += 1;
+      totals.draftAmount += totalAmount;
+    });
+    (Array.isArray(summaryRows.success) ? summaryRows.success : []).forEach((row) => {
+      totals.successCount += 1;
+      totals.successAmount += resolveInvoiceRowTotalAmount(row);
+    });
+    (Array.isArray(summaryRows.approval) ? summaryRows.approval : []).forEach(() => {
+      totals.approvalCount += 1;
+    });
+    (Array.isArray(summaryRows.receivable) ? summaryRows.receivable : []).forEach((row) => {
+      totals.receivableCount += 1;
+      totals.receivableDueTotal += Number(row?.invoice?.due_total || 0);
     });
 
     return {
@@ -15360,7 +16088,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       successAmount: roundMoney(totals.successAmount),
       receivableDueTotal: roundMoney(totals.receivableDueTotal),
     };
-  }, [dateFilteredInvoiceRows]);
+  }, [invoiceSummaryRowsByArea]);
   const invoiceSectionMeta = useMemo(() => {
     if (invoiceFilter === 'draft') {
       return {
@@ -16661,7 +17389,11 @@ const SalesScreen = ({ currentUser, onLogout }) => {
           </View>
           <View style={styles.topRightActions}>
             <Pressable style={styles.notificationButton} onPress={handleNotificationPress}>
-              <Text style={styles.notificationIconText}>{'\uD83D\uDD14'}</Text>
+              <Image
+                source={require('../../assets/menu-icons/notification.svg')}
+                style={styles.notificationIconImage}
+                resizeMode="contain"
+              />
               {unreadProductionCount > 0 ? (
                 <View style={styles.notificationBadge}>
                   <Text style={styles.notificationBadgeText}>
@@ -17042,6 +17774,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                     const canContinueDraftRow = isDraftRow && (row?.__source === 'queue' || isDraftCandidate(row));
                     const canDeleteDraftRow = canContinueDraftRow;
                     const isPaidInvoice = paymentLifecycle.key === 'paid';
+                    const canPrintBillingNote = !isApprovalRow && !isPaidInvoice && (isDraftRow || dueTotal > 0 || total > paidTotal);
                     const hasApprovedReceivableApproval = Boolean(
                       approvalInfo
                       && approvalType === 'receivable'
@@ -17116,6 +17849,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                         canDeleteDraft={canDeleteDraftRow}
                         canPayReceivable={canPayReceivable}
                         canOpenProviderPayment={providerPaymentCanResume}
+                        canPrintBillingNote={canPrintBillingNote}
                         onContinueDraft={() => handleContinueDraft(row)}
                         onDeleteDraft={() => confirmDeleteDraft(row)}
                         onViewDetail={() => handleViewInvoiceDetail(row)}
@@ -17126,6 +17860,8 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                         onResolveManualApproval={() => openManualApprovalDecisionModal(row, 'resolve')}
                         onOpenReceivablePayment={() => handleOpenReceivablePaymentModal(row)}
                         onReprintInvoice={() => handleReprintInvoice(row)}
+                        onPrintBillingNote={() => handlePrintBillingNote(row)}
+                        onShareBillingNote={() => handleShareBillingNote(row)}
                       />
                   );
                 })}
@@ -17177,6 +17913,8 @@ const SalesScreen = ({ currentUser, onLogout }) => {
               onViewHistory={handleViewProofingHistory}
               onSendWhatsapp={handleSendProofingWhatsapp}
               onReleaseToProduction={handleReleaseProofingToProduction}
+              onPrintBillingNote={handlePrintBillingNote}
+              onShareBillingNote={handleShareBillingNote}
               processingProofingId={processingProofingId}
             />
           ) : activeMenu === 'purchase_material' ? (
@@ -19489,11 +20227,9 @@ const styles = StyleSheet.create({
     fontSize: 8,
     fontWeight: '800',
   },
-  notificationIconText: {
-    color: '#ffffff',
-    fontSize: 13,
-    fontWeight: '800',
-    lineHeight: 15,
+  notificationIconImage: {
+    width: 16,
+    height: 16,
   },
   profileMenuWrap: {
     position: 'relative',

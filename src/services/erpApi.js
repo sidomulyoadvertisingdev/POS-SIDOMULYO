@@ -317,11 +317,29 @@ const request = async (path, options = {}, retryOnAuth = true) => {
     ...requestOptions
   } = options || {};
   const requestUrl = `${API_BASE_URL}${path}`;
-  const response = await fetchWithTimeout(requestUrl, {
-    ...requestOptions,
-    timeoutMs,
-    headers: isFormData ? buildAuthHeaders(extraHeaders) : buildHeaders(extraHeaders),
-  });
+  let response;
+  try {
+    response = await fetchWithTimeout(requestUrl, {
+      ...requestOptions,
+      timeoutMs,
+      headers: isFormData ? buildAuthHeaders(extraHeaders) : buildHeaders(extraHeaders),
+    });
+  } catch (error) {
+    const rawMessage = String(error?.message || '').trim();
+    const isBrowserNetworkFailure = ['failed to fetch', 'load failed', 'networkerror when attempting to fetch resource.']
+      .includes(rawMessage.toLowerCase());
+    if (isBrowserNetworkFailure) {
+      const friendlyError = new Error(
+        isFormData
+          ? 'Koneksi upload gagal sebelum backend mengirim detail. Biasanya karena file terlalu besar, CORS, koneksi putus, atau limit upload server/nginx.'
+          : 'Koneksi ke backend gagal sebelum server mengirim detail. Cek jaringan, CORS, dan URL backend.',
+      );
+      friendlyError.status = 0;
+      friendlyError.cause = error;
+      throw friendlyError;
+    }
+    throw error;
+  }
 
   if (response.redirected && typeof response.url === 'string') {
     const redirectedUrl = String(response.url || '');

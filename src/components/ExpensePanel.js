@@ -4,26 +4,8 @@ import {
   createPosCashFlow,
   fetchPosBankAccounts,
   getPengeluaranCategoryOptions,
-  getPengeluaranDetail,
-  getPengeluaranList,
 } from '../services/erpApi';
 import { formatRupiah } from '../utils/currency';
-
-const formatDateLabel = (value) => {
-  const text = String(value || '').trim();
-  if (!text) {
-    return '-';
-  }
-  const parsed = new Date(text);
-  if (Number.isNaN(parsed.getTime())) {
-    return text;
-  }
-  return parsed.toLocaleDateString('id-ID', {
-    day: '2-digit',
-    month: 'long',
-    year: 'numeric',
-  });
-};
 
 const todayIso = () => new Date().toISOString().slice(0, 10);
 
@@ -51,14 +33,6 @@ const sanitizeCurrencyInput = (value) => String(value || '').replace(/[^\d]/g, '
 const parseCurrencyInput = (value) => Number(sanitizeCurrencyInput(value) || 0);
 
 const isIsoDate = (value) => /^\d{4}-\d{2}-\d{2}$/.test(toSafeText(value));
-
-const resolveStatusTone = (status = '') => {
-  const normalized = String(status || '').trim().toLowerCase();
-  if (normalized === 'posted') return styles.statusSuccess;
-  if (normalized === 'linked_request') return styles.statusWarning;
-  if (normalized === 'draft_local') return styles.statusMuted;
-  return styles.statusMuted;
-};
 
 const resolveCategoryTypeLabel = (value = '') => {
   const normalized = normalizeText(value);
@@ -162,16 +136,6 @@ const matchesCategorySearch = (row, keyword) => {
 };
 
 const ExpensePanel = ({ isActive, onNotify }) => {
-  const [rows, setRows] = useState([]);
-  const [selectedRowId, setSelectedRowId] = useState('');
-  const [selectedDetail, setSelectedDetail] = useState(null);
-  const [isLoading, setIsLoading] = useState(false);
-  const [isDetailLoading, setIsDetailLoading] = useState(false);
-  const [search, setSearch] = useState('');
-  const [dateFrom, setDateFrom] = useState(todayIso());
-  const [dateTo, setDateTo] = useState(todayIso());
-  const [todoInfo, setTodoInfo] = useState(null);
-
   const [expenseDate, setExpenseDate] = useState(todayIso());
   const [amountInput, setAmountInput] = useState('');
   const [noteInput, setNoteInput] = useState('');
@@ -218,46 +182,6 @@ const ExpensePanel = ({ isActive, onNotify }) => {
   ), [categoryItemRows, categoryItemSearch]);
 
   const amountValue = parseCurrencyInput(amountInput);
-
-  const loadRows = async (preferredSelectedId = '') => {
-    try {
-      setIsLoading(true);
-      const response = await getPengeluaranList({
-        per_page: 50,
-        search,
-        date_from: dateFrom,
-        date_to: dateTo,
-      });
-      const nextRows = Array.isArray(response?.data) ? response.data : [];
-      const preferredId = toSafeText(preferredSelectedId);
-      const currentId = toSafeText(selectedRowId);
-      const matchedPreferred = preferredId
-        ? nextRows.find((row) => toSafeText(row?.id) === preferredId) || null
-        : null;
-      const matchedCurrent = currentId
-        ? nextRows.find((row) => toSafeText(row?.id) === currentId) || null
-        : null;
-
-      setRows(nextRows);
-      setTodoInfo(response?.todo || null);
-
-      if (matchedPreferred?.id) {
-        setSelectedRowId(toSafeText(matchedPreferred.id));
-      } else if (matchedCurrent?.id) {
-        setSelectedRowId(toSafeText(matchedCurrent.id));
-      } else if (nextRows[0]?.id) {
-        setSelectedRowId(toSafeText(nextRows[0].id));
-      } else {
-        setSelectedRowId('');
-        setSelectedDetail(null);
-      }
-    } catch (error) {
-      setRows([]);
-      onNotify?.('Pengeluaran', `Gagal memuat daftar pengeluaran: ${error.message}`);
-    } finally {
-      setIsLoading(false);
-    }
-  };
 
   const loadMasterData = async () => {
     setIsCategoriesLoading(true);
@@ -348,7 +272,7 @@ const ExpensePanel = ({ isActive, onNotify }) => {
       return;
     }
     if (!categoryItemRows.length) {
-      onNotify?.('Pengeluaran', 'Kategori ini belum punya daftar isi popup backend. Lengkapi dulu itemnya di backend bila ingin kasir memilih detail pengeluaran dari popup.');
+      onNotify?.('Pengeluaran', 'Kategori ini belum punya daftar isi popup backend. Lengkapi dulu itemnya di backend bila ingin kasir memilih isi kategori dari popup.');
       return;
     }
     setCategoryItemSearch('');
@@ -433,11 +357,9 @@ const ExpensePanel = ({ isActive, onNotify }) => {
           || 0,
         ) || null,
       };
-      const result = await createPosCashFlow(payload);
-      const createdId = toSafeText(result?.data?.id || result?.id);
+      await createPosCashFlow(payload);
 
       resetFormAfterSubmit();
-      await loadRows(createdId);
       onNotify?.('Pengeluaran', 'Pengeluaran berhasil disimpan ke backend.');
     } catch (error) {
       onNotify?.('Pengeluaran', `Gagal menyimpan pengeluaran: ${error.message}`);
@@ -450,7 +372,6 @@ const ExpensePanel = ({ isActive, onNotify }) => {
     if (!isActive) {
       return;
     }
-    loadRows();
     loadMasterData();
   }, [isActive]);
 
@@ -464,38 +385,6 @@ const ExpensePanel = ({ isActive, onNotify }) => {
     }
   }, [categoryItemRows, selectedCategoryItemId]);
 
-  useEffect(() => {
-    if (!isActive || !selectedRowId) {
-      setSelectedDetail(null);
-      return;
-    }
-
-    let cancelled = false;
-    const loadDetail = async () => {
-      try {
-        setIsDetailLoading(true);
-        const detail = await getPengeluaranDetail(selectedRowId);
-        if (!cancelled) {
-          setSelectedDetail(detail);
-        }
-      } catch (error) {
-        if (!cancelled) {
-          setSelectedDetail(null);
-          onNotify?.('Pengeluaran', `Gagal memuat detail pengeluaran: ${error.message}`);
-        }
-      } finally {
-        if (!cancelled) {
-          setIsDetailLoading(false);
-        }
-      }
-    };
-
-    loadDetail();
-    return () => {
-      cancelled = true;
-    };
-  }, [isActive, onNotify, selectedRowId]);
-
   return (
     <View style={styles.panel}>
       <View style={styles.headerRow}>
@@ -506,11 +395,10 @@ const ExpensePanel = ({ isActive, onNotify }) => {
           </Text>
         </View>
         <Pressable style={styles.refreshButton} onPress={() => {
-          loadRows();
           loadMasterData();
         }}
         >
-          <Text style={styles.refreshButtonText}>{isLoading || isCategoriesLoading || isAccountsLoading ? 'Memuat...' : 'Refresh'}</Text>
+          <Text style={styles.refreshButtonText}>{isCategoriesLoading || isAccountsLoading ? 'Memuat...' : 'Refresh'}</Text>
         </Pressable>
       </View>
 
@@ -690,133 +578,6 @@ const ExpensePanel = ({ isActive, onNotify }) => {
         </Pressable>
       </View>
 
-      {todoInfo?.backendReferenceFieldRequired ? (
-        <View style={styles.todoCard}>
-          <Text style={styles.todoText}>
-            TODO backend: detail pengeluaran dan referensi ke pembelian bahan/request gudang saat ini masih best-effort. Backend cash flow belum punya field referensi khusus.
-          </Text>
-        </View>
-      ) : null}
-
-      <View style={styles.filterCard}>
-        <Text style={styles.cardTitle}>Filter Riwayat Pengeluaran</Text>
-        <TextInput
-          value={search}
-          onChangeText={setSearch}
-          placeholder="Cari kategori / nomor / catatan / referensi..."
-          placeholderTextColor="#7a7a7a"
-          style={styles.input}
-        />
-        <View style={styles.inlineRow}>
-          <View style={styles.inlineField}>
-            <Text style={styles.label}>Tanggal Dari</Text>
-            <TextInput
-              value={dateFrom}
-              onChangeText={setDateFrom}
-              placeholder="YYYY-MM-DD"
-              placeholderTextColor="#7a7a7a"
-              style={styles.input}
-            />
-          </View>
-          <View style={styles.inlineField}>
-            <Text style={styles.label}>Tanggal Sampai</Text>
-            <TextInput
-              value={dateTo}
-              onChangeText={setDateTo}
-              placeholder="YYYY-MM-DD"
-              placeholderTextColor="#7a7a7a"
-              style={styles.input}
-            />
-          </View>
-        </View>
-        <Pressable style={styles.primaryButton} onPress={() => loadRows()}>
-          <Text style={styles.primaryButtonText}>Terapkan Filter</Text>
-        </Pressable>
-      </View>
-
-      <View style={styles.contentGrid}>
-        <View style={styles.contentColumn}>
-          <View style={styles.card}>
-            <Text style={styles.cardTitle}>List Pengeluaran</Text>
-            {isLoading ? (
-              <Text style={styles.helperText}>Sedang memuat data pengeluaran...</Text>
-            ) : rows.length > 0 ? (
-              rows.map((row) => {
-                const active = String(selectedRowId || '') === String(row?.id || '');
-                return (
-                  <Pressable
-                    key={`expense-row-${row?.id || row?.transaction_no}`}
-                    style={[styles.rowCard, active ? styles.rowCardActive : null]}
-                    onPress={() => setSelectedRowId(String(row?.id || ''))}
-                  >
-                    <View style={styles.rowHeader}>
-                      <Text style={styles.rowTitle}>{row?.transaction_no || '-'}</Text>
-                      <View style={[styles.statusBadge, resolveStatusTone(row?.status)]}>
-                        <Text style={styles.statusBadgeText}>{row?.status_label || row?.status || '-'}</Text>
-                      </View>
-                    </View>
-                    <Text style={styles.rowMeta}>{formatDateLabel(row?.occurred_at)}</Text>
-                    <Text style={styles.rowMeta}>Kategori: {row?.category || '-'}</Text>
-                    {row?.category_item_name ? (
-                      <Text style={styles.rowMeta}>Isi Kategori: {row.category_item_name}</Text>
-                    ) : null}
-                    <Text style={styles.rowAmount}>{formatRupiah(row?.amount || 0)}</Text>
-                    <Text style={styles.rowMeta}>
-                      Referensi: {row?.reference?.request_no ? `${row.reference.request_no} (${row.reference.label || 'Pembelian Bahan'})` : 'Belum ada referensi backend'}
-                    </Text>
-                    {row?.note ? <Text style={styles.rowNote}>{row.note}</Text> : null}
-                  </Pressable>
-                );
-              })
-            ) : (
-              <Text style={styles.helperText}>Belum ada pengeluaran untuk filter yang dipilih.</Text>
-            )}
-          </View>
-        </View>
-
-        <View style={styles.contentColumn}>
-          <View style={styles.card}>
-            <Text style={styles.cardTitle}>Detail Pengeluaran</Text>
-            {isDetailLoading ? (
-              <Text style={styles.helperText}>Sedang memuat detail pengeluaran...</Text>
-            ) : selectedDetail ? (
-              <>
-                <View style={styles.rowHeader}>
-                  <Text style={styles.detailTitle}>{selectedDetail?.transaction_no || '-'}</Text>
-                  <View style={[styles.statusBadge, resolveStatusTone(selectedDetail?.status)]}>
-                    <Text style={styles.statusBadgeText}>{selectedDetail?.status_label || selectedDetail?.status || '-'}</Text>
-                  </View>
-                </View>
-                <Text style={styles.rowMeta}>Tanggal: {formatDateLabel(selectedDetail?.occurred_at)}</Text>
-                <Text style={styles.rowMeta}>Kategori/Jenis: {selectedDetail?.category || '-'}</Text>
-                {selectedDetail?.category_item_name ? (
-                  <Text style={styles.rowMeta}>Isi Kategori: {selectedDetail.category_item_name}</Text>
-                ) : null}
-                <Text style={styles.rowMeta}>Requester: {selectedDetail?.requester?.name || '-'}</Text>
-                <Text style={styles.rowMeta}>
-                  Referensi: {selectedDetail?.reference?.request_no ? `${selectedDetail.reference.request_no} - ${selectedDetail.reference.label || 'Pembelian Bahan ke Gudang'}` : 'Belum ada referensi backend'}
-                </Text>
-                <View style={styles.totalCard}>
-                  <Text style={styles.totalLabel}>Nominal Pengeluaran</Text>
-                  <Text style={styles.totalValue}>{formatRupiah(selectedDetail?.amount || 0)}</Text>
-                </View>
-                <View style={styles.noteCard}>
-                  <Text style={styles.noteLabel}>Catatan</Text>
-                  <Text style={styles.noteValue}>{selectedDetail?.note || '-'}</Text>
-                </View>
-                {selectedDetail?.backend_detail_todo ? (
-                  <Text style={styles.todoInlineText}>
-                    TODO backend: endpoint detail pengeluaran per ID belum tersedia, jadi detail saat ini berasal dari list dan draft lokal.
-                  </Text>
-                ) : null}
-              </>
-            ) : (
-              <Text style={styles.helperText}>Pilih salah satu pengeluaran dari list untuk melihat detailnya.</Text>
-            )}
-          </View>
-        </View>
-      </View>
-
       <Modal
         visible={isCategoryModalVisible}
         transparent
@@ -898,7 +659,7 @@ const ExpensePanel = ({ isActive, onNotify }) => {
 
             <Text style={styles.modalHelperText}>
               {selectedCategory?.name
-                ? `Kasir memilih detail pengeluaran untuk kategori ${selectedCategory.name} langsung dari backend.`
+                ? `Kasir memilih isi kategori ${selectedCategory.name} langsung dari backend.`
                 : 'Pilih kategori pengeluaran terlebih dahulu.'}
             </Text>
 
@@ -1015,27 +776,6 @@ const styles = StyleSheet.create({
     color: '#174a8c',
     fontSize: 12,
     fontWeight: '800',
-  },
-  todoCard: {
-    borderWidth: 1,
-    borderColor: '#f7b955',
-    backgroundColor: '#fff7e6',
-    borderRadius: 12,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-  },
-  todoText: {
-    fontSize: 11,
-    lineHeight: 16,
-    color: '#8a5a00',
-    fontWeight: '700',
-  },
-  filterCard: {
-    borderWidth: 1,
-    borderColor: '#c8d8f2',
-    backgroundColor: '#ffffff',
-    borderRadius: 16,
-    padding: 14,
   },
   card: {
     borderWidth: 1,
@@ -1206,130 +946,6 @@ const styles = StyleSheet.create({
     color: '#b42318',
     fontWeight: '700',
     marginBottom: 6,
-  },
-  contentGrid: {
-    flexDirection: 'row',
-    gap: 10,
-    flexWrap: 'wrap',
-  },
-  contentColumn: {
-    flex: 1,
-    minWidth: 300,
-  },
-  rowCard: {
-    borderWidth: 1,
-    borderColor: '#dce5f4',
-    backgroundColor: '#fbfdff',
-    borderRadius: 12,
-    padding: 12,
-    marginBottom: 10,
-  },
-  rowCardActive: {
-    borderColor: '#0755b8',
-    backgroundColor: '#eef4ff',
-  },
-  rowHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    gap: 10,
-    marginBottom: 6,
-  },
-  rowTitle: {
-    flex: 1,
-    fontSize: 12,
-    fontWeight: '900',
-    color: '#173c87',
-  },
-  detailTitle: {
-    flex: 1,
-    fontSize: 14,
-    fontWeight: '900',
-    color: '#173c87',
-  },
-  rowMeta: {
-    fontSize: 11,
-    color: '#52606d',
-    marginBottom: 4,
-  },
-  rowAmount: {
-    fontSize: 16,
-    fontWeight: '900',
-    color: '#101828',
-    marginTop: 4,
-    marginBottom: 4,
-  },
-  rowNote: {
-    fontSize: 11,
-    lineHeight: 16,
-    color: '#435674',
-  },
-  statusBadge: {
-    borderRadius: 999,
-    paddingHorizontal: 10,
-    paddingVertical: 4,
-  },
-  statusWarning: {
-    backgroundColor: '#fff4db',
-  },
-  statusSuccess: {
-    backgroundColor: '#dff7e8',
-  },
-  statusMuted: {
-    backgroundColor: '#e9eff5',
-  },
-  statusBadgeText: {
-    fontSize: 10,
-    fontWeight: '900',
-    color: '#173c87',
-    textTransform: 'uppercase',
-  },
-  totalCard: {
-    borderWidth: 1,
-    borderColor: '#b9d6ff',
-    backgroundColor: '#eef6ff',
-    borderRadius: 12,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    marginTop: 10,
-    marginBottom: 10,
-  },
-  totalLabel: {
-    fontSize: 11,
-    fontWeight: '800',
-    color: '#35507a',
-    textTransform: 'uppercase',
-    marginBottom: 4,
-  },
-  totalValue: {
-    fontSize: 20,
-    fontWeight: '900',
-    color: '#101828',
-  },
-  noteCard: {
-    borderWidth: 1,
-    borderColor: '#e4e7eb',
-    backgroundColor: '#fbfdff',
-    borderRadius: 12,
-    padding: 12,
-  },
-  noteLabel: {
-    fontSize: 11,
-    fontWeight: '800',
-    color: '#435674',
-    marginBottom: 4,
-  },
-  noteValue: {
-    fontSize: 11,
-    lineHeight: 16,
-    color: '#243b53',
-  },
-  todoInlineText: {
-    marginTop: 10,
-    fontSize: 11,
-    lineHeight: 16,
-    color: '#8a5a00',
-    fontWeight: '700',
   },
   helperText: {
     fontSize: 11,

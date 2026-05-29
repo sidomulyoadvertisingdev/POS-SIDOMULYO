@@ -67,6 +67,7 @@ const InvoiceWorkspaceRowCard = ({
   canDeleteDraft,
   canPayReceivable,
   canOpenProviderPayment,
+  canPrintBillingNote,
   onContinueDraft,
   onDeleteDraft,
   onViewDetail,
@@ -77,6 +78,8 @@ const InvoiceWorkspaceRowCard = ({
   onResolveManualApproval,
   onOpenReceivablePayment,
   onReprintInvoice,
+  onPrintBillingNote,
+  onShareBillingNote,
 }) => (
   <View style={styles.draftCard}>
     <View style={styles.draftInfo}>
@@ -275,6 +278,16 @@ const InvoiceWorkspaceRowCard = ({
               )}
             </Pressable>
           ) : null}
+          {canPrintBillingNote ? (
+            <>
+              <Pressable style={styles.approvalResolveButton} onPress={onPrintBillingNote}>
+                <Text style={styles.approvalResolveButtonText}>Print Tagihan</Text>
+              </Pressable>
+              <Pressable style={styles.refreshButton} onPress={onShareBillingNote}>
+                <Text style={styles.refreshButtonText}>Share Tagihan</Text>
+              </Pressable>
+            </>
+          ) : null}
         </>
       ) : (
         <>
@@ -319,6 +332,16 @@ const InvoiceWorkspaceRowCard = ({
                 {canPayReceivable ? 'Bayar Piutang' : 'Belum Bisa Dibayar'}
               </Text>
             </Pressable>
+          ) : null}
+          {canPrintBillingNote ? (
+            <>
+              <Pressable style={styles.approvalResolveButton} onPress={onPrintBillingNote}>
+                <Text style={styles.approvalResolveButtonText}>Print Tagihan</Text>
+              </Pressable>
+              <Pressable style={styles.refreshButton} onPress={onShareBillingNote}>
+                <Text style={styles.refreshButtonText}>Share Tagihan</Text>
+              </Pressable>
+            </>
           ) : null}
           {!isApprovalRow ? (
             <Pressable style={styles.refreshButton} onPress={onReprintInvoice}>

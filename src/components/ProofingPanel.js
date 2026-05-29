@@ -223,6 +223,8 @@ const ProofingPanel = ({
   onViewHistory,
   onSendWhatsapp,
   onReleaseToProduction,
+  onPrintBillingNote,
+  onShareBillingNote,
   processingProofingId,
 }) => {
   const [selectedProofingId, setSelectedProofingId] = useState(null);
@@ -568,6 +570,18 @@ const ProofingPanel = ({
               variant="purple"
               disabled={!selectedRow || selectedBusy || selectedReleaseState.releasedToProduction}
               onPress={() => onReleaseToProduction?.(selectedRow)}
+            />
+            <ActionButton
+              label="Print Tagihan"
+              variant="ghost"
+              disabled={!selectedRow || selectedBusy}
+              onPress={() => onPrintBillingNote?.(selectedRow)}
+            />
+            <ActionButton
+              label="Share Tagihan"
+              variant="ghost"
+              disabled={!selectedRow || selectedBusy}
+              onPress={() => onShareBillingNote?.(selectedRow)}
             />
           </View>
           {!selectedReleaseState.precheckReady && !selectedReleaseState.releasedToProduction ? (
