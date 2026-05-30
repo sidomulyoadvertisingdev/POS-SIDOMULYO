@@ -4577,6 +4577,8 @@ const DEFAULT_RECEIPT_SETTINGS = {
   receipt_store_phone: '',
   receipt_header_text: '',
   receipt_footer: 'Terima kasih sudah berbelanja.',
+  receipt_hotline: '',
+  receipt_review_qr_url: '',
   receipt_show_order_id: true,
   receipt_show_cashier: true,
   receipt_show_customer: true,
@@ -4610,6 +4612,8 @@ const normalizeReceiptSettings = (value = null) => {
     receipt_store_phone: toLabel(raw.receipt_store_phone, nested.store_phone, DEFAULT_RECEIPT_SETTINGS.receipt_store_phone),
     receipt_header_text: toLabel(raw.receipt_header_text, nested.header_text, DEFAULT_RECEIPT_SETTINGS.receipt_header_text),
     receipt_footer: toLabel(raw.receipt_footer, nested.footer, DEFAULT_RECEIPT_SETTINGS.receipt_footer),
+    receipt_hotline: toLabel(raw.receipt_hotline, raw.hotline, nested.hotline, DEFAULT_RECEIPT_SETTINGS.receipt_hotline),
+    receipt_review_qr_url: toLabel(raw.receipt_review_qr_url, raw.review_qr_url, nested.review_qr_url, DEFAULT_RECEIPT_SETTINGS.receipt_review_qr_url),
     receipt_show_order_id: raw.receipt_show_order_id ?? nested.show_order_id ?? DEFAULT_RECEIPT_SETTINGS.receipt_show_order_id,
     receipt_show_cashier: raw.receipt_show_cashier ?? nested.show_cashier ?? DEFAULT_RECEIPT_SETTINGS.receipt_show_cashier,
     receipt_show_customer: raw.receipt_show_customer ?? nested.show_customer ?? DEFAULT_RECEIPT_SETTINGS.receipt_show_customer,
@@ -6909,6 +6913,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         : 'Thermal 80mm';
     return `${paperLabel} | ${profile.charsPerLine || '-'} karakter per baris`;
   }, [activePrinterProfile]);
+  const posReceiptSettings = useMemo(() => normalizeReceiptSettings(posSettings), [posSettings]);
 
   const handlePrinterProfileChange = (nextProfile) => {
     const defaultProfile = getDefaultPrinterProfile();
@@ -8890,19 +8895,8 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         tagline: receiptSettings.brand_tagline || 'Advertising & Printing Solution',
         address: receiptSettings.receipt_store_address || 'Jl. Kartini No.108 Salatiga',
         phone: receiptSettings.receipt_store_phone || 'WA: 0888-0888-8880 | IG: @sidomulyoprintingadvertising',
-        hotline: toLabel(
-          posSettings?.receipt_hotline,
-          posSettings?.hotline,
-          posSettings?.receipt?.hotline,
-          '+62 888-6858-761',
-        ),
-        reviewQrUrl: toLabel(
-          posSettings?.receipt_review_qr_url,
-          posSettings?.review_qr_url,
-          posSettings?.receipt?.review_qr_url,
-          paymentOptions.qrisImageUrl,
-          '',
-        ),
+        hotline: receiptSettings.receipt_hotline || '+62 888-6858-761',
+        reviewQrUrl: receiptSettings.receipt_review_qr_url || paymentOptions.qrisImageUrl || '',
       },
       transaction: {
         billingNo: buildBillingNoteNumber(sourceRow),
@@ -18279,6 +18273,24 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                 <Text style={styles.printerTargetLabel}>Ukuran Kertas Aktif</Text>
                 <Text style={styles.printerTargetPrimary}>{printerPaperSummary}</Text>
                 <Text style={styles.printerTargetSecondary}>Pilih `58mm`, `80mm`, atau `custom` sesuai printer struk yang dipakai.</Text>
+              </View>
+              <View style={styles.printerTargetCard}>
+                <Text style={styles.printerTargetLabel}>Setting Nota dari Backend</Text>
+                <Text style={styles.printerTargetPrimary}>{posReceiptSettings.brand_name || 'Nama toko belum diatur'}</Text>
+                <Text style={styles.printerTargetSecondary}>{posReceiptSettings.receipt_store_address || 'Alamat nota belum diatur'}</Text>
+                <Text style={styles.printerTargetSecondary}>{posReceiptSettings.receipt_store_phone || 'Kontak nota belum diatur'}</Text>
+              </View>
+              <View style={styles.printerTargetCard}>
+                <Text style={styles.printerTargetLabel}>Baris Nota Aktif</Text>
+                <Text style={styles.printerTargetPrimary}>
+                  {[
+                    posReceiptSettings.receipt_show_order_id ? 'No Order' : null,
+                    posReceiptSettings.receipt_show_cashier ? 'Kasir' : null,
+                    posReceiptSettings.receipt_show_customer ? 'Customer' : null,
+                    posReceiptSettings.receipt_show_payment_detail ? 'Pembayaran' : null,
+                  ].filter(Boolean).join(' | ') || 'Semua baris opsional disembunyikan'}
+                </Text>
+                <Text style={styles.printerTargetSecondary}>Ubah dari Backend: Point Of Sale > Pengaturan POS.</Text>
               </View>
               <Text style={styles.debugText}>{printerProfileSummary}</Text>
               <View style={styles.printerToolsCard}>
