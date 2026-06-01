@@ -6010,32 +6010,10 @@ const isDraftCandidate = (row) => {
     row?.invoice?.notes,
     row?.invoice?.note,
   ].filter(Boolean).join('\n').toLowerCase();
-  if (!notes.includes('mode: simpan draft')) {
-    const snapshotCandidates = [
-      row?.draft_form,
-      row?.draft_snapshot,
-      row?.spec_snapshot,
-      row?.order?.draft_form,
-      row?.order?.draft_snapshot,
-      row?.order?.spec_snapshot,
-    ];
-    const sourceRows = []
-      .concat(Array.isArray(row?.items) ? row.items : [])
-      .concat(Array.isArray(row?.order_items) ? row.order_items : [])
-      .concat(Array.isArray(row?.order?.items) ? row.order.items : []);
-    sourceRows.forEach((item) => {
-      snapshotCandidates.push(item?.draft_form, item?.draft_snapshot, item?.spec_snapshot);
-    });
-    return snapshotCandidates.some((value) => {
-      const snapshot = parseJsonObject(value) || {};
-      return Boolean(
-        snapshot?.draft_form
-        || snapshot?.draft_restore
-        || snapshot?.is_draft
-      );
-    });
+  if (notes.includes('sales_draft')) {
+    return true;
   }
-  return !notes.includes('mode: proses orderan');
+  return notes.includes('mode: simpan draft') && !notes.includes('mode: proses orderan');
 };
 const hasSnapshotObjectShape = (value) => Boolean(
   value
@@ -12870,6 +12848,66 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     return nextCache;
   };
 
+  const buildDraftServerRequestVariants = (baseRequest = {}) => ([
+    baseRequest,
+    {
+      ...baseRequest,
+      area: undefined,
+      status: 'draft',
+    },
+    {
+      ...baseRequest,
+      area: undefined,
+      status: undefined,
+      view: undefined,
+    },
+  ]);
+
+  const fetchRowsFromRequestVariants = async (requests = [], fetcher) => {
+    let mergedRows = [];
+    const errors = [];
+
+    for (const requestOptions of requests) {
+      try {
+        const nextRows = await fetcher(requestOptions);
+        mergedRows = mergeInvoiceRows(mergedRows, Array.isArray(nextRows) ? nextRows : []);
+      } catch (error) {
+        errors.push(error);
+      }
+    }
+
+    return {
+      rows: mergedRows,
+      error: errors.length > 0 ? errors[errors.length - 1] : null,
+      allFailed: mergedRows.length === 0 && errors.length === requests.length,
+    };
+  };
+
+  const fetchDraftWorkspaceRows = async (baseRequest = {}) => {
+    const requests = buildDraftServerRequestVariants(baseRequest);
+    const transactionResult = await fetchRowsFromRequestVariants(
+      requests,
+      (requestOptions) => fetchAllPosOrderTransactions(requestOptions),
+    );
+
+    if (!transactionResult.allFailed) {
+      return transactionResult;
+    }
+
+    const orderResult = await fetchRowsFromRequestVariants(
+      requests,
+      (requestOptions) => fetchAllPosOrders(requestOptions),
+    );
+
+    return {
+      rows: orderResult.rows,
+      error: orderResult.error
+        ? new Error(`${transactionResult.error?.message || 'Gagal memuat transaksi draft'}\nFallback daftar order juga gagal: ${orderResult.error.message}`)
+        : transactionResult.error,
+      allFailed: orderResult.allFailed,
+    };
+  };
+
   const updateInvoiceWorkspaceAreaSnapshot = (rows = [], options = {}) => {
     const area = String(options?.area || '').trim();
     const replaceAreas = new Set(
@@ -13017,16 +13055,11 @@ const SalesScreen = ({ currentUser, onLogout }) => {
               maxPages: 200,
             };
             if (invoiceRequestOptions.area === 'draft') {
-              const statusDraftRequest = {
-                ...baseRequest,
-                area: undefined,
-                status: 'draft',
-              };
-              const [areaRows, statusRows] = await Promise.all([
-                fetchAllPosOrderTransactions(baseRequest),
-                fetchAllPosOrderTransactions(statusDraftRequest),
-              ]);
-              rows = mergeInvoiceRows(areaRows, statusRows);
+              const draftLoadResult = await fetchDraftWorkspaceRows(baseRequest);
+              rows = draftLoadResult.rows;
+              if (draftLoadResult.error) {
+                invoiceLoadError = draftLoadResult.error;
+              }
             } else {
               rows = await fetchAllPosOrderTransactions(baseRequest);
             }
@@ -13050,20 +13083,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                 perPage: 200,
                 maxPages: 200,
               };
-              if (invoiceRequestOptions.area === 'draft') {
-                const statusDraftRequest = {
-                  ...baseRequest,
-                  area: undefined,
-                  status: 'draft',
-                };
-                const [areaRows, statusRows] = await Promise.all([
-                  fetchAllPosOrders(baseRequest),
-                  fetchAllPosOrders(statusDraftRequest),
-                ]);
-                rows = mergeInvoiceRows(areaRows, statusRows);
-              } else {
-                rows = await fetchAllPosOrders(baseRequest);
-              }
+              rows = await fetchAllPosOrders(baseRequest);
               pageMeta = {
                 currentPage: 1,
                 lastPage: 1,
@@ -13097,6 +13117,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         return !(approvalType === 'receivable' && approvalStatus === 'approved' && orderId > 0);
       });
       const baseRows = appendRows
+        || (invoiceLoadError && INVOICE_ACTIVE_WORK_AREAS.has(invoiceRequestOptions.area))
         ? (Array.isArray(draftInvoices) ? draftInvoices : [])
         : [];
       const mergedRows = mergeInvoiceRows(baseRows, [...queueRows, ...approvalListRows, ...rows]);
@@ -13109,12 +13130,14 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         hasMore: Boolean(pageMeta?.hasMore),
         total: Number(pageMeta?.total || rows.length || 0) || rows.length,
         searchMode,
-        source: invoiceRequestOptions.area === 'success' && nextSuccessCache.length > 0 ? 'server_cache_sync' : 'server',
+        source: invoiceLoadError
+          ? 'server_partial'
+          : (invoiceRequestOptions.area === 'success' && nextSuccessCache.length > 0 ? 'server_cache_sync' : 'server'),
       });
       markInvoiceRealtimeUpdatesApplied();
       hydrateDanaInvoiceMonitorsFromRows(mergedRows);
 
-      if (invoiceLoadError && mergedRows.length === 0) {
+      if (invoiceLoadError && mergedRows.length === 0 && invoiceRequestOptions.area !== 'draft') {
         openNotice('Invoice', `Gagal memuat invoice: ${invoiceLoadError.message}`);
       }
     } catch (error) {
@@ -13140,7 +13163,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       });
       markInvoiceRealtimeUpdatesApplied();
       hydrateDanaInvoiceMonitorsFromRows(queueRows);
-      if (queueRows.length === 0) {
+      if (queueRows.length === 0 && invoiceRequestOptions.area !== 'draft') {
         openNotice('Invoice', `Gagal memuat invoice: ${error.message}`);
       }
     } finally {
@@ -13189,16 +13212,8 @@ const SalesScreen = ({ currentUser, onLogout }) => {
               maxPages: 200,
             };
             if (String(area || '').trim() === 'draft') {
-              const statusDraftRequest = {
-                ...baseRequest,
-                area: undefined,
-                status: 'draft',
-              };
-              const [areaRows, statusRows] = await Promise.all([
-                fetchAllPosOrderTransactions(baseRequest),
-                fetchAllPosOrderTransactions(statusDraftRequest),
-              ]);
-              return mergeInvoiceRows(areaRows, statusRows);
+              const draftLoadResult = await fetchDraftWorkspaceRows(baseRequest);
+              return draftLoadResult.rows;
             }
             return await fetchAllPosOrderTransactions(baseRequest);
           }
@@ -13211,18 +13226,6 @@ const SalesScreen = ({ currentUser, onLogout }) => {
               perPage: 200,
               maxPages: 200,
             };
-            if (String(area || '').trim() === 'draft') {
-              const statusDraftRequest = {
-                ...baseRequest,
-                area: undefined,
-                status: 'draft',
-              };
-              const [areaRows, statusRows] = await Promise.all([
-                fetchAllPosOrders(baseRequest),
-                fetchAllPosOrders(statusDraftRequest),
-              ]);
-              return mergeInvoiceRows(areaRows, statusRows);
-            }
             return await fetchAllPosOrders(baseRequest);
           }
           const fallbackResponse = await fetchPosOrdersPage(requestOptions);
@@ -14555,13 +14558,19 @@ const SalesScreen = ({ currentUser, onLogout }) => {
 
     try {
       let order = row;
-      const detailPayload = await fetchPosOrderDetail(selectedId);
-      order = normalizeOrderDetailRow(detailPayload, row) || row;
+      let detailLoadError = null;
+      try {
+        const detailPayload = await fetchPosOrderDetail(selectedId);
+        order = normalizeOrderDetailRow(detailPayload, row) || row;
+      } catch (error) {
+        detailLoadError = error;
+        order = row;
+      }
       if (!canUserViewInvoiceRow(order, currentUser)) {
         openNotice('Invoice', 'Invoice tidak tersedia untuk user kasir ini atau sudah tidak bisa diakses.');
         return;
       }
-      if (!isDraftCandidate(order)) {
+      if (!isDraftCandidate(order) && !isDraftCandidate(row)) {
         openNotice('Invoice', 'Order ini bukan kandidat draft yang bisa dilanjutkan.');
         return;
       }
@@ -14571,7 +14580,12 @@ const SalesScreen = ({ currentUser, onLogout }) => {
           ? order.order_items
           : [];
       if (rows.length === 0) {
-        openNotice('Invoice', 'Order draft tidak memiliki item.');
+        openNotice(
+          'Invoice',
+          detailLoadError
+            ? `Detail draft belum bisa dimuat dari server (${detailLoadError.message}). Klik Refresh lalu coba lagi.`
+            : 'Order draft tidak memiliki item.',
+        );
         return;
       }
 
@@ -15814,14 +15828,18 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       return null;
     }
 
-    const proofingFlowForValidation = normalizeProofingFlow(
-      options?.proofingFlow ?? effectiveSelectedProofingFlow,
-      Boolean(options?.proofingFlow) || effectiveSelectedProofingFlow !== PROOFING_FLOW_NONE,
-    );
+    const isDraftMode = mode === 'draft';
+    const proofingFlowForValidation = isDraftMode
+      ? PROOFING_FLOW_NONE
+      : normalizeProofingFlow(
+          options?.proofingFlow ?? effectiveSelectedProofingFlow,
+          Boolean(options?.proofingFlow) || effectiveSelectedProofingFlow !== PROOFING_FLOW_NONE,
+        );
     const proofingTypeForValidation = normalizeProofingType(options?.proofingType ?? selectedProofingType);
     const proofingTargetUserIdForValidation = Number(options?.proofingTargetUserId ?? selectedProofingTargetUserId ?? 0) || 0;
     if (
-      options?.skipProofingTypeValidation !== true
+      !isDraftMode
+      && options?.skipProofingTypeValidation !== true
       && cartHasProofingEligibleItems
       && proofingFlowForValidation !== PROOFING_FLOW_NONE
       && !proofingTypeForValidation
@@ -15830,7 +15848,8 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       return null;
     }
     if (
-      options?.skipProofingTypeValidation !== true
+      !isDraftMode
+      && options?.skipProofingTypeValidation !== true
       && cartHasProofingEligibleItems
       && proofingFlowForValidation !== PROOFING_FLOW_NONE
       && !(proofingTargetUserIdForValidation > 0)
@@ -15838,7 +15857,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       openNotice('PIC Proofing', 'Pilih user PIC proofing sebelum melanjutkan.');
       return null;
     }
-    if (cartHasProofingEligibleItems && proofingFlowForValidation !== PROOFING_FLOW_NONE) {
+    if (!isDraftMode && cartHasProofingEligibleItems && proofingFlowForValidation !== PROOFING_FLOW_NONE) {
       const rawCustomerPhone = String(
         selectedCustomer?.phone
         || selectedCustomer?.mobile
@@ -15972,17 +15991,21 @@ const SalesScreen = ({ currentUser, onLogout }) => {
 
     const isDraftMode = mode === 'draft';
     const isProofingWithoutPaymentMode = mode === ORDER_SUBMIT_MODE_PROOFING;
-    const proofingFlowForSubmit = normalizeProofingFlow(
-      options?.proofingFlow ?? effectiveSelectedProofingFlow,
-      Boolean(options?.proofingFlow) || effectiveSelectedProofingFlow !== PROOFING_FLOW_NONE,
-    );
+    const proofingFlowForSubmit = isDraftMode
+      ? PROOFING_FLOW_NONE
+      : normalizeProofingFlow(
+          options?.proofingFlow ?? effectiveSelectedProofingFlow,
+          Boolean(options?.proofingFlow) || effectiveSelectedProofingFlow !== PROOFING_FLOW_NONE,
+        );
     const proofingTypeForSubmit = proofingFlowForSubmit !== PROOFING_FLOW_NONE
       ? normalizeProofingType(options?.proofingType ?? selectedProofingType)
       : '';
     const proofingTargetUserIdForSubmit = proofingFlowForSubmit !== PROOFING_FLOW_NONE
       ? (Number(options?.proofingTargetUserId ?? selectedProofingTargetUserId ?? 0) || 0)
       : 0;
-    const followUpMethodForSubmit = normalizeFollowUpMethod(options?.followUpMethod ?? selectedFollowUpMethod);
+    const followUpMethodForSubmit = isDraftMode
+      ? FOLLOW_UP_SAVE_AS_DRAFT
+      : normalizeFollowUpMethod(options?.followUpMethod ?? selectedFollowUpMethod);
     const { canonicalMethodLabel, selectedMethodConfig } = validation;
     const deferredPaymentMethodConfig = selectedMethodConfig
       || paymentMethodConfigs.find((row) => row?.isDefault)
@@ -16559,6 +16582,25 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         setDraftInvoices((prev) => prev.filter((draft) => Number(draft?.id || 0) !== Number(currentDraftSourceId || 0)));
       }
       if (mode === 'draft' && backendOrderId) {
+        const createdDraftRow = normalizeOrderDetailRow(created, {
+          ...created,
+          id: backendOrderId,
+          status: 'draft',
+          notes: payload.notes,
+          customer: selectedCustomer || created?.customer || null,
+          invoice: {
+            ...(created?.invoice && typeof created.invoice === 'object' ? created.invoice : {}),
+            id: invoiceId || created?.invoice?.id || null,
+            invoice_no: invoiceNo,
+            status: 'draft',
+            total: roundMoney(grandTotal),
+            paid_total: 0,
+            due_total: roundMoney(grandTotal),
+          },
+          items: adjustedItems,
+        });
+        setDraftInvoices((prev) => mergeInvoiceRows([createdDraftRow], Array.isArray(prev) ? prev : []));
+        updateInvoiceWorkspaceAreaSnapshot([createdDraftRow], { area: 'draft' });
         try {
           await updatePosOrderStatus(backendOrderId, 'draft');
           const updated = await fetchPosOrderDetail(backendOrderId);
@@ -16669,21 +16711,45 @@ const SalesScreen = ({ currentUser, onLogout }) => {
 
       if (shouldQueue) {
         if (mode === 'draft') {
+          const queuedPayload = payload || {
+            customer_id: null,
+            status: 'draft',
+            due_at: null,
+            note: paymentNotes || null,
+            notes: [
+              `Tanggal Order: ${transactionDate}`,
+              'Mode: Simpan Draft',
+              paymentNotes ? `Catatan: ${paymentNotes}` : '',
+            ].filter(Boolean).join('\n'),
+            items: cartItems.map((item) => enforceDesignFirstFlow(item.backendItem)),
+            payment: {
+              transaction_type: 'unpaid',
+              method,
+              amount: 0,
+              note: paymentNotes || null,
+              paid_at: new Date().toISOString(),
+            },
+          };
+          enqueueOrderPayload(queuedPayload);
+          const count = loadOrderQueue().length;
+          setQueueCount(count);
+          setLastPayloadPreview(queuedPayload);
           setAuditLogs(
             appendOrderAuditLog({
-              result: 'failed_draft_backend_unreachable',
+              result: 'queued_offline_draft',
               total: grandTotal,
-              queue_count: loadOrderQueue().length,
+              queue_count: count,
               error: String(error?.message || 'Gagal menyimpan draft ke backend'),
             }),
           );
           openNotice(
-            'Draft Butuh Backend Online',
-            'Draft Order wajib tersimpan ke backend supaya bisa ditracking. Cek koneksi/backend lalu simpan draft lagi.',
+            'Draft Masuk Antrian Offline',
+            `Server belum menerima draft, tapi draft tetap disimpan sementara dan tampil di Draft Order. Nanti kirim ulang saat backend normal. (${count} data antrian)`,
           );
+          await loadDraftInvoices({ area: 'draft', page: 1 }).catch(() => {});
           return {
-            ok: false,
-            queuedOffline: false,
+            ok: true,
+            queuedOffline: true,
             backendOrderId: null,
             invoiceNo: '-',
           };

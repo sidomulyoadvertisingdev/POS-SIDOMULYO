@@ -212,48 +212,6 @@ const normalizeInvoiceStatusText = (row) => (
   )
 );
 
-const parseJsonObject = (value) => {
-  if (!value) return null;
-  if (value && typeof value === 'object' && !Array.isArray(value)) return value;
-  if (typeof value !== 'string') return null;
-  try {
-    const parsed = JSON.parse(value);
-    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
-  } catch (_error) {
-    return null;
-  }
-};
-
-const hasDraftSnapshot = (row) => {
-  const candidates = [
-    row?.draft_form,
-    row?.draft_snapshot,
-    row?.spec_snapshot,
-    row?.order?.draft_form,
-    row?.order?.draft_snapshot,
-    row?.order?.spec_snapshot,
-  ];
-
-  const items = []
-    .concat(Array.isArray(row?.items) ? row.items : [])
-    .concat(Array.isArray(row?.order_items) ? row.order_items : [])
-    .concat(Array.isArray(row?.order?.items) ? row.order.items : []);
-
-  items.forEach((item) => {
-    candidates.push(item?.draft_form, item?.draft_snapshot, item?.spec_snapshot);
-  });
-
-  return candidates.some((value) => {
-    const snapshot = parseJsonObject(value);
-    if (!snapshot) return false;
-    return Boolean(
-      snapshot?.draft_form
-      || snapshot?.draft_restore
-      || snapshot?.is_draft
-    );
-  });
-};
-
 const isDraftCandidate = (row) => {
   const statusCandidates = [
     row?.status,
@@ -275,10 +233,10 @@ const isDraftCandidate = (row) => {
     row?.invoice?.notes,
     row?.invoice?.note,
   ].filter(Boolean).join('\n'));
-  if (!notes.includes('mode: simpan draft')) {
-    return hasDraftSnapshot(row);
+  if (notes.includes('sales_draft')) {
+    return true;
   }
-  return !notes.includes('mode: proses orderan');
+  return notes.includes('mode: simpan draft') && !notes.includes('mode: proses orderan');
 };
 
 const isDraftInvoiceRow = (row) => {

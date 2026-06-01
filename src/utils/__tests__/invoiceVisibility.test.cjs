@@ -119,15 +119,7 @@ test('semua bentuk draft lama dan baru tetap dikenali sebagai draft', () => {
     {
       id: 1014,
       status: 'pending',
-      items: [
-        {
-          spec_snapshot: JSON.stringify({
-            draft_form: {
-              payment_method: 'Cash',
-            },
-          }),
-        },
-      ],
+      notes: '{"_type":"sales_draft","note_text":"draft lama"}',
     },
   ];
 
