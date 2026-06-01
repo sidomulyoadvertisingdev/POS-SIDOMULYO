@@ -5,6 +5,7 @@ const {
   canUserViewInvoiceRow,
   filterInvoiceRowsForUser,
   isApprovalInvoiceRow,
+  isDraftCandidate,
   isReceivableInvoiceRow,
   isSuccessfulInvoiceRow,
 } = require('../invoiceVisibility');
@@ -95,6 +96,71 @@ test('kasir tetap bisa melihat draft miliknya sendiri lewat field creator invoic
   };
 
   assert.equal(canUserAccessInvoiceRow(row, cashierA), true);
+});
+
+test('semua bentuk draft lama dan baru tetap dikenali sebagai draft', () => {
+  const rows = [
+    {
+      id: 1011,
+      order_status: 'draft',
+    },
+    {
+      id: 1012,
+      invoice: {
+        id: 512,
+        status: 'draft',
+      },
+    },
+    {
+      id: 1013,
+      status: 'pending',
+      notes: 'Mode: Simpan Draft',
+    },
+    {
+      id: 1014,
+      status: 'pending',
+      items: [
+        {
+          spec_snapshot: JSON.stringify({
+            draft_form: {
+              payment_method: 'Cash',
+            },
+          }),
+        },
+      ],
+    },
+  ];
+
+  rows.forEach((row) => {
+    assert.equal(isDraftCandidate(row), true);
+    assert.equal(canUserAccessInvoiceRow(row, cashierA), true);
+  });
+});
+
+test('snapshot non-draft tidak otomatis membuat invoice sukses menjadi draft', () => {
+  const row = {
+    id: 1015,
+    status: 'completed',
+    invoice: {
+      id: 515,
+      status: 'paid',
+      total: 120000,
+      paid_total: 120000,
+      due_total: 0,
+    },
+    items: [
+      {
+        spec_snapshot: JSON.stringify({
+          cart_restore: {
+            pricing_locked: true,
+          },
+        }),
+      },
+    ],
+  };
+
+  assert.equal(isDraftCandidate(row), false);
+  assert.equal(isSuccessfulInvoiceRow(row), true);
 });
 
 test('row invoice hanya tampil bila ada user yang aktif', () => {

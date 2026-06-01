@@ -3254,7 +3254,7 @@ const resolveInvoiceStatusKey = (status) => {
   const text = String(status || '').trim().toLowerCase();
   if (!text) return '';
   if (['queued_offline'].includes(text)) return 'queued_offline';
-  if (['draft'].includes(text)) return 'draft';
+  if (['draft', 'draft_order', 'draft_local', 'saved_draft', 'simpan_draft', 'rancangan'].includes(text)) return 'draft';
   if (['pending_approval', 'waiting_approval', 'menunggu_approval', 'menunggu approval'].includes(text)) return 'pending_approval';
   if (['pending', 'new', 'open'].includes(text)) return 'pending';
   if (['pending_payment', 'awaiting_payment', 'unpaid'].includes(text)) return 'pending_payment';
@@ -5990,13 +5990,50 @@ const resolveAccountingSelectionId = (row) => Number(
   || 0
 );
 const isDraftCandidate = (row) => {
-  const status = String(row?.status || '').trim().toLowerCase();
-  if (status === 'draft') {
+  const statusCandidates = [
+    row?.status,
+    row?.order_status,
+    row?.order?.status,
+    row?.order?.order_status,
+    row?.invoice?.status,
+    row?.invoice?.order_status,
+  ];
+  if (statusCandidates.some((status) => resolveInvoiceStatusKey(status) === 'draft')) {
     return true;
   }
-  const notes = String(row?.notes || '').toLowerCase();
+
+  const notes = [
+    row?.notes,
+    row?.note,
+    row?.order?.notes,
+    row?.order?.note,
+    row?.invoice?.notes,
+    row?.invoice?.note,
+  ].filter(Boolean).join('\n').toLowerCase();
   if (!notes.includes('mode: simpan draft')) {
-    return false;
+    const snapshotCandidates = [
+      row?.draft_form,
+      row?.draft_snapshot,
+      row?.spec_snapshot,
+      row?.order?.draft_form,
+      row?.order?.draft_snapshot,
+      row?.order?.spec_snapshot,
+    ];
+    const sourceRows = []
+      .concat(Array.isArray(row?.items) ? row.items : [])
+      .concat(Array.isArray(row?.order_items) ? row.order_items : [])
+      .concat(Array.isArray(row?.order?.items) ? row.order.items : []);
+    sourceRows.forEach((item) => {
+      snapshotCandidates.push(item?.draft_form, item?.draft_snapshot, item?.spec_snapshot);
+    });
+    return snapshotCandidates.some((value) => {
+      const snapshot = parseJsonObject(value) || {};
+      return Boolean(
+        snapshot?.draft_form
+        || snapshot?.draft_restore
+        || snapshot?.is_draft
+      );
+    });
   }
   return !notes.includes('mode: proses orderan');
 };
@@ -12974,11 +13011,25 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       if (invoiceRequestOptions.area !== 'approval') {
         try {
           if (invoiceSuccessDateFilterActive || INVOICE_ACTIVE_WORK_AREAS.has(invoiceRequestOptions.area)) {
-            rows = await fetchAllPosOrderTransactions({
+            const baseRequest = {
               ...invoiceRequestOptions,
               perPage: 200,
               maxPages: 200,
-            });
+            };
+            if (invoiceRequestOptions.area === 'draft') {
+              const statusDraftRequest = {
+                ...baseRequest,
+                area: undefined,
+                status: 'draft',
+              };
+              const [areaRows, statusRows] = await Promise.all([
+                fetchAllPosOrderTransactions(baseRequest),
+                fetchAllPosOrderTransactions(statusDraftRequest),
+              ]);
+              rows = mergeInvoiceRows(areaRows, statusRows);
+            } else {
+              rows = await fetchAllPosOrderTransactions(baseRequest);
+            }
             pageMeta = {
               currentPage: 1,
               lastPage: 1,
@@ -12994,11 +13045,25 @@ const SalesScreen = ({ currentUser, onLogout }) => {
           invoiceLoadError = error;
           try {
             if (invoiceSuccessDateFilterActive || INVOICE_ACTIVE_WORK_AREAS.has(invoiceRequestOptions.area)) {
-              rows = await fetchAllPosOrders({
+              const baseRequest = {
                 ...invoiceRequestOptions,
                 perPage: 200,
                 maxPages: 200,
-              });
+              };
+              if (invoiceRequestOptions.area === 'draft') {
+                const statusDraftRequest = {
+                  ...baseRequest,
+                  area: undefined,
+                  status: 'draft',
+                };
+                const [areaRows, statusRows] = await Promise.all([
+                  fetchAllPosOrders(baseRequest),
+                  fetchAllPosOrders(statusDraftRequest),
+                ]);
+                rows = mergeInvoiceRows(areaRows, statusRows);
+              } else {
+                rows = await fetchAllPosOrders(baseRequest);
+              }
               pageMeta = {
                 currentPage: 1,
                 lastPage: 1,
@@ -13118,21 +13183,47 @@ const SalesScreen = ({ currentUser, onLogout }) => {
 
         try {
           if (shouldLoadAllActiveRows) {
-            return await fetchAllPosOrderTransactions({
+            const baseRequest = {
               ...requestOptions,
               perPage: 200,
               maxPages: 200,
-            });
+            };
+            if (String(area || '').trim() === 'draft') {
+              const statusDraftRequest = {
+                ...baseRequest,
+                area: undefined,
+                status: 'draft',
+              };
+              const [areaRows, statusRows] = await Promise.all([
+                fetchAllPosOrderTransactions(baseRequest),
+                fetchAllPosOrderTransactions(statusDraftRequest),
+              ]);
+              return mergeInvoiceRows(areaRows, statusRows);
+            }
+            return await fetchAllPosOrderTransactions(baseRequest);
           }
           const response = await fetchPosOrderTransactionsPage(requestOptions);
           return Array.isArray(response?.data) ? response.data : [];
         } catch (_error) {
           if (shouldLoadAllActiveRows) {
-            return await fetchAllPosOrders({
+            const baseRequest = {
               ...requestOptions,
               perPage: 200,
               maxPages: 200,
-            });
+            };
+            if (String(area || '').trim() === 'draft') {
+              const statusDraftRequest = {
+                ...baseRequest,
+                area: undefined,
+                status: 'draft',
+              };
+              const [areaRows, statusRows] = await Promise.all([
+                fetchAllPosOrders(baseRequest),
+                fetchAllPosOrders(statusDraftRequest),
+              ]);
+              return mergeInvoiceRows(areaRows, statusRows);
+            }
+            return await fetchAllPosOrders(baseRequest);
           }
           const fallbackResponse = await fetchPosOrdersPage(requestOptions);
           return Array.isArray(fallbackResponse?.data) ? fallbackResponse.data : [];
@@ -17876,7 +17967,16 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     };
   }, [invoiceFilter]);
   const filteredInvoices = useMemo(() => {
-    const rows = Array.isArray(dateFilteredInvoiceRows) ? dateFilteredInvoiceRows : [];
+    const visibleRows = Array.isArray(dateFilteredInvoiceRows) ? dateFilteredInvoiceRows : [];
+    const areaSnapshotRows = invoiceWorkspaceRowsByArea && typeof invoiceWorkspaceRowsByArea === 'object'
+      ? invoiceWorkspaceRowsByArea[invoiceFilter]
+      : [];
+    const rows = INVOICE_ACTIVE_WORK_AREAS.has(invoiceFilter)
+      ? mergeInvoiceRows(
+        Array.isArray(areaSnapshotRows) ? areaSnapshotRows : [],
+        visibleRows,
+      )
+      : visibleRows;
     const keyword = normalizeText(invoiceSearch);
     const searchedRows = keyword
       ? rows.filter((row) => {
@@ -17922,7 +18022,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       return searchedRows.filter((row) => isReceivableInvoiceRow(row));
     }
     return searchedRows;
-  }, [approvalStatusFilter, dateFilteredInvoiceRows, invoiceFilter, invoiceSearch]);
+  }, [approvalStatusFilter, dateFilteredInvoiceRows, invoiceFilter, invoiceSearch, invoiceWorkspaceRowsByArea]);
   const filteredInvoiceSummary = useMemo(() => {
     if (!['draft', 'success'].includes(invoiceFilter)) {
       return null;
