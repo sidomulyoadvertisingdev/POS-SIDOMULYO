@@ -12,7 +12,6 @@ const STATUS_FILTERS = [
   { key: 'all', label: 'Semua' },
   { key: 'draft', label: 'Draft' },
   { key: 'sent', label: 'Terkirim' },
-  { key: 'approved', label: 'Approved' },
   { key: 'revision', label: 'Revisi' },
 ];
 
@@ -594,43 +593,45 @@ const ProofingPanel = ({
                 {isLoading ? 'Memuat data proofing...' : 'Belum ada task proofing.'}
               </Text>
             ) : (
-              items.slice(0, 8).map((row, index) => {
-                const proofingId = Number(row?.id || 0);
-                const isSelected = Number(selectedRow?.id || 0) === proofingId;
-                const releaseState = resolveProofingReleaseState(row);
+              <ScrollView style={styles.tableScroll} nestedScrollEnabled showsVerticalScrollIndicator>
+                {items.map((row, index) => {
+                  const proofingId = Number(row?.id || 0);
+                  const isSelected = Number(selectedRow?.id || 0) === proofingId;
+                  const releaseState = resolveProofingReleaseState(row);
 
-                return (
-                  <Pressable
-                    key={String(proofingId || `proofing-${index}`)}
-                    style={[
-                      styles.tableRow,
-                      index % 2 === 0 ? styles.tableRowEven : null,
-                      isSelected ? styles.tableRowSelected : null,
-                    ]}
-                    onPress={() => setSelectedProofingId(proofingId)}
-                  >
-                    <Text style={[styles.td, styles.colOrder]}>ORD-{toNumber(row?.order?.id).toString().padStart(5, '0')}</Text>
-                    <Text style={[styles.td, styles.colInvoice]}>{toText(row?.order?.invoice?.invoice_no)}</Text>
-                    <Text style={[styles.td, styles.colCustomer]}>{toText(row?.customer?.name, 'Pelanggan umum')}</Text>
-                    <Text style={[styles.td, styles.colItem]}>{toText(row?.item?.name, 'Item desain')}</Text>
-                    <Text style={[styles.td, styles.colSize]}>{sizeLabel(row)}</Text>
-                    <Text style={[styles.td, styles.colPic]}>
-                      {toText(routingLabel(row), row?.designer?.name || '-')}
-                    </Text>
-                    <View style={[styles.tableBadge, statusBadgeStyle(row?.status), styles.colStatus]}>
-                      <Text style={styles.tableBadgeText}>{toStatusLabel(row?.status)}</Text>
-                    </View>
-                    <View style={[styles.tableBadge, paymentBadgeStyle(releaseState.paymentStatusLabel), styles.colPay]}>
-                      <Text style={styles.tableBadgeText}>{toText(releaseState.paymentStatusLabel, '-')}</Text>
-                    </View>
-                  </Pressable>
-                );
-              })
+                  return (
+                    <Pressable
+                      key={String(proofingId || `proofing-${index}`)}
+                      style={[
+                        styles.tableRow,
+                        index % 2 === 0 ? styles.tableRowEven : null,
+                        isSelected ? styles.tableRowSelected : null,
+                      ]}
+                      onPress={() => setSelectedProofingId(proofingId)}
+                    >
+                      <Text style={[styles.td, styles.colOrder]}>ORD-{toNumber(row?.order?.id).toString().padStart(5, '0')}</Text>
+                      <Text style={[styles.td, styles.colInvoice]}>{toText(row?.order?.invoice?.invoice_no)}</Text>
+                      <Text style={[styles.td, styles.colCustomer]}>{toText(row?.customer?.name, 'Pelanggan umum')}</Text>
+                      <Text style={[styles.td, styles.colItem]}>{toText(row?.item?.name, 'Item desain')}</Text>
+                      <Text style={[styles.td, styles.colSize]}>{sizeLabel(row)}</Text>
+                      <Text style={[styles.td, styles.colPic]}>
+                        {toText(routingLabel(row), row?.designer?.name || '-')}
+                      </Text>
+                      <View style={[styles.tableBadge, statusBadgeStyle(row?.status), styles.colStatus]}>
+                        <Text style={styles.tableBadgeText}>{toStatusLabel(row?.status)}</Text>
+                      </View>
+                      <View style={[styles.tableBadge, paymentBadgeStyle(releaseState.paymentStatusLabel), styles.colPay]}>
+                        <Text style={styles.tableBadgeText}>{toText(releaseState.paymentStatusLabel, '-')}</Text>
+                      </View>
+                    </Pressable>
+                  );
+                })}
+              </ScrollView>
             )}
           </View>
 
           <View style={styles.tableFooter}>
-            <Text style={styles.tableFooterText}>Menampilkan {Math.min(items.length, 8)} dari {items.length} task</Text>
+            <Text style={styles.tableFooterText}>Menampilkan {items.length} task</Text>
             <Text style={styles.tableFooterText}>Klik baris untuk membuka detail</Text>
           </View>
         </View>
@@ -800,49 +801,9 @@ const ProofingPanel = ({
             <View style={styles.postApprovalBox}>
               <Text style={styles.sectionTitle}>Setelah Customer Approve</Text>
               <Text style={styles.postApprovalHint}>
-                Status pembayaran: {paymentLabel}. Produksi hanya bisa dikirim saat invoice sudah lunas.
+                Status pembayaran: {paymentLabel}. Item approved berpindah ke menu Layout untuk upload file produksi dan naik cetak.
               </Text>
-              {canSendProduction ? (
-                <>
-                  <Text style={styles.layoutPathLabel}>Link / path file asli siap layout</Text>
-                  <TextInput
-                    value={layoutFilePath}
-                    onChangeText={(text) => setLayoutFilePathById((prev) => ({
-                      ...prev,
-                      [selectedProofingIdNumber]: text,
-                    }))}
-                    placeholder="D:\\file siap layout\\bahan\\kategori\\nama-file.cdr"
-                    placeholderTextColor="#8a9ab3"
-                    style={styles.layoutPathInput}
-                  />
-                  <ActionButton
-                    label="Pilih / Upload File Produksi Lokal"
-                    variant="blue"
-                    disabled={!selectedRow || selectedBusy}
-                    onPress={async () => {
-                      const metadata = await onUploadLocalProductionFile?.(selectedRow);
-                      const nextPath = String(metadata?.layout_file_path || metadata?.design_open_url || metadata?.design_relative_path || '').trim();
-                      if (nextPath) {
-                        setLayoutFilePathById((prev) => ({
-                          ...prev,
-                          [selectedProofingIdNumber]: nextPath,
-                          [`${selectedProofingIdNumber}:meta`]: metadata,
-                        }));
-                      }
-                    }}
-                  />
-                  <ActionButton
-                    label="Kirim Produksi"
-                    variant="purple"
-                    disabled={!selectedRow || selectedBusy || !String(layoutFilePath || '').trim()}
-                    onPress={() => onReleaseToProduction?.(selectedRow, {
-                      layout_file_path: layoutFilePath,
-                      layout_file_category: 'file siap layout',
-                      ...(layoutFilePathById[`${selectedProofingIdNumber}:meta`] || {}),
-                    })}
-                  />
-                </>
-              ) : null}
+              {canSendProduction ? <Text style={styles.postApprovalHint}>Buka tab Layout untuk menggabungkan item ini dengan invoice lain.</Text> : null}
               {shouldReturnCashier ? (
                 <ActionButton
                   label="Kirim Kembali ke Kasir"
@@ -1138,6 +1099,9 @@ const styles = StyleSheet.create({
     backgroundColor: '#f1f6ff',
     borderBottomWidth: 1,
     borderBottomColor: '#dce5f4',
+  },
+  tableScroll: {
+    maxHeight: 420,
   },
   tableRowEven: {
     backgroundColor: '#fbfdff',

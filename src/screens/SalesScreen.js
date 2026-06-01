@@ -9,6 +9,7 @@ import ExpensePanel from '../components/ExpensePanel';
 import InvoiceWorkspaceContent from '../components/InvoiceWorkspaceContent';
 import InvoiceWorkspaceHeader from '../components/InvoiceWorkspaceHeader';
 import InvoiceWorkspaceRowCard from '../components/InvoiceWorkspaceRowCard';
+import LayoutPanel from '../components/LayoutPanel';
 import PaymentSummary from '../components/PaymentSummary';
 import PurchaseMaterialPanel from '../components/PurchaseMaterialPanel';
 import ProductForm from '../components/ProductForm';
@@ -2164,6 +2165,15 @@ const getProofingStatusTextColor = (value) => {
   if (key === 'cancelled') return '#b91c1c';
   return '#6b7280';
 };
+const isProofingLayoutCandidate = (row) => {
+  const status = normalizeProofingStatusKey(row?.status);
+  if (status !== 'approved') {
+    return false;
+  }
+  const releaseState = resolveProofingReleaseState(row);
+  return !releaseState.releasedToProduction;
+};
+const isProofingQueueCandidate = (row) => !isProofingLayoutCandidate(row);
 const formatProofingEventDateTime = (value) => {
   const text = String(value || '').trim();
   if (!text) return '-';
@@ -3490,12 +3500,19 @@ const resolveInvoiceProductionLifecycle = (row) => {
   }
 
   const unfinished = Number(counts.waiting_design || 0) + Number(counts.waiting_production || 0) + Number(counts.in_batch || 0);
+  const finished = Number(counts.printed || 0);
+  const total = unfinished + finished;
+  const progressPercent = total > 0 ? Math.round((finished / total) * 100) : 0;
   if (unfinished > 0) {
-    return { key: 'started', label: 'Mulai Produksi', color: '#1849a9' };
+    return {
+      key: 'started',
+      label: `Progress ${progressPercent}% (${finished}/${total} item selesai)`,
+      color: finished > 0 ? '#1849a9' : '#b54708',
+    };
   }
 
-  if (Number(counts.printed || 0) > 0) {
-    return { key: 'finished', label: 'Selesai Produksi', color: '#067647' };
+  if (finished > 0) {
+    return { key: 'finished', label: `Selesai Produksi (${finished}/${total || finished} item)`, color: '#067647' };
   }
 
   return { key: 'not_required', label: 'Tidak Perlu Produksi', color: '#475467' };
@@ -3570,7 +3587,13 @@ const summarizeProductionStatusForInvoice = (row) => {
   if (!counts) {
     return '-';
   }
-  return `Design ${counts.waiting_design} | Produksi ${counts.waiting_production} | Batch ${counts.in_batch} | Selesai ${counts.printed}`;
+  const total = Number(counts.waiting_design || 0)
+    + Number(counts.waiting_production || 0)
+    + Number(counts.in_batch || 0)
+    + Number(counts.printed || 0);
+  const printed = Number(counts.printed || 0);
+  const percent = total > 0 ? Math.round((printed / total) * 100) : 0;
+  return `Progress ${percent}% (${printed}/${total} selesai) | Design ${counts.waiting_design} | Produksi ${counts.waiting_production} | Batch ${counts.in_batch} | Selesai ${counts.printed}`;
 };
 const getCurrentProductionStageForInvoice = (row) => {
   const counts = getProductionCountsForInvoice(row);
@@ -6367,6 +6390,8 @@ const INVOICE_AREA_FILTER_MENU_MAP = Object.freeze({
 });
 
 const INVOICE_ACTIVE_WORK_AREAS = new Set(['draft', 'approval', 'receivable']);
+const DRAFT_WORKSPACE_PER_PAGE = 100;
+const DRAFT_WORKSPACE_MAX_PAGES = 20;
 
 const DANA_QRIS_TERMINAL_STATUSES = new Set(['paid', 'failed', 'expired', 'cancelled', 'refund_required']);
 
@@ -6784,13 +6809,16 @@ const SalesScreen = ({ currentUser, onLogout }) => {
   const [isDeletingDraftId, setIsDeletingDraftId] = useState(null);
   const [productionRows, setProductionRows] = useState([]);
   const [proofingRows, setProofingRows] = useState([]);
+  const [layoutRows, setLayoutRows] = useState([]);
   const [proofingSendModal, setProofingSendModal] = useState(() => createProofingSendModalState());
   const [isProductionLoading, setIsProductionLoading] = useState(false);
   const [isProofingLoading, setIsProofingLoading] = useState(false);
+  const [isLayoutLoading, setIsLayoutLoading] = useState(false);
   const [productionStatusFilter, setProductionStatusFilter] = useState('all');
   const [proofingStatusFilter, setProofingStatusFilter] = useState('all');
   const [productionSearch, setProductionSearch] = useState('');
   const [proofingSearch, setProofingSearch] = useState('');
+  const [layoutSearch, setLayoutSearch] = useState('');
   const [updatingProductionItemId, setUpdatingProductionItemId] = useState(null);
   const [processingProofingId, setProcessingProofingId] = useState(null);
   const [closingReportDate, setClosingReportDate] = useState(formatIsoDate(new Date()));
@@ -12894,12 +12922,6 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       area: undefined,
       status: 'draft',
     },
-    {
-      ...baseRequest,
-      area: undefined,
-      status: undefined,
-      view: undefined,
-    },
   ]);
 
   const fetchRowsFromRequestVariants = async (requests = [], fetcher) => {
@@ -12924,19 +12946,51 @@ const SalesScreen = ({ currentUser, onLogout }) => {
 
   const fetchDraftWorkspaceRows = async (baseRequest = {}) => {
     const requests = buildDraftServerRequestVariants(baseRequest);
-    const transactionResult = await fetchRowsFromRequestVariants(
-      requests,
-      (requestOptions) => fetchAllPosOrderTransactions(requestOptions),
-    );
+    let transactionResult = {
+      rows: [],
+      error: null,
+      allFailed: true,
+    };
+
+    for (const requestOptions of requests) {
+      const result = await fetchRowsFromRequestVariants(
+        [requestOptions],
+        (nextRequestOptions) => fetchAllPosOrderTransactions(nextRequestOptions),
+      );
+      transactionResult = {
+        rows: mergeInvoiceRows(transactionResult.rows, result.rows),
+        error: result.error || transactionResult.error,
+        allFailed: transactionResult.allFailed && result.allFailed,
+      };
+      if (transactionResult.rows.length > 0) {
+        break;
+      }
+    }
 
     if (!transactionResult.allFailed) {
       return transactionResult;
     }
 
-    const orderResult = await fetchRowsFromRequestVariants(
-      requests,
-      (requestOptions) => fetchAllPosOrders(requestOptions),
-    );
+    let orderResult = {
+      rows: [],
+      error: null,
+      allFailed: true,
+    };
+
+    for (const requestOptions of requests) {
+      const result = await fetchRowsFromRequestVariants(
+        [requestOptions],
+        (nextRequestOptions) => fetchAllPosOrders(nextRequestOptions),
+      );
+      orderResult = {
+        rows: mergeInvoiceRows(orderResult.rows, result.rows),
+        error: result.error || orderResult.error,
+        allFailed: orderResult.allFailed && result.allFailed,
+      };
+      if (orderResult.rows.length > 0) {
+        break;
+      }
+    }
 
     return {
       rows: orderResult.rows,
@@ -13026,6 +13080,16 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       ...options,
       page: requestPage,
     });
+    if (invoiceRequestOptions.area === 'draft' && !appendRows && !options?.forceServer) {
+      const snapshotRows = Array.isArray(invoiceWorkspaceRowsByArea?.draft)
+        ? invoiceWorkspaceRowsByArea.draft
+        : [];
+      const previewRows = mergeInvoiceRows(queueRows, snapshotRows).filter((row) => isDraftInvoiceRow(row));
+      if (previewRows.length > 0) {
+        setDraftInvoices(previewRows);
+        hydrateDanaInvoiceMonitorsFromRows(previewRows);
+      }
+    }
     const invoiceSuccessDateFilterActive = invoiceRequestOptions.area === 'success'
       && !invoiceRequestOptions.search
       && Boolean(String(invoiceRequestOptions.date_from || '').trim() || String(invoiceRequestOptions.date_to || '').trim());
@@ -13090,8 +13154,8 @@ const SalesScreen = ({ currentUser, onLogout }) => {
           if (invoiceSuccessDateFilterActive || INVOICE_ACTIVE_WORK_AREAS.has(invoiceRequestOptions.area)) {
             const baseRequest = {
               ...invoiceRequestOptions,
-              perPage: 200,
-              maxPages: 200,
+              perPage: invoiceRequestOptions.area === 'draft' ? DRAFT_WORKSPACE_PER_PAGE : 200,
+              maxPages: invoiceRequestOptions.area === 'draft' ? DRAFT_WORKSPACE_MAX_PAGES : 200,
             };
             if (invoiceRequestOptions.area === 'draft') {
               const draftLoadResult = await fetchDraftWorkspaceRows(baseRequest);
@@ -13119,8 +13183,8 @@ const SalesScreen = ({ currentUser, onLogout }) => {
             if (invoiceSuccessDateFilterActive || INVOICE_ACTIVE_WORK_AREAS.has(invoiceRequestOptions.area)) {
               const baseRequest = {
                 ...invoiceRequestOptions,
-                perPage: 200,
-                maxPages: 200,
+                perPage: invoiceRequestOptions.area === 'draft' ? DRAFT_WORKSPACE_PER_PAGE : 200,
+                maxPages: invoiceRequestOptions.area === 'draft' ? DRAFT_WORKSPACE_MAX_PAGES : 200,
               };
               rows = await fetchAllPosOrders(baseRequest);
               pageMeta = {
@@ -13146,9 +13210,13 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         return;
       }
 
-      const approvalRows = approvalRowsInput || await fetchReceivableApprovalRows().catch(() => []);
-      setReceivableApprovalRows(approvalRows);
-      syncReceivableApprovalSnapshot(approvalRows);
+      const approvalRows = invoiceRequestOptions.area === 'draft'
+        ? []
+        : (approvalRowsInput || await fetchReceivableApprovalRows().catch(() => []));
+      if (invoiceRequestOptions.area !== 'draft') {
+        setReceivableApprovalRows(approvalRows);
+        syncReceivableApprovalSnapshot(approvalRows);
+      }
       const approvalListRows = invoiceRequestOptions.area === 'draft' ? [] : approvalRows.filter((row) => {
         const approvalStatus = normalizeReceivableApprovalStatus(row?.approval?.status || row?.status);
         const orderId = Number(row?.approval?.orderId || row?.order?.id || 0) || 0;
@@ -13162,8 +13230,10 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       const mergedRows = mergeInvoiceRows(baseRows, [...queueRows, ...approvalListRows, ...rows])
         .filter((row) => invoiceRequestOptions.area !== 'draft' || !isReceivableApprovalInvoiceRow(row));
       const nextSuccessCache = syncInvoiceSuccessCacheFromRows(mergedRows);
-      setDraftInvoices(mergedRows);
-      updateInvoiceWorkspaceAreaSnapshot(mergedRows, { area: invoiceRequestOptions.area });
+      if (mergedRows.length > 0 || invoiceRequestOptions.area !== 'draft' || !invoiceLoadError) {
+        setDraftInvoices(mergedRows);
+        updateInvoiceWorkspaceAreaSnapshot(mergedRows, { area: invoiceRequestOptions.area });
+      }
       setInvoiceListMeta({
         currentPage: Number(pageMeta?.currentPage || requestPage) || requestPage,
         lastPage: Number(pageMeta?.lastPage || requestPage) || requestPage,
@@ -13191,13 +13261,16 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         openNotice('Invoice', `Data cache lokal ditampilkan dulu. Sinkron server gagal: ${error.message}`);
         return;
       }
-      setDraftInvoices(queueRows);
-      updateInvoiceWorkspaceAreaSnapshot(queueRows, { area: 'draft' });
+      const fallbackRows = invoiceRequestOptions.area === 'draft'
+        ? mergeInvoiceRows(Array.isArray(draftInvoices) ? draftInvoices : [], queueRows)
+        : queueRows;
+      setDraftInvoices(fallbackRows);
+      updateInvoiceWorkspaceAreaSnapshot(fallbackRows, { area: invoiceRequestOptions.area || 'draft' });
       setInvoiceListMeta({
         currentPage: 1,
         lastPage: 1,
         hasMore: false,
-        total: queueRows.length,
+        total: fallbackRows.length,
         searchMode,
         source: 'queue',
       });
@@ -13246,12 +13319,13 @@ const SalesScreen = ({ currentUser, onLogout }) => {
 
         try {
           if (shouldLoadAllActiveRows) {
+            const normalizedArea = String(area || '').trim();
             const baseRequest = {
               ...requestOptions,
-              perPage: 200,
-              maxPages: 200,
+              perPage: normalizedArea === 'draft' ? DRAFT_WORKSPACE_PER_PAGE : 200,
+              maxPages: normalizedArea === 'draft' ? DRAFT_WORKSPACE_MAX_PAGES : 200,
             };
-            if (String(area || '').trim() === 'draft') {
+            if (normalizedArea === 'draft') {
               const draftLoadResult = await fetchDraftWorkspaceRows(baseRequest);
               return draftLoadResult.rows;
             }
@@ -13261,51 +13335,70 @@ const SalesScreen = ({ currentUser, onLogout }) => {
           return Array.isArray(response?.data) ? response.data : [];
         } catch (_error) {
           if (shouldLoadAllActiveRows) {
+            const normalizedArea = String(area || '').trim();
             const baseRequest = {
               ...requestOptions,
-              perPage: 200,
-              maxPages: 200,
+              perPage: normalizedArea === 'draft' ? DRAFT_WORKSPACE_PER_PAGE : 200,
+              maxPages: normalizedArea === 'draft' ? DRAFT_WORKSPACE_MAX_PAGES : 200,
             };
-            return await fetchAllPosOrders(baseRequest);
+            try {
+              return await fetchAllPosOrders(baseRequest);
+            } catch (_fallbackError) {
+              return null;
+            }
           }
-          const fallbackResponse = await fetchPosOrdersPage(requestOptions);
-          return Array.isArray(fallbackResponse?.data) ? fallbackResponse.data : [];
+          try {
+            const fallbackResponse = await fetchPosOrdersPage(requestOptions);
+            return Array.isArray(fallbackResponse?.data) ? fallbackResponse.data : [];
+          } catch (_fallbackError) {
+            return null;
+          }
         }
       };
 
       const [draftRows, successRows, receivableRows, approvalRows] = await Promise.all([
-        loadAreaRows('draft').catch(() => []),
-        loadAreaRows('success').catch(() => []),
-        loadAreaRows('receivable').catch(() => []),
+        loadAreaRows('draft').catch(() => null),
+        loadAreaRows('success').catch(() => null),
+        loadAreaRows('receivable').catch(() => null),
         fetchReceivableApprovalRows().catch(() => []),
       ]);
-      const approvalListRows = approvalRows.filter((row) => {
+      const safeApprovalRows = Array.isArray(approvalRows) ? approvalRows : [];
+      const safeDraftRows = Array.isArray(draftRows) ? draftRows : [];
+      const safeSuccessRows = Array.isArray(successRows) ? successRows : [];
+      const safeReceivableRows = Array.isArray(receivableRows) ? receivableRows : [];
+      const approvalListRows = safeApprovalRows.filter((row) => {
         const approvalStatus = normalizeReceivableApprovalStatus(row?.approval?.status || row?.status);
         const orderId = Number(row?.approval?.orderId || row?.order?.id || 0) || 0;
         const approvalType = normalizeApprovalType(row?.approval?.type || row?.approval_type);
         return !(approvalType === 'receivable' && approvalStatus === 'approved' && orderId > 0);
       });
 
-      setReceivableApprovalRows(approvalRows);
-      syncReceivableApprovalSnapshot(approvalRows);
-      updateInvoiceWorkspaceAreaSnapshot(mergeInvoiceRows(queueRows, draftRows), {
-        area: 'draft',
-        replaceAreas: ['draft'],
-      });
-      updateInvoiceWorkspaceAreaSnapshot(successRows, {
-        area: 'success',
-        replaceAreas: ['success'],
-      });
+      setReceivableApprovalRows(safeApprovalRows);
+      syncReceivableApprovalSnapshot(safeApprovalRows);
+      if (Array.isArray(draftRows) || queueRows.length > 0) {
+        updateInvoiceWorkspaceAreaSnapshot(mergeInvoiceRows(queueRows, safeDraftRows), {
+          area: 'draft',
+          replaceAreas: ['draft'],
+        });
+      }
+      if (Array.isArray(successRows)) {
+        updateInvoiceWorkspaceAreaSnapshot(safeSuccessRows, {
+          area: 'success',
+          replaceAreas: ['success'],
+        });
+      }
       updateInvoiceWorkspaceAreaSnapshot(approvalListRows, {
         area: 'approval',
         replaceAreas: ['approval'],
       });
-      updateInvoiceWorkspaceAreaSnapshot(receivableRows, {
-        area: 'receivable',
-        replaceAreas: ['receivable'],
-      });
-      syncInvoiceSuccessCacheFromRows(successRows);
-      hydrateDanaInvoiceMonitorsFromRows([...draftRows, ...successRows, ...receivableRows]);
+      if (Array.isArray(receivableRows)) {
+        updateInvoiceWorkspaceAreaSnapshot(safeReceivableRows, {
+          area: 'receivable',
+          replaceAreas: ['receivable'],
+        });
+      }
+      syncInvoiceSuccessCacheFromRows(safeSuccessRows);
+      hydrateDanaInvoiceMonitorsFromRows([...safeDraftRows, ...safeSuccessRows, ...safeReceivableRows]);
     } catch (_error) {
       // Snapshot dashboard bersifat pendukung; daftar aktif dan Refresh manual tetap jadi sumber utama.
     } finally {
@@ -13576,7 +13669,10 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       const rows = toDataRows(payload);
       syncProofingAssignmentNotifications(rows);
       if (activeMenu === 'proofing' && proofingStatusFilter === 'all' && !proofingSearch.trim()) {
-        setProofingRows(rows);
+        setProofingRows(rows.filter(isProofingQueueCandidate));
+      }
+      if (activeMenu === 'layout' && !layoutSearch.trim()) {
+        setLayoutRows(rows.filter(isProofingLayoutCandidate));
       }
     } catch (_error) {
       // Notifikasi assignment tidak boleh mengganggu halaman utama.
@@ -13599,7 +13695,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         status,
         search,
       });
-      const rows = toDataRows(payload);
+      const rows = toDataRows(payload).filter(isProofingQueueCandidate);
       setProofingRows(rows);
       syncProofingAssignmentNotifications(rows);
     } catch (error) {
@@ -13607,6 +13703,28 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       openNotice('Proofing', `Gagal memuat queue proofing: ${error.message}`);
     } finally {
       setIsProofingLoading(false);
+    }
+  };
+
+  const loadLayoutItems = async (override = {}) => {
+    if (!backendReady) {
+      setLayoutRows([]);
+      return;
+    }
+
+    const search = String(override?.search || layoutSearch || '').trim();
+    try {
+      setIsLayoutLoading(true);
+      const payload = await fetchPosProofings({
+        status: 'approved',
+        search,
+      });
+      setLayoutRows(toDataRows(payload).filter(isProofingLayoutCandidate));
+    } catch (error) {
+      setLayoutRows([]);
+      openNotice('Layout', `Gagal memuat queue layout: ${error.message}`);
+    } finally {
+      setIsLayoutLoading(false);
     }
   };
 
@@ -13618,6 +13736,11 @@ const SalesScreen = ({ currentUser, onLogout }) => {
   useEffect(() => {
     if (activeMenu === 'proofing') {
       loadProofingItems();
+    }
+  }, [activeMenu, backendReady]);
+  useEffect(() => {
+    if (activeMenu === 'layout') {
+      loadLayoutItems();
     }
   }, [activeMenu, backendReady]);
   useEffect(() => {
@@ -13665,6 +13788,17 @@ const SalesScreen = ({ currentUser, onLogout }) => {
 
     return () => clearTimeout(timeout);
   }, [proofingSearch, proofingStatusFilter, activeMenu]);
+  useEffect(() => {
+    if (activeMenu !== 'layout') {
+      return;
+    }
+
+    const timeout = setTimeout(() => {
+      loadLayoutItems();
+    }, 350);
+
+    return () => clearTimeout(timeout);
+  }, [layoutSearch, activeMenu]);
   useEffect(() => {
     if (!backendReady || !currentUserId) {
       proofingAssignmentSnapshotRef.current = new Map();
@@ -13789,6 +13923,17 @@ const SalesScreen = ({ currentUser, onLogout }) => {
 
     return () => clearInterval(timer);
   }, [activeMenu, proofingStatusFilter, proofingSearch, backendReady]);
+  useEffect(() => {
+    if (activeMenu !== 'layout' || !backendReady) {
+      return undefined;
+    }
+
+    const timer = setInterval(() => {
+      loadLayoutItems();
+    }, 12000);
+
+    return () => clearInterval(timer);
+  }, [activeMenu, layoutSearch, backendReady]);
   useEffect(() => {
     return () => {
       toneTimeoutsRef.current.forEach((timer) => clearTimeout(timer));
@@ -14351,6 +14496,45 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       openNotice(
         'Gerbang Produksi',
         blockerMessage || `Gagal melepas proofing #${proofingId} ke produksi: ${error.message}`,
+      );
+    } finally {
+      setProcessingProofingId(null);
+    }
+  };
+
+  const handleReleaseLayoutProofingsToProduction = async (rows = [], payload = {}) => {
+    const selectedRows = Array.isArray(rows)
+      ? rows.filter((row) => Number(row?.id || 0) > 0)
+      : [];
+    if (selectedRows.length === 0) {
+      return;
+    }
+
+    const firstProofingId = Number(selectedRows[0]?.id || 0);
+    try {
+      setProcessingProofingId(firstProofingId);
+      for (const row of selectedRows) {
+        await releasePosProofingToProduction(Number(row?.id || 0), payload);
+      }
+      await Promise.all([
+        loadLayoutItems().catch(() => {}),
+        loadProofingItems().catch(() => {}),
+        loadProductionItems().catch(() => {}),
+      ]);
+      openNotice(
+        'Layout',
+        `${selectedRows.length} item layout berhasil dinaikkan ke produksi.`,
+        null,
+        {
+          showDefaultAction: false,
+          autoCloseMs: 1800,
+        },
+      );
+    } catch (error) {
+      const blockerMessage = formatProductionGateError(error);
+      openNotice(
+        'Layout',
+        blockerMessage || `Gagal menaikkan item layout ke produksi: ${formatBackendValidationError(error) || error.message}`,
       );
     } finally {
       setProcessingProofingId(null);
@@ -19344,6 +19528,13 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       onPress: () => setActiveMenu('proofing'),
     },
     {
+      key: 'layout',
+      label: 'Layout',
+      iconSource: require('../../assets/menu-icons/production.svg'),
+      active: activeMenu === 'layout',
+      onPress: () => setActiveMenu('layout'),
+    },
+    {
       key: 'production',
       label: 'Produksi',
       iconSource: require('../../assets/menu-icons/production.svg'),
@@ -19933,6 +20124,18 @@ const SalesScreen = ({ currentUser, onLogout }) => {
               onUpdateLayoutPlan={handleUpdateProductionLayoutPlan}
               onBuildDelayWhatsapp={handleBuildProductionDelayWhatsapp}
               updatingItemId={updatingProductionItemId}
+            />
+          ) : activeMenu === 'layout' ? (
+            <LayoutPanel
+              rows={layoutRows}
+              isLoading={isLayoutLoading}
+              searchText={layoutSearch}
+              onChangeSearchText={setLayoutSearch}
+              onRefresh={loadLayoutItems}
+              onOpenPreviewFile={handleOpenProofingUploadedFile}
+              onUploadLayoutFile={handleUploadLocalProductionFile}
+              onReleaseSelected={handleReleaseLayoutProofingsToProduction}
+              processingProofingId={processingProofingId}
             />
           ) : activeMenu === 'proofing' ? (
             <ProofingPanel

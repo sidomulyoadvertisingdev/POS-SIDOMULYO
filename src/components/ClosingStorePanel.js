@@ -373,7 +373,7 @@ const ClosingStorePanel = ({ currentUser, isActive, onNotify, onPrintReport }) =
     if (actionType === 'push_other_cashier' && !Number(draft.pic_user_id || 0)) missingFields.push('user kasir tujuan');
     if (!safeText(draft.follow_up)) missingFields.push('follow-up');
     if (missingFields.length > 0) {
-      onNotify?.('Order Belum Closing', `Lengkapi ${missingFields.join(', ')} sebelum menyimpan tindak lanjut order.`);
+      onNotify?.('Follow-up Closing', `Lengkapi ${missingFields.join(', ')} sebelum menyimpan tindak lanjut draft/piutang.`);
       return;
     }
     try {
@@ -389,9 +389,9 @@ const ClosingStorePanel = ({ currentUser, isActive, onNotify, onPrintReport }) =
       });
       setPayload(nextPayload);
       hydrateForm(nextPayload);
-      onNotify?.('Order Belum Closing', 'Reason dan follow-up berhasil disimpan.');
+      onNotify?.('Follow-up Closing', 'Reason dan follow-up berhasil disimpan.');
     } catch (error) {
-      onNotify?.('Order Belum Closing', error.message);
+      onNotify?.('Follow-up Closing', error.message);
     } finally {
       setSubmitting(false);
     }
@@ -403,7 +403,7 @@ const ClosingStorePanel = ({ currentUser, isActive, onNotify, onPrintReport }) =
     if (!safeText(bulkOrderReason)) missingFields.push('alasan');
     if (!safeText(bulkOrderFollowUp)) missingFields.push('follow-up');
     if (missingFields.length > 0) {
-      onNotify?.('Order Belum Closing', `Lengkapi ${missingFields.join(', ')} untuk pengisian bersama.`);
+      onNotify?.('Follow-up Closing', `Lengkapi ${missingFields.join(', ')} untuk pengisian bersama.`);
       return;
     }
     try {
@@ -422,9 +422,9 @@ const ClosingStorePanel = ({ currentUser, isActive, onNotify, onPrintReport }) =
       setBulkOrderReason('');
       setBulkOrderPicUserId(null);
       setBulkOrderFollowUp('');
-      onNotify?.('Order Belum Closing', `${nextPayload?.updated_count || 0} order berhasil diberi tindak lanjut.`);
+      onNotify?.('Follow-up Closing', `${nextPayload?.updated_count || 0} item berhasil diberi tindak lanjut.`);
     } catch (error) {
-      onNotify?.('Order Belum Closing', error.message);
+      onNotify?.('Follow-up Closing', error.message);
     } finally {
       setSubmitting(false);
     }
@@ -540,7 +540,7 @@ const ClosingStorePanel = ({ currentUser, isActive, onNotify, onPrintReport }) =
       <View style={styles.header}>
         <View>
           <Text style={styles.title}>Remittance Harian / Closing Toko</Text>
-          <Text style={styles.subtitle}>Syarat closing, checklist kasir, cash fisik, bukti transaksi, piutang, dan order menggantung disatukan dalam satu validasi harian.</Text>
+          <Text style={styles.subtitle}>Syarat closing, checklist kasir, cash fisik, bukti transaksi, draft, dan piutang jatuh tempo disatukan dalam satu validasi harian.</Text>
         </View>
         <View style={[styles.status, statusTone]}>
           <Text style={styles.statusText}>{closing?.is_ready && !isLocked ? 'Aman untuk Closing' : statusLabel(closing?.status)}</Text>
@@ -762,13 +762,13 @@ const ClosingStorePanel = ({ currentUser, isActive, onNotify, onPrintReport }) =
 
           {openOrders.length > 0 ? (
             <View style={styles.card}>
-              <Text style={styles.sectionTitle}>Order / Customer Belum Closing</Text>
-              <Text style={styles.meta}>{incompleteOpenOrders.length} dari {openOrders.length} order belum memiliki alasan, aksi, penanggung jawab, dan follow-up lengkap.</Text>
+              <Text style={styles.sectionTitle}>Follow-up Draft / Piutang Overdue</Text>
+              <Text style={styles.meta}>{incompleteOpenOrders.length} dari {openOrders.length} item belum memiliki alasan, aksi, penanggung jawab, dan follow-up lengkap.</Text>
               {!isLocked && incompleteOpenOrders.length > 1 ? (
                 <View style={styles.bulkCard}>
-                  <Text style={styles.issueTitle}>Isi Bersama untuk Order Belum Lengkap</Text>
-                  <Text style={styles.meta}>Gunakan bila alasan dan tindak lanjut memang sama. Status order tidak diubah dan aksi ini tetap masuk audit log.</Text>
-                  <TextInput value={bulkOrderReason} onChangeText={setBulkOrderReason} style={styles.input} placeholder="Alasan bersama order menggantung" />
+                  <Text style={styles.issueTitle}>Isi Bersama untuk Item Belum Lengkap</Text>
+                  <Text style={styles.meta}>Gunakan bila alasan dan tindak lanjut memang sama. Status transaksi tidak diubah dan aksi ini tetap masuk audit log.</Text>
+                  <TextInput value={bulkOrderReason} onChangeText={setBulkOrderReason} style={styles.input} placeholder="Alasan bersama draft/piutang" />
                   <ScrollView horizontal contentContainerStyle={styles.picRow}>
                     {userOptions.map((row) => (
                       <Pressable key={`bulk-issue-pic-${row.id}`} style={[styles.choice, Number(bulkOrderPicUserId) === Number(row.id) && styles.choiceActive]} onPress={() => setBulkOrderPicUserId(row.id)}>
@@ -778,7 +778,7 @@ const ClosingStorePanel = ({ currentUser, isActive, onNotify, onPrintReport }) =
                   </ScrollView>
                   <TextInput value={bulkOrderFollowUp} onChangeText={setBulkOrderFollowUp} style={[styles.input, styles.multiline]} placeholder="Follow-up bersama" multiline />
                   <Pressable style={styles.primaryButton} onPress={saveBulkOrderIssues} disabled={submitting}>
-                    <Text style={styles.primaryButtonText}>Terapkan ke {incompleteOpenOrders.length} Order Belum Lengkap</Text>
+                    <Text style={styles.primaryButtonText}>Terapkan ke {incompleteOpenOrders.length} Item Belum Lengkap</Text>
                   </Pressable>
                 </View>
               ) : null}
@@ -789,7 +789,7 @@ const ClosingStorePanel = ({ currentUser, isActive, onNotify, onPrintReport }) =
                     <Text style={styles.issueTitle}>{issue.invoice_no} - {issue.customer_name}</Text>
                     <Text style={styles.meta}>{issue.issue_type} | Status: {issue.order_status}</Text>
                     <Text style={styles.meta}>Aksi saat ini: {orderActionLabel(draft.action_type || issue.action_type)} {issue.escalation_role ? `| Eskalasi: ${issue.escalation_role}` : ''}</Text>
-                    <TextInput value={draft.reason || ''} onChangeText={(value) => updateOrderDraft(issue.id, 'reason', value)} style={styles.input} placeholder="Reason order menggantung" editable={!isLocked} />
+                    <TextInput value={draft.reason || ''} onChangeText={(value) => updateOrderDraft(issue.id, 'reason', value)} style={styles.input} placeholder="Reason draft/piutang overdue" editable={!isLocked} />
                     <View style={styles.wrapRow}>
                       {orderActionOptions.map(([value, label]) => (
                         <Pressable
