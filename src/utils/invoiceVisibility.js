@@ -188,7 +188,7 @@ const resolveInvoiceStatusKey = (status) => {
   const text = normalizeText(status);
   if (!text) return '';
   if (['queued_offline'].includes(text)) return 'queued_offline';
-  if (['draft'].includes(text)) return 'draft';
+  if (['draft', 'draft_order', 'draft_local', 'saved_draft', 'simpan_draft', 'rancangan'].includes(text)) return 'draft';
   if (['paid', 'lunas', 'full'].includes(text)) return 'paid';
   if (['partially_paid', 'partial_paid', 'dp'].includes(text)) return 'partially_paid';
   if (['pending_payment', 'awaiting_payment', 'unpaid'].includes(text)) return 'pending_payment';
@@ -212,14 +212,71 @@ const normalizeInvoiceStatusText = (row) => (
   )
 );
 
+const parseJsonObject = (value) => {
+  if (!value) return null;
+  if (value && typeof value === 'object' && !Array.isArray(value)) return value;
+  if (typeof value !== 'string') return null;
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
+  } catch (_error) {
+    return null;
+  }
+};
+
+const hasDraftSnapshot = (row) => {
+  const candidates = [
+    row?.draft_form,
+    row?.draft_snapshot,
+    row?.spec_snapshot,
+    row?.order?.draft_form,
+    row?.order?.draft_snapshot,
+    row?.order?.spec_snapshot,
+  ];
+
+  const items = []
+    .concat(Array.isArray(row?.items) ? row.items : [])
+    .concat(Array.isArray(row?.order_items) ? row.order_items : [])
+    .concat(Array.isArray(row?.order?.items) ? row.order.items : []);
+
+  items.forEach((item) => {
+    candidates.push(item?.draft_form, item?.draft_snapshot, item?.spec_snapshot);
+  });
+
+  return candidates.some((value) => {
+    const snapshot = parseJsonObject(value);
+    if (!snapshot) return false;
+    return Boolean(
+      snapshot?.draft_form
+      || snapshot?.draft_restore
+      || snapshot?.is_draft
+    );
+  });
+};
+
 const isDraftCandidate = (row) => {
-  const status = normalizeText(row?.status);
-  if (status === 'draft') {
+  const statusCandidates = [
+    row?.status,
+    row?.order_status,
+    row?.order?.status,
+    row?.order?.order_status,
+    row?.invoice?.status,
+    row?.invoice?.order_status,
+  ];
+  if (statusCandidates.some((status) => resolveInvoiceStatusKey(status) === 'draft')) {
     return true;
   }
-  const notes = normalizeText(row?.notes);
+
+  const notes = normalizeText([
+    row?.notes,
+    row?.note,
+    row?.order?.notes,
+    row?.order?.note,
+    row?.invoice?.notes,
+    row?.invoice?.note,
+  ].filter(Boolean).join('\n'));
   if (!notes.includes('mode: simpan draft')) {
-    return false;
+    return hasDraftSnapshot(row);
   }
   return !notes.includes('mode: proses orderan');
 };
@@ -360,6 +417,7 @@ module.exports = {
   canUserViewInvoiceRow,
   collectRoleLabels,
   filterInvoiceRowsForUser,
+  isDraftCandidate,
   isApprovalInvoiceRow,
   isCashierUser,
   isDraftInvoiceRow,
