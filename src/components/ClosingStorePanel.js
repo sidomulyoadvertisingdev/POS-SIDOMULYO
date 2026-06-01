@@ -21,6 +21,41 @@ const todayIso = () => new Date().toISOString().slice(0, 10);
 const sanitizeAmount = (value) => String(value || '').replace(/[^\d]/g, '');
 const parseAmount = (value) => Number(sanitizeAmount(value) || 0);
 const safeText = (value) => String(value || '').trim();
+const CASH_DENOMINATIONS = [
+  100000,
+  50000,
+  20000,
+  10000,
+  5000,
+  2000,
+  1000,
+  500,
+  200,
+  100,
+];
+const createEmptyCashBreakdown = () => Object.fromEntries(CASH_DENOMINATIONS.map((value) => [String(value), '']));
+const normalizeCashBreakdownRows = (rows = []) => {
+  const breakdown = createEmptyCashBreakdown();
+  (Array.isArray(rows) ? rows : []).forEach((row) => {
+    const denomination = String(Number(row?.denomination || 0) || '');
+    if (Object.prototype.hasOwnProperty.call(breakdown, denomination)) {
+      breakdown[denomination] = String(Number(row?.qty || 0) || '');
+    }
+  });
+  return breakdown;
+};
+const buildCashBreakdownPayload = (breakdown = {}) => CASH_DENOMINATIONS
+  .map((denomination) => {
+    const qty = Number(sanitizeAmount(breakdown[String(denomination)] || '')) || 0;
+    return {
+      denomination,
+      qty,
+      subtotal: denomination * qty,
+    };
+  })
+  .filter((row) => row.qty > 0);
+const calculateCashBreakdownTotal = (breakdown = {}) => buildCashBreakdownPayload(breakdown)
+  .reduce((total, row) => total + Number(row.subtotal || 0), 0);
 const correctionTypes = [
   ['klarifikasi_telat', 'Klarifikasi telat'],
   ['bukti_tambahan', 'Bukti tambahan'],
@@ -40,6 +75,27 @@ const cashDecisions = [
   ['management', 'Beban management'],
   ['shared_team', 'Dibagi tim'],
 ];
+const orderActionOptions = [
+  ['cancel', 'Cancel'],
+  ['push_same_cashier', 'Push kasir saya'],
+  ['push_other_cashier', 'Push kasir lain'],
+  ['push_store_head', 'Push kepala toko'],
+  ['push_ops_head', 'Push kepala ops'],
+  ['push_owner', 'Push owner'],
+];
+const orderActionLabel = (value) => Object.fromEntries(orderActionOptions)[value] || value || 'Belum dipilih';
+const financeStatusLabel = (value) => ({
+  system_verified: 'Dibaca Sistem',
+  cash_validated: 'Cash Valid',
+  needs_cash_validation: 'Butuh Validasi Cash',
+  overdue_attention: 'Ada Piutang Lewat Tempo',
+  monitored: 'Termonitor',
+}[String(value || '')] || value || '-');
+const receivableRiskTone = (value) => ({
+  critical: '#9f1239',
+  danger: '#b42318',
+  warning: '#b45309',
+}[String(value || '')] || '#174a8c');
 
 const statusLabel = (value) => ({
   draft: 'Draft',
@@ -80,6 +136,7 @@ const ClosingStorePanel = ({ currentUser, isActive, onNotify, onPrintReport }) =
   const [submitting, setSubmitting] = useState(false);
   const [uploadingKey, setUploadingKey] = useState('');
   const [physicalCash, setPhysicalCash] = useState('');
+  const [cashBreakdown, setCashBreakdown] = useState(createEmptyCashBreakdown);
   const [cashReason, setCashReason] = useState('');
   const [responsibleUserId, setResponsibleUserId] = useState(null);
   const [cashEvidence, setCashEvidence] = useState(null);
@@ -103,16 +160,38 @@ const ClosingStorePanel = ({ currentUser, isActive, onNotify, onPrintReport }) =
   const existingCash = summary?.cash_validation?.data || null;
   const expectedMovement = Number(summary?.cash_validation?.expected_cash_movement || 0);
   const expectedCashPreview = expectedMovement;
+  const cashBreakdownTotal = calculateCashBreakdownTotal(cashBreakdown);
   const physicalCashValue = parseAmount(physicalCash);
   const cashDifferencePreview = physicalCashValue - expectedCashPreview;
   const openOrders = Array.isArray(summary?.open_orders) ? summary.open_orders : [];
   const incompleteOpenOrders = openOrders.filter((row) => (
-    !safeText(row.reason) || !Number(row.pic_user_id || 0) || !safeText(row.follow_up)
+    !safeText(row.reason)
+    || !safeText(row.action_type)
+    || (
+      !['push_store_head', 'push_ops_head', 'push_owner'].includes(safeText(row.action_type))
+      && !Number(row.pic_user_id || 0)
+    )
+    || !safeText(row.follow_up)
   ));
   const checklists = Array.isArray(summary?.checklists) ? summary.checklists : [];
   const blockers = Array.isArray(summary?.blockers) ? summary.blockers : [];
   const missingExpenses = Array.isArray(summary?.expenses?.missing_evidence) ? summary.expenses.missing_evidence : [];
   const missingPurchases = Array.isArray(summary?.purchases?.missing_evidence) ? summary.purchases.missing_evidence : [];
+  const financeBalance = summary?.finance_balance && typeof summary.finance_balance === 'object' ? summary.finance_balance : {};
+  const receivables = summary?.receivables && typeof summary.receivables === 'object' ? summary.receivables : {};
+  const cashierReceivableRisks = Array.isArray(receivables?.cashier_risks) ? receivables.cashier_risks : [];
+  const receivableGuard = receivables?.operational_guard && typeof receivables.operational_guard === 'object'
+    ? receivables.operational_guard
+    : null;
+  const receivableBuckets = [
+    ['due_today', 'Jatuh tempo hari ini'],
+    ['due_next_3_days', 'Akan jatuh tempo 3 hari'],
+    ['overdue_1_to_3_days', 'Telat 1-3 hari'],
+    ['overdue_4_to_7_days', 'Telat 4-7 hari'],
+    ['overdue_8_to_30_days', 'Telat 8-30 hari'],
+    ['overdue_more_than_30_days', 'Telat >30 hari'],
+    ['without_due_date', 'Tanpa tempo'],
+  ];
   const cashValidations = Array.isArray(workflow?.cash_validations) ? workflow.cash_validations : [];
   const differenceValidations = cashValidations.filter((row) => Math.abs(Number(row?.difference || 0)) > 0);
   const corrections = Array.isArray(workflow?.corrections) ? workflow.corrections : [];
@@ -138,10 +217,12 @@ const ClosingStorePanel = ({ currentUser, isActive, onNotify, onPrintReport }) =
     setCashEvidence(null);
     if (cash) {
       setPhysicalCash(sanitizeAmount(cash.physical_cash));
+      setCashBreakdown(normalizeCashBreakdownRows(cash.cash_breakdown));
       setCashReason(safeText(cash.reason));
       setResponsibleUserId(Number(cash.responsible_user_id || 0) || null);
     } else {
       setPhysicalCash('');
+      setCashBreakdown(createEmptyCashBreakdown());
       setCashReason('');
       setResponsibleUserId(null);
     }
@@ -149,7 +230,10 @@ const ClosingStorePanel = ({ currentUser, isActive, onNotify, onPrintReport }) =
     (nextPayload?.summary?.open_orders || []).forEach((row) => {
       drafts[row.id] = {
         reason: safeText(row.reason),
+        action_type: safeText(row.action_type) || 'push_same_cashier',
         pic_user_id: Number(row.pic_user_id || currentUser?.id || 0) || null,
+        escalation_role: safeText(row.escalation_role),
+        escalated_user_id: Number(row.escalated_user_id || 0) || null,
         follow_up: safeText(row.follow_up),
       };
     });
@@ -196,6 +280,18 @@ const ClosingStorePanel = ({ currentUser, isActive, onNotify, onPrintReport }) =
     hydrateForm(nextPayload);
   };
 
+  const updateCashBreakdownQty = (denomination, value) => {
+    const qtyText = sanitizeAmount(value);
+    setCashBreakdown((current) => {
+      const next = {
+        ...current,
+        [String(denomination)]: qtyText,
+      };
+      setPhysicalCash(String(calculateCashBreakdownTotal(next) || ''));
+      return next;
+    });
+  };
+
   const saveCashValidation = async () => {
     if (!(closingId > 0)) return;
     if (cashDifferencePreview !== 0 && (!cashReason || !responsibleUserId || !cashEvidence) && !existingCash?.evidence_path) {
@@ -206,6 +302,7 @@ const ClosingStorePanel = ({ currentUser, isActive, onNotify, onPrintReport }) =
       setSubmitting(true);
       const nextPayload = await saveStoreClosingCashValidation(closingId, {
         physical_cash: physicalCashValue,
+        cash_breakdown: buildCashBreakdownPayload(cashBreakdown),
         reason: cashReason,
         responsible_user_id: responsibleUserId,
         evidence: cashEvidence,
@@ -272,7 +369,8 @@ const ClosingStorePanel = ({ currentUser, isActive, onNotify, onPrintReport }) =
     const draft = orderDrafts[issue.id] || {};
     const missingFields = [];
     if (!safeText(draft.reason)) missingFields.push('alasan');
-    if (!Number(draft.pic_user_id || 0)) missingFields.push('PIC');
+    const actionType = safeText(draft.action_type) || 'push_same_cashier';
+    if (actionType === 'push_other_cashier' && !Number(draft.pic_user_id || 0)) missingFields.push('user kasir tujuan');
     if (!safeText(draft.follow_up)) missingFields.push('follow-up');
     if (missingFields.length > 0) {
       onNotify?.('Order Belum Closing', `Lengkapi ${missingFields.join(', ')} sebelum menyimpan tindak lanjut order.`);
@@ -282,9 +380,12 @@ const ClosingStorePanel = ({ currentUser, isActive, onNotify, onPrintReport }) =
       setSubmitting(true);
       const nextPayload = await saveStoreClosingOrderIssue(closingId, issue.id, {
         reason: safeText(draft.reason),
-        pic_user_id: Number(draft.pic_user_id || 0),
+        action_type: actionType,
+        pic_user_id: Number(draft.pic_user_id || 0) || null,
+        escalation_role: safeText(draft.escalation_role) || null,
+        escalated_user_id: Number(draft.escalated_user_id || 0) || null,
         follow_up: safeText(draft.follow_up),
-        resolution_status: 'follow_up',
+        resolution_status: actionType === 'cancel' ? 'cancelled' : 'follow_up',
       });
       setPayload(nextPayload);
       hydrateForm(nextPayload);
@@ -300,7 +401,6 @@ const ClosingStorePanel = ({ currentUser, isActive, onNotify, onPrintReport }) =
     if (!(closingId > 0) || incompleteOpenOrders.length === 0) return;
     const missingFields = [];
     if (!safeText(bulkOrderReason)) missingFields.push('alasan');
-    if (!Number(bulkOrderPicUserId || 0)) missingFields.push('PIC');
     if (!safeText(bulkOrderFollowUp)) missingFields.push('follow-up');
     if (missingFields.length > 0) {
       onNotify?.('Order Belum Closing', `Lengkapi ${missingFields.join(', ')} untuk pengisian bersama.`);
@@ -311,7 +411,8 @@ const ClosingStorePanel = ({ currentUser, isActive, onNotify, onPrintReport }) =
       const nextPayload = await saveStoreClosingOrderIssuesBulk(closingId, {
         issue_ids: incompleteOpenOrders.map((row) => row.id),
         reason: safeText(bulkOrderReason),
-        pic_user_id: Number(bulkOrderPicUserId),
+        action_type: 'push_same_cashier',
+        pic_user_id: Number(bulkOrderPicUserId || currentUser?.id || 0) || null,
         follow_up: safeText(bulkOrderFollowUp),
         resolution_status: 'follow_up',
         only_incomplete: true,
@@ -438,8 +539,8 @@ const ClosingStorePanel = ({ currentUser, isActive, onNotify, onPrintReport }) =
     <View style={styles.panel}>
       <View style={styles.header}>
         <View>
-          <Text style={styles.title}>Closing Toko Harian</Text>
-          <Text style={styles.subtitle}>Checklist kasir, validasi cash, bukti, dan order menggantung dinilai oleh backend.</Text>
+          <Text style={styles.title}>Remittance Harian / Closing Toko</Text>
+          <Text style={styles.subtitle}>Syarat closing, checklist kasir, cash fisik, bukti transaksi, piutang, dan order menggantung disatukan dalam satu validasi harian.</Text>
         </View>
         <View style={[styles.status, statusTone]}>
           <Text style={styles.statusText}>{closing?.is_ready && !isLocked ? 'Aman untuk Closing' : statusLabel(closing?.status)}</Text>
@@ -467,6 +568,25 @@ const ClosingStorePanel = ({ currentUser, isActive, onNotify, onPrintReport }) =
             <SummaryCard label="Pembelian" value={summary.purchases?.total} warning />
           </View>
 
+          <View style={styles.card}>
+            <Text style={styles.sectionTitle}>Keuangan Balance</Text>
+            <Text style={styles.meta}>QRIS dan bank dibaca sistem dari transaksi. Cash mengikuti validasi pecahan uang. Piutang ditarik dari invoice aktif yang punya jatuh tempo.</Text>
+            <View style={styles.financeGrid}>
+              {['qris', 'bank', 'cash', 'receivable'].map((key) => {
+                const item = financeBalance[key] || {};
+                const danger = ['needs_cash_validation', 'overdue_attention'].includes(String(item.status || ''));
+                return (
+                  <View key={`finance-${key}`} style={[styles.financeCard, danger ? styles.financeCardWarning : null]}>
+                    <Text style={styles.financeLabel}>{item.label || key}</Text>
+                    <Text style={styles.financeValue}>{formatRupiah(item.amount || 0)}</Text>
+                    <Text style={[styles.financeStatus, danger ? styles.badText : styles.goodText]}>{financeStatusLabel(item.status)}</Text>
+                    <Text style={styles.meta}>{item.source || '-'}</Text>
+                  </View>
+                );
+              })}
+            </View>
+          </View>
+
           {blockers.length > 0 ? (
             <View style={styles.blockerCard}>
               <Text style={styles.sectionTitle}>Belum Bisa Final Closing</Text>
@@ -480,7 +600,32 @@ const ClosingStorePanel = ({ currentUser, isActive, onNotify, onPrintReport }) =
             <View style={styles.card}>
               <Text style={styles.sectionTitle}>Validasi Cash</Text>
               <Text style={styles.meta}>Pergerakan cash transaksi: {formatRupiah(expectedMovement)}</Text>
+              <View style={styles.cashBreakdownBox}>
+                <View style={styles.cashBreakdownHeader}>
+                  <Text style={styles.cashBreakdownTitle}>Hitung Pecahan Uang</Text>
+                  <Text style={styles.cashBreakdownTotal}>{formatRupiah(cashBreakdownTotal)}</Text>
+                </View>
+                {CASH_DENOMINATIONS.map((denomination) => {
+                  const qty = cashBreakdown[String(denomination)] || '';
+                  const subtotal = denomination * (Number(qty || 0) || 0);
+                  return (
+                    <View key={`cash-denomination-${denomination}`} style={styles.cashBreakdownRow}>
+                      <Text style={styles.cashDenominationLabel}>{formatRupiah(denomination)}</Text>
+                      <TextInput
+                        value={qty}
+                        onChangeText={(value) => updateCashBreakdownQty(denomination, value)}
+                        style={styles.cashQtyInput}
+                        placeholder="0"
+                        keyboardType="numeric"
+                        editable={!isLocked}
+                      />
+                      <Text style={styles.cashSubtotalText}>{formatRupiah(subtotal)}</Text>
+                    </View>
+                  );
+                })}
+              </View>
               <TextInput value={physicalCash} onChangeText={(value) => setPhysicalCash(sanitizeAmount(value))} style={styles.input} placeholder="Cash fisik saat closing" editable={!isLocked} />
+              <Text style={styles.meta}>Cash fisik otomatis mengikuti total pecahan. Input manual tetap bisa dipakai jika ada nominal lain.</Text>
               <Text style={styles.meta}>Cash seharusnya: {formatRupiah(expectedCashPreview)}</Text>
               <Text style={[styles.cashDiff, cashDifferencePreview === 0 ? styles.goodText : styles.badText]}>
                 Selisih: {formatRupiah(cashDifferencePreview)}
@@ -566,10 +711,59 @@ const ClosingStorePanel = ({ currentUser, isActive, onNotify, onPrintReport }) =
             </View>
           ) : null}
 
+          <View style={styles.card}>
+            <Text style={styles.sectionTitle}>Piutang Customer & Reminder</Text>
+            <Text style={styles.meta}>Muncul di remittance agar kasir melihat piutang hari ini, 3 hari ke depan, dan yang sudah terlambat sebelum closing.</Text>
+            <View style={styles.financeGrid}>
+              {receivableBuckets.map(([key, label]) => {
+                const bucket = receivables[key] || {};
+                const danger = String(key).startsWith('overdue') || key === 'without_due_date';
+                return (
+                  <View key={`receivable-bucket-${key}`} style={[styles.financeCard, danger && Number(bucket.total || 0) > 0 ? styles.financeCardWarning : null]}>
+                    <Text style={styles.financeLabel}>{label}</Text>
+                    <Text style={styles.financeValue}>{formatRupiah(bucket.total || 0)}</Text>
+                    <Text style={styles.meta}>{bucket.count || 0} invoice</Text>
+                  </View>
+                );
+              })}
+            </View>
+            {Array.isArray(receivables?.overdue?.items) && receivables.overdue.items.length > 0 ? (
+              <View style={styles.receivableList}>
+                <Text style={styles.issueTitle}>Piutang Terlambat yang Perlu Dipush</Text>
+                {receivables.overdue.items.slice(0, 6).map((row) => (
+                  <Text key={`overdue-${row.invoice_id}`} style={styles.meta}>
+                    {row.invoice_no} | {row.customer_name} | {formatRupiah(row.due_total)} | Tempo {row.due_at || '-'} | Kasir {row.cashier_name || '-'}
+                  </Text>
+                ))}
+              </View>
+            ) : null}
+            {cashierReceivableRisks.length > 0 ? (
+              <View style={styles.receivableRiskBox}>
+                <Text style={styles.issueTitle}>Alarm Tanggung Jawab Kasir</Text>
+                {receivableGuard?.message ? (
+                  <Text style={styles.meta}>{receivableGuard.message}</Text>
+                ) : null}
+                {cashierReceivableRisks.slice(0, 6).map((row) => (
+                  <View key={`cashier-risk-${row.cashier_id || row.cashier_name}`} style={styles.receivableRiskCard}>
+                    <View style={styles.receivableRiskHeader}>
+                      <Text style={styles.receivableRiskName}>{row.cashier_name || 'Kasir belum tercatat'}</Text>
+                      <Text style={[styles.receivableRiskStage, { color: receivableRiskTone(row.severity) }]}>{row.recommended_label || '-'}</Text>
+                    </View>
+                    <Text style={styles.meta}>
+                      {row.overdue_count || 0} invoice | {formatRupiah(row.overdue_total || 0)} | telat paling lama {row.max_overdue_days || 0} hari
+                    </Text>
+                    <Text style={styles.receivableRiskAction}>{row.recommended_action || '-'}</Text>
+                    <Text style={styles.meta}>Mode aman: akun tetap bisa transaksi sampai ada approval peralihan tanggung jawab di modul leader/HRD.</Text>
+                  </View>
+                ))}
+              </View>
+            ) : null}
+          </View>
+
           {openOrders.length > 0 ? (
             <View style={styles.card}>
               <Text style={styles.sectionTitle}>Order / Customer Belum Closing</Text>
-              <Text style={styles.meta}>{incompleteOpenOrders.length} dari {openOrders.length} order belum memiliki alasan, PIC, dan follow-up lengkap.</Text>
+              <Text style={styles.meta}>{incompleteOpenOrders.length} dari {openOrders.length} order belum memiliki alasan, aksi, penanggung jawab, dan follow-up lengkap.</Text>
               {!isLocked && incompleteOpenOrders.length > 1 ? (
                 <View style={styles.bulkCard}>
                   <Text style={styles.issueTitle}>Isi Bersama untuk Order Belum Lengkap</Text>
@@ -594,7 +788,31 @@ const ClosingStorePanel = ({ currentUser, isActive, onNotify, onPrintReport }) =
                   <View key={`issue-${issue.id}`} style={styles.issueCard}>
                     <Text style={styles.issueTitle}>{issue.invoice_no} - {issue.customer_name}</Text>
                     <Text style={styles.meta}>{issue.issue_type} | Status: {issue.order_status}</Text>
+                    <Text style={styles.meta}>Aksi saat ini: {orderActionLabel(draft.action_type || issue.action_type)} {issue.escalation_role ? `| Eskalasi: ${issue.escalation_role}` : ''}</Text>
                     <TextInput value={draft.reason || ''} onChangeText={(value) => updateOrderDraft(issue.id, 'reason', value)} style={styles.input} placeholder="Reason order menggantung" editable={!isLocked} />
+                    <View style={styles.wrapRow}>
+                      {orderActionOptions.map(([value, label]) => (
+                        <Pressable
+                          key={`issue-${issue.id}-action-${value}`}
+                          style={[styles.choice, (draft.action_type || 'push_same_cashier') === value && styles.choiceActive]}
+                          onPress={() => {
+                            updateOrderDraft(issue.id, 'action_type', value);
+                            if (value === 'push_same_cashier') {
+                              updateOrderDraft(issue.id, 'pic_user_id', currentUser?.id || null);
+                            }
+                            if (value !== 'push_other_cashier') {
+                              updateOrderDraft(issue.id, 'escalation_role', value.replace(/^push_/, ''));
+                            }
+                          }}
+                          disabled={isLocked}
+                        >
+                          <Text style={styles.choiceText}>{label}</Text>
+                        </Pressable>
+                      ))}
+                    </View>
+                    {(draft.action_type || 'push_same_cashier') === 'push_other_cashier' ? (
+                      <Text style={styles.meta}>Pilih user kasir tujuan:</Text>
+                    ) : null}
                     <ScrollView horizontal contentContainerStyle={styles.picRow}>
                       {userOptions.map((row) => (
                         <Pressable key={`issue-${issue.id}-pic-${row.id}`} style={[styles.choice, Number(draft.pic_user_id) === Number(row.id) && styles.choiceActive]} onPress={() => updateOrderDraft(issue.id, 'pic_user_id', row.id)} disabled={isLocked}>
@@ -791,6 +1009,19 @@ const styles = StyleSheet.create({
   summaryWarning: { backgroundColor: '#fff2df', borderColor: '#edd2a7' },
   summaryLabel: { fontSize: 11, fontWeight: '800', color: '#435674' },
   summaryValue: { marginTop: 6, fontSize: 17, fontWeight: '900', color: '#173c87' },
+  financeGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  financeCard: { flexGrow: 1, flexBasis: 180, borderWidth: 1, borderColor: '#dce5f4', backgroundColor: '#f8fbff', borderRadius: 12, padding: 10, gap: 4 },
+  financeCardWarning: { borderColor: '#efce9c', backgroundColor: '#fff7eb' },
+  financeLabel: { color: '#435674', fontSize: 11, fontWeight: '900' },
+  financeValue: { color: '#173c87', fontSize: 16, fontWeight: '900' },
+  financeStatus: { fontSize: 10, fontWeight: '900' },
+  receivableList: { borderWidth: 1, borderColor: '#ead7bd', backgroundColor: '#fffaf2', borderRadius: 12, padding: 10, gap: 4 },
+  receivableRiskBox: { borderWidth: 1, borderColor: '#f0c7b8', backgroundColor: '#fff7f3', borderRadius: 12, padding: 10, gap: 8 },
+  receivableRiskCard: { borderWidth: 1, borderColor: '#f2d0c4', backgroundColor: '#fffefd', borderRadius: 10, padding: 10, gap: 4 },
+  receivableRiskHeader: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', justifyContent: 'space-between', gap: 8 },
+  receivableRiskName: { color: '#173c87', fontSize: 12, fontWeight: '900' },
+  receivableRiskStage: { fontSize: 11, fontWeight: '900' },
+  receivableRiskAction: { color: '#6b2f18', fontSize: 11, lineHeight: 16, fontWeight: '800' },
   blockerCard: { padding: 14, borderRadius: 14, borderWidth: 1, borderColor: '#f4b88b', backgroundColor: '#fff0e4', gap: 5 },
   blockerText: { fontSize: 12, lineHeight: 17, color: '#8a3d16', fontWeight: '700' },
   twoColumns: { flexDirection: 'row', flexWrap: 'wrap', gap: 12 },
@@ -799,6 +1030,14 @@ const styles = StyleSheet.create({
   meta: { fontSize: 11, lineHeight: 16, color: '#667897' },
   input: { borderWidth: 1, borderColor: '#d4dcea', backgroundColor: '#fbfdff', borderRadius: 10, paddingHorizontal: 11, paddingVertical: 9, fontSize: 12, color: '#14233d' },
   multiline: { minHeight: 54, textAlignVertical: 'top' },
+  cashBreakdownBox: { borderWidth: 1, borderColor: '#dce5f4', backgroundColor: '#f8fbff', borderRadius: 12, padding: 10, gap: 7 },
+  cashBreakdownHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 8 },
+  cashBreakdownTitle: { fontSize: 12, fontWeight: '900', color: '#173c87' },
+  cashBreakdownTotal: { fontSize: 13, fontWeight: '900', color: '#1d6c43' },
+  cashBreakdownRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  cashDenominationLabel: { flex: 1, fontSize: 11, color: '#243957', fontWeight: '800' },
+  cashQtyInput: { width: 74, borderWidth: 1, borderColor: '#d4dcea', backgroundColor: '#fff', borderRadius: 8, paddingHorizontal: 9, paddingVertical: 7, fontSize: 12, color: '#14233d', textAlign: 'center' },
+  cashSubtotalText: { flex: 1, textAlign: 'right', fontSize: 11, color: '#435674', fontWeight: '800' },
   cashDiff: { fontSize: 13, fontWeight: '900' },
   goodText: { color: '#1d6c43' },
   badText: { color: '#aa4a1d' },

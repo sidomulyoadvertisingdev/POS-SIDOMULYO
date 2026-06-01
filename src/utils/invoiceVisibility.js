@@ -339,6 +339,10 @@ const canUserAccessInvoiceRow = (row, user) => {
     return true;
   }
 
+  if (isDraftInvoiceRow(row)) {
+    return true;
+  }
+
   if (normalizeText(row?.__source) === 'queue') {
     return true;
   }

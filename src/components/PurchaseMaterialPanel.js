@@ -1,12 +1,15 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import {
+  approvePembelianBahanRequest,
   createPembelianBahanRequest,
   getPembelianBahanDetail,
   getPembelianBahanList,
   getPembelianBahanMaterialOptions,
   getPembelianCategoryOptions,
   fetchPosBankAccounts,
+  rejectPembelianBahanRequest,
+  uploadPembelianBahanEvidence,
 } from '../services/erpApi';
 import { formatRupiah } from '../utils/currency';
 
@@ -32,6 +35,34 @@ const parseQtyInput = (value) => {
   return Number.isFinite(parsed) ? parsed : 0;
 };
 
+const chooseBrowserFile = () => new Promise((resolve, reject) => {
+  if (typeof document === 'undefined') {
+    reject(new Error('Upload nota tersedia pada aplikasi web/desktop.'));
+    return;
+  }
+  const input = document.createElement('input');
+  input.type = 'file';
+  input.accept = '.jpg,.jpeg,.png,.webp,.pdf';
+  input.onchange = () => resolve(input.files?.[0] || null);
+  input.onerror = () => reject(new Error('Gagal membuka pemilih file nota.'));
+  input.click();
+});
+
+const canApprovePurchase = (user) => {
+  const roleNames = [
+    String(user?.role_name || ''),
+    ...(Array.isArray(user?.roles) ? user.roles.map((role) => role?.name || role) : []),
+  ].map((role) => String(role || '').trim().toLowerCase());
+  return roleNames.some((role) => [
+    'owner',
+    'admin',
+    'manager',
+    'admin_keuangan',
+    'kepala_kordinasi_kasir',
+    'kepala_kordinasi_produksi',
+  ].includes(role));
+};
+
 const resolveStatusTone = (status = '') => {
   const normalized = String(status || '').trim().toLowerCase();
   if (normalized === 'approved') return styles.statusSuccess;
@@ -52,6 +83,8 @@ const resolveCategoryTypeLabel = (type = '') => {
 const resolveCategoryFlowLabel = (flow = '') => (
   String(flow || '').trim().toLowerCase() === 'stock_request'
     ? 'Request Gudang'
+    : String(flow || '').trim().toLowerCase() === 'store_stock_purchase'
+    ? 'Stok Masuk Toko'
     : 'Belanja Toko'
 );
 
@@ -153,6 +186,9 @@ const PurchaseMaterialPanel = ({ currentUser, isActive, onNotify }) => {
   const [paymentAccounts, setPaymentAccounts] = useState([]);
   const [selectedPaymentAccountId, setSelectedPaymentAccountId] = useState(null);
   const [isPaymentAccountsLoading, setIsPaymentAccountsLoading] = useState(false);
+  const [purchaseEvidenceFile, setPurchaseEvidenceFile] = useState(null);
+  const [approvalActionKey, setApprovalActionKey] = useState('');
+  const [rejectReasonInput, setRejectReasonInput] = useState('');
 
   const selectedCategory = useMemo(() => (
     purchaseCategories.find((row) => String(row?.code || '') === String(selectedCategoryCode || ''))
@@ -160,14 +196,17 @@ const PurchaseMaterialPanel = ({ currentUser, isActive, onNotify }) => {
   ), [purchaseCategories, selectedCategoryCode]);
 
   const isMaterialFlow = String(selectedCategory?.flow || '') === 'stock_request';
+  const isStoreStockPurchaseFlow = String(selectedCategory?.flow || '') === 'store_stock_purchase';
+  const isWarehouseSelectionFlow = isMaterialFlow || isStoreStockPurchaseFlow;
   const categoryItemRows = useMemo(
     () => (Array.isArray(selectedCategory?.items) ? selectedCategory.items : []),
     [selectedCategory],
   );
-  const hasCategoryItemOptions = !isMaterialFlow && categoryItemRows.length > 0;
+  const hasCategoryItemOptions = !isWarehouseSelectionFlow && categoryItemRows.length > 0;
   const selectedPaymentAccount = useMemo(() => (
     paymentAccounts.find((row) => Number(row?.id || 0) === Number(selectedPaymentAccountId || 0)) || null
   ), [paymentAccounts, selectedPaymentAccountId]);
+  const userCanApprovePurchase = canApprovePurchase(currentUser);
 
   const filteredMaterials = useMemo(() => {
     const keyword = String(materialSearch || '').trim().toLowerCase();
@@ -204,10 +243,10 @@ const PurchaseMaterialPanel = ({ currentUser, isActive, onNotify }) => {
     () => (Array.isArray(draftItems) ? draftItems : []).some((row) => (
       !String(row?.material_name || '').trim()
       || !(Number(row?.qty || 0) > 0)
-      || Boolean(row?.price_missing)
+      || (isMaterialFlow && Boolean(row?.price_missing))
       || !(Number(row?.unit_price || 0) > 0)
     )),
-    [draftItems],
+    [draftItems, isMaterialFlow],
   );
 
   const selectedMaterialCount = selectedMaterialIds.length;
@@ -332,7 +371,7 @@ const PurchaseMaterialPanel = ({ currentUser, isActive, onNotify }) => {
       setIsCategoryModalVisible(true);
       return;
     }
-    if (!isMaterialFlow) {
+    if (!isWarehouseSelectionFlow) {
       return;
     }
     if (!materialRows.length) {
@@ -418,7 +457,15 @@ const PurchaseMaterialPanel = ({ currentUser, isActive, onNotify }) => {
         if (existingIndex >= 0) {
           return;
         }
-        nextRows.push(buildDraftItemFromMaterial(row));
+        const draftItem = buildDraftItemFromMaterial(row);
+        nextRows.push(isStoreStockPurchaseFlow ? {
+          ...draftItem,
+          unit_price: 0,
+          harga_satuan: 0,
+          subtotal: 0,
+          price_missing: false,
+          is_price_locked: false,
+        } : draftItem);
       });
       return nextRows;
     });
@@ -476,6 +523,7 @@ const PurchaseMaterialPanel = ({ currentUser, isActive, onNotify }) => {
     }
     const nextCategory = purchaseCategories.find((row) => String(row?.code || '') === nextCode) || null;
     const nextIsMaterialFlow = String(nextCategory?.flow || '') === 'stock_request';
+    const nextIsStoreStockPurchaseFlow = String(nextCategory?.flow || '') === 'store_stock_purchase';
     const nextCategoryItems = Array.isArray(nextCategory?.items) ? nextCategory.items : [];
     setSelectedCategoryCode(nextCode);
     setSelectedMaterialIds([]);
@@ -486,7 +534,7 @@ const PurchaseMaterialPanel = ({ currentUser, isActive, onNotify }) => {
     setIsCategoryItemModalVisible(false);
     setIsMaterialModalVisible(false);
 
-    if (!nextIsMaterialFlow && nextCategoryItems.length > 0) {
+    if (!nextIsMaterialFlow && !nextIsStoreStockPurchaseFlow && nextCategoryItems.length > 0) {
       setIsCategoryItemModalVisible(true);
     }
   };
@@ -542,6 +590,78 @@ const PurchaseMaterialPanel = ({ currentUser, isActive, onNotify }) => {
     setDraftItems((prev) => prev.filter((row) => String(row?.id || '') !== String(id || '')));
   };
 
+  const selectPurchaseEvidence = async () => {
+    try {
+      const file = await chooseBrowserFile();
+      if (file) {
+        setPurchaseEvidenceFile(file);
+      }
+    } catch (error) {
+      onNotify?.('Nota Pembelian', error.message);
+    }
+  };
+
+  const refreshPurchaseRow = async (row) => {
+    const detail = await getPembelianBahanDetail(row?.id);
+    setSelectedDetail(detail);
+    setSelectedRequestId(String(detail?.id || row?.id || ''));
+    await loadRequests();
+    return detail;
+  };
+
+  const uploadEvidenceForExistingPurchase = async (row) => {
+    try {
+      const file = await chooseBrowserFile();
+      if (!file) return;
+      const key = `upload-${row.id}`;
+      setApprovalActionKey(key);
+      const updated = await uploadPembelianBahanEvidence(row.id, file);
+      setSelectedDetail(updated);
+      await loadRequests();
+      onNotify?.('Nota Pembelian', 'Nota berhasil diupload. Pembelian menunggu approval admin/owner.');
+    } catch (error) {
+      onNotify?.('Nota Pembelian', error.message);
+    } finally {
+      setApprovalActionKey('');
+    }
+  };
+
+  const approvePurchase = async (row) => {
+    try {
+      const key = `approve-${row.id}`;
+      setApprovalActionKey(key);
+      const updated = await approvePembelianBahanRequest(row.id);
+      setSelectedDetail(updated);
+      await loadRequests();
+      onNotify?.('Approval Pembelian', 'Pembelian disetujui. Stok toko sudah bertambah.');
+    } catch (error) {
+      onNotify?.('Approval Pembelian', error.message);
+    } finally {
+      setApprovalActionKey('');
+    }
+  };
+
+  const rejectPurchase = async (row) => {
+    const reason = String(rejectReasonInput || '').trim();
+    if (!reason) {
+      onNotify?.('Approval Pembelian', 'Isi alasan penolakan dulu.');
+      return;
+    }
+    try {
+      const key = `reject-${row.id}`;
+      setApprovalActionKey(key);
+      const updated = await rejectPembelianBahanRequest(row.id, { reason });
+      setSelectedDetail(updated);
+      setRejectReasonInput('');
+      await loadRequests();
+      onNotify?.('Approval Pembelian', 'Pembelian ditolak. Stok tidak ditambahkan.');
+    } catch (error) {
+      onNotify?.('Approval Pembelian', error.message);
+    } finally {
+      setApprovalActionKey('');
+    }
+  };
+
   const handleSubmit = async () => {
     if (!selectedCategory?.id && !selectedCategory?.code) {
       onNotify?.('Belanja Toko', 'Kategori pembelian dari backend belum tersedia. Refresh dulu atau lengkapi setting kategori di backend.');
@@ -549,8 +669,8 @@ const PurchaseMaterialPanel = ({ currentUser, isActive, onNotify }) => {
     }
 
     if (draftItems.length === 0) {
-      onNotify?.('Belanja Toko', isMaterialFlow
-        ? 'Item pembelian masih kosong. Pilih beberapa bahan dari popup produk terlebih dahulu.'
+      onNotify?.('Belanja Toko', isWarehouseSelectionFlow
+        ? 'Item pembelian masih kosong. Pilih beberapa produk/bahan dari popup produk terlebih dahulu.'
         : 'Item pembelian masih kosong. Tambahkan item belanja terlebih dahulu.');
       return;
     }
@@ -558,7 +678,14 @@ const PurchaseMaterialPanel = ({ currentUser, isActive, onNotify }) => {
     if (hasInvalidDraft) {
       onNotify?.('Belanja Toko', isMaterialFlow
         ? 'Masih ada bahan yang belum punya harga otomatis dari histori pembelian gudang atau qty belum valid.'
+        : isStoreStockPurchaseFlow
+        ? 'Masih ada item stok masuk yang belum valid. Periksa qty dan harga beli dari toko lain.'
         : 'Masih ada item yang tidak valid. Periksa nama barang, qty, dan harga satuan.');
+      return;
+    }
+
+    if (isStoreStockPurchaseFlow && !purchaseEvidenceFile) {
+      onNotify?.('Nota Pembelian', 'Upload nota pembelian dulu. Stok baru bisa masuk setelah nota disetujui admin/owner.');
       return;
     }
 
@@ -579,15 +706,21 @@ const PurchaseMaterialPanel = ({ currentUser, isActive, onNotify }) => {
         payment_account_id: !isMaterialFlow && paymentStatus === 'paid' ? selectedPaymentAccount?.id : null,
         source_account_id: !isMaterialFlow && paymentStatus === 'paid' ? selectedPaymentAccount?.accounting_account_id : null,
       });
+      const finalRecord = isStoreStockPurchaseFlow && purchaseEvidenceFile
+        ? await uploadPembelianBahanEvidence(created?.id, purchaseEvidenceFile)
+        : created;
       setDraftItems([]);
       setNoteInput('');
+      setPurchaseEvidenceFile(null);
       await loadRequests();
-      setSelectedRequestId(String(created?.id || ''));
-      setSelectedDetail(created);
+      setSelectedRequestId(String(finalRecord?.id || created?.id || ''));
+      setSelectedDetail(finalRecord || created);
       onNotify?.(
         'Belanja Toko',
-        created?.purchase_category_flow === 'stock_request'
+        finalRecord?.purchase_category_flow === 'stock_request'
           ? 'Request bahan gudang berhasil dibuat.'
+          : finalRecord?.purchase_category_flow === 'store_stock_purchase'
+          ? 'Pembelian di toko lain tersimpan. Nota sudah diupload dan menunggu approval admin/owner sebelum stok masuk.'
           : 'Belanja toko berhasil dibuat.',
       );
     } catch (error) {
@@ -603,8 +736,8 @@ const PurchaseMaterialPanel = ({ currentUser, isActive, onNotify }) => {
         <View style={styles.headerInfo}>
           <Text style={styles.title}>Belanja Toko & Request Bahan</Text>
           <Text style={styles.description}>
-            Kategori `consumable` dan `aset ekonomis` adalah belanja toko yang mengikuti setting admin di backend. Untuk `material`, POS hanya membuat request bahan ke gudang
-            dan harga bahan otomatis mengikuti histori pembelian gudang, bukan input manual dari POS.
+            Kategori `material` bisa berupa request gudang atau pembelian stok dari toko lain. Untuk pembelian di toko lain, kasir memilih produk/bahan lalu stok langsung masuk ke inventory toko.
+            Kategori `consumable` dan `aset ekonomis` tetap menjadi belanja toko yang mengikuti setting admin backend.
           </Text>
         </View>
         <Pressable style={styles.refreshButton} onPress={loadRequests}>
@@ -651,6 +784,10 @@ const PurchaseMaterialPanel = ({ currentUser, isActive, onNotify }) => {
             {isMaterialFlow ? (
               <Text style={styles.helperText}>
                 Harga bahan di bawah akan diambil otomatis dari histori pembelian gudang dan tidak bisa diubah manual dari POS.
+              </Text>
+            ) : isStoreStockPurchaseFlow ? (
+              <Text style={styles.helperText}>
+                Pilih produk/bahan dari popup, isi harga beli toko lain, lalu stok akan otomatis bertambah ke inventory toko setelah submit.
               </Text>
             ) : hasCategoryItemOptions ? (
               <Text style={styles.helperText}>
@@ -718,13 +855,15 @@ const PurchaseMaterialPanel = ({ currentUser, isActive, onNotify }) => {
         ) : null}
 
         <View style={styles.selectorToolbar}>
-          {isMaterialFlow ? (
+          {isWarehouseSelectionFlow ? (
             <Pressable
               style={[styles.productButton, !selectedCategory ? styles.submitButtonDisabled : null]}
               onPress={openMaterialModal}
               disabled={!selectedCategory}
             >
-              <Text style={styles.productButtonText}>Pilih Produk / Bahan</Text>
+              <Text style={styles.productButtonText}>
+                {isStoreStockPurchaseFlow ? 'Pilih Produk Stok Toko' : 'Pilih Produk / Bahan'}
+              </Text>
             </Pressable>
           ) : (
             <Pressable
@@ -752,11 +891,26 @@ const PurchaseMaterialPanel = ({ currentUser, isActive, onNotify }) => {
           style={[styles.input, styles.noteInput]}
         />
 
+        {isStoreStockPurchaseFlow ? (
+          <View style={styles.evidenceBox}>
+            <View style={styles.evidenceInfo}>
+              <Text style={styles.sectionLabel}>Nota Pembelian</Text>
+              <Text style={styles.helperText}>
+                Wajib upload nota. Stok belum masuk inventory sampai admin/owner menyetujui pembelian ini.
+              </Text>
+              <Text style={styles.evidenceFileText}>{purchaseEvidenceFile?.name || 'Belum ada nota dipilih'}</Text>
+            </View>
+            <Pressable style={styles.secondaryButton} onPress={selectPurchaseEvidence} disabled={isSubmitting}>
+              <Text style={styles.secondaryButtonText}>{purchaseEvidenceFile ? 'Ganti Nota' : 'Upload Nota'}</Text>
+            </Pressable>
+          </View>
+        ) : null}
+
         {draftItems.length > 0 ? (
           <View style={styles.itemsTable}>
             {draftItems.map((row) => {
               const isTemplateRow = !isMaterialFlow && Number(row?.purchase_category_item_id || 0) > 0;
-              const isWarehouseRow = isMaterialFlow && Number(row?.warehouse_product_id || 0) > 0;
+              const isWarehouseRow = isWarehouseSelectionFlow && Number(row?.warehouse_product_id || 0) > 0;
               const isEditableName = !isWarehouseRow && !isTemplateRow;
               return (
                 <View key={row.id} style={styles.itemCard}>
@@ -818,8 +972,8 @@ const PurchaseMaterialPanel = ({ currentUser, isActive, onNotify }) => {
                       )}
                     </View>
                     <View style={styles.inlineFieldWide}>
-                      <Text style={styles.label}>{isWarehouseRow ? 'Harga Gudang' : 'Harga Satuan'}</Text>
-                      {isWarehouseRow ? (
+                      <Text style={styles.label}>{isMaterialFlow && isWarehouseRow ? 'Harga Gudang' : isStoreStockPurchaseFlow && isWarehouseRow ? 'Harga Beli Toko Lain' : 'Harga Satuan'}</Text>
+                      {isMaterialFlow && isWarehouseRow ? (
                         <View style={styles.readOnlyBox}>
                           <Text style={styles.readOnlyText}>
                             {row.price_missing ? 'Harga belum tersedia' : formatRupiah(row.unit_price || 0)}
@@ -856,8 +1010,8 @@ const PurchaseMaterialPanel = ({ currentUser, isActive, onNotify }) => {
           <Text style={styles.helperText}>
             {!selectedCategory
               ? 'Pilih kategori dari backend dulu lewat popup di atas, baru tambahkan item pembelian.'
-              : isMaterialFlow
-              ? 'Belum ada bahan yang dipilih. Klik `Pilih Produk / Bahan` untuk membuka popup dan memilih beberapa bahan sekaligus.'
+              : isWarehouseSelectionFlow
+              ? `Belum ada bahan yang dipilih. Klik \`${isStoreStockPurchaseFlow ? 'Pilih Produk Stok Toko' : 'Pilih Produk / Bahan'}\` untuk membuka popup dan memilih beberapa bahan sekaligus.`
               : hasCategoryItemOptions
               ? 'Belum ada item belanja yang dipilih. Popup item backend akan muncul untuk kategori ini, lalu kasir tinggal pilih item yang dibutuhkan.'
               : 'Belum ada item belanja. Klik `Tambah Item Belanja Manual` bila kategori ini belum punya daftar item popup dari backend.'}
@@ -931,6 +1085,22 @@ const PurchaseMaterialPanel = ({ currentUser, isActive, onNotify }) => {
                 <Text style={styles.requestMeta}>Tanggal: {formatDateLabel(selectedDetail?.created_at)}</Text>
                 <Text style={styles.requestMeta}>Requester: {selectedDetail?.requester?.name || '-'}</Text>
                 <Text style={styles.requestMeta}>Gudang: {selectedDetail?.warehouse?.name || '-'}</Text>
+                {selectedDetail?.purchase_category_flow === 'store_stock_purchase' ? (
+                  <>
+                    <Text style={styles.requestMeta}>
+                      Nota: {selectedDetail?.receipt_attachment_path ? 'Sudah diupload' : 'Belum diupload'}
+                    </Text>
+                    {selectedDetail?.approver?.name ? (
+                      <Text style={styles.requestMeta}>Disetujui oleh: {selectedDetail.approver.name} | {selectedDetail.approved_at || '-'}</Text>
+                    ) : null}
+                    {selectedDetail?.rejector?.name ? (
+                      <Text style={styles.requestMeta}>Ditolak oleh: {selectedDetail.rejector.name} | {selectedDetail.rejected_at || '-'}</Text>
+                    ) : null}
+                    {selectedDetail?.rejection_reason ? (
+                      <Text style={styles.requestMeta}>Alasan tolak: {selectedDetail.rejection_reason}</Text>
+                    ) : null}
+                  </>
+                ) : null}
                 <Text style={styles.requestMeta}>Catatan: {selectedDetail?.note || '-'}</Text>
                 <View style={styles.detailDivider} />
                 {Array.isArray(selectedDetail?.items) && selectedDetail.items.length > 0 ? selectedDetail.items.map((item) => (
@@ -950,6 +1120,59 @@ const PurchaseMaterialPanel = ({ currentUser, isActive, onNotify }) => {
                   <Text style={styles.totalLabel}>Total Nominal</Text>
                   <Text style={styles.totalValue}>{formatRupiah(selectedDetail?.total_amount || 0)}</Text>
                 </View>
+                {selectedDetail?.purchase_category_flow === 'store_stock_purchase'
+                  && !['approved', 'posted'].includes(String(selectedDetail?.status || '')) ? (
+                  <View style={styles.approvalBox}>
+                    <Text style={styles.sectionLabel}>Approval Pembelian Toko Lain</Text>
+                    <Text style={styles.helperText}>
+                      Stok baru masuk setelah pembelian disetujui. Jika nota belum ada, upload nota dulu.
+                    </Text>
+                    {!selectedDetail?.receipt_attachment_path ? (
+                      <Pressable
+                        style={styles.secondaryButton}
+                        onPress={() => uploadEvidenceForExistingPurchase(selectedDetail)}
+                        disabled={approvalActionKey === `upload-${selectedDetail.id}`}
+                      >
+                        <Text style={styles.secondaryButtonText}>
+                          {approvalActionKey === `upload-${selectedDetail.id}` ? 'Mengupload...' : 'Upload Nota'}
+                        </Text>
+                      </Pressable>
+                    ) : null}
+                    {userCanApprovePurchase && selectedDetail?.receipt_attachment_path ? (
+                      <>
+                        <View style={styles.modalFooterRow}>
+                          <Pressable
+                            style={styles.modalPrimaryButton}
+                            onPress={() => approvePurchase(selectedDetail)}
+                            disabled={approvalActionKey === `approve-${selectedDetail.id}`}
+                          >
+                            <Text style={styles.modalPrimaryButtonText}>
+                              {approvalActionKey === `approve-${selectedDetail.id}` ? 'Menyetujui...' : 'Setujui & Masukkan Stok'}
+                            </Text>
+                          </Pressable>
+                        </View>
+                        <TextInput
+                          value={rejectReasonInput}
+                          onChangeText={setRejectReasonInput}
+                          placeholder="Alasan penolakan..."
+                          placeholderTextColor="#7a7a7a"
+                          style={styles.input}
+                        />
+                        <Pressable
+                          style={[styles.removeButton, styles.rejectApprovalButton]}
+                          onPress={() => rejectPurchase(selectedDetail)}
+                          disabled={approvalActionKey === `reject-${selectedDetail.id}`}
+                        >
+                          <Text style={styles.removeButtonText}>
+                            {approvalActionKey === `reject-${selectedDetail.id}` ? 'Menolak...' : 'Tolak Pembelian'}
+                          </Text>
+                        </Pressable>
+                      </>
+                    ) : selectedDetail?.receipt_attachment_path ? (
+                      <Text style={styles.helperText}>Menunggu admin/owner melakukan approval.</Text>
+                    ) : null}
+                  </View>
+                ) : null}
                 {selectedDetail?.backend_detail_todo ? (
                   <Text style={styles.todoInlineText}>
                     TODO backend: endpoint detail nominal pembelian untuk semua kategori masih mengandalkan metadata lokal.
@@ -1113,14 +1336,16 @@ const PurchaseMaterialPanel = ({ currentUser, isActive, onNotify }) => {
           <Pressable style={styles.modalBackdropDismiss} onPress={closeMaterialModal} />
           <View style={styles.modalCard}>
             <View style={styles.modalHeaderRow}>
-              <Text style={styles.modalTitle}>Pilih Bahan Gudang</Text>
+              <Text style={styles.modalTitle}>{isStoreStockPurchaseFlow ? 'Pilih Produk Stok Toko' : 'Pilih Bahan Gudang'}</Text>
               <Pressable style={styles.modalCloseButton} onPress={closeMaterialModal}>
                 <Text style={styles.modalCloseButtonText}>Tutup</Text>
               </Pressable>
             </View>
 
             <Text style={styles.modalHelperText}>
-              Pilih beberapa bahan sekaligus, lalu tambahkan ke draft pembelian/request gudang.
+              {isStoreStockPurchaseFlow
+                ? 'Pilih produk/bahan yang dibeli dari toko lain. Harga beli akan diisi setelah item masuk draft.'
+                : 'Pilih beberapa bahan sekaligus, lalu tambahkan ke draft pembelian/request gudang.'}
             </Text>
 
             <TextInput
@@ -1138,7 +1363,7 @@ const PurchaseMaterialPanel = ({ currentUser, isActive, onNotify }) => {
                 filteredMaterials.map((row) => {
                   const materialId = String(row?.material_id || row?.id || '');
                   const active = selectedMaterialIds.includes(materialId);
-                  const canSelect = Number(row?.unit_price || 0) > 0 && !row?.price_missing;
+                  const canSelect = isStoreStockPurchaseFlow || (Number(row?.unit_price || 0) > 0 && !row?.price_missing);
                   return (
                     <Pressable
                       key={`modal-material-${materialId}`}
@@ -1161,7 +1386,9 @@ const PurchaseMaterialPanel = ({ currentUser, isActive, onNotify }) => {
                           {row?.sku ? `${row.sku} | ` : ''}{row?.specification || row?.uom || '-'}
                         </Text>
                         <Text style={[styles.modalOptionMeta, active ? styles.modalOptionMetaActive : null]}>
-                          {canSelect ? `Harga gudang: ${formatRupiah(row?.unit_price || 0)}` : 'Harga gudang belum tersedia'}
+                          {isStoreStockPurchaseFlow
+                            ? 'Harga beli diisi manual setelah dipilih.'
+                            : canSelect ? `Harga gudang: ${formatRupiah(row?.unit_price || 0)}` : 'Harga gudang belum tersedia'}
                         </Text>
                       </View>
                       <View style={[styles.checkBadge, active ? styles.checkBadgeActive : null, !canSelect ? styles.checkBadgeDisabled : null]}>
@@ -1834,6 +2061,21 @@ const styles = StyleSheet.create({
     fontWeight: '800',
     color: '#243b53',
   },
+  secondaryButton: {
+    borderWidth: 1,
+    borderColor: '#0755b8',
+    backgroundColor: '#ffffff',
+    borderRadius: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  secondaryButtonText: {
+    color: '#0755b8',
+    fontSize: 11,
+    fontWeight: '900',
+  },
   modalPrimaryButton: {
     borderRadius: 10,
     backgroundColor: '#1f6feb',
@@ -1844,6 +2086,41 @@ const styles = StyleSheet.create({
     fontSize: 11,
     fontWeight: '900',
     color: '#ffffff',
+  },
+  evidenceBox: {
+    borderWidth: 1,
+    borderColor: '#bfd5ff',
+    backgroundColor: '#f7fbff',
+    borderRadius: 14,
+    padding: 12,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 12,
+    marginBottom: 10,
+  },
+  evidenceInfo: {
+    flex: 1,
+    minWidth: 0,
+  },
+  evidenceFileText: {
+    marginTop: 4,
+    color: '#173c87',
+    fontSize: 11,
+    fontWeight: '900',
+  },
+  approvalBox: {
+    borderWidth: 1,
+    borderColor: '#d4dcea',
+    backgroundColor: '#f8fbff',
+    borderRadius: 14,
+    padding: 12,
+    gap: 8,
+    marginTop: 10,
+  },
+  rejectApprovalButton: {
+    alignSelf: 'stretch',
+    alignItems: 'center',
   },
 });
 

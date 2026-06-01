@@ -1,5 +1,76 @@
-import { useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+
+const CALENDAR_DAY_LABELS = ['Sen', 'Sel', 'Rab', 'Kam', 'Jum', 'Sab', 'Min'];
+const padDatePart = (value) => String(value).padStart(2, '0');
+const startOfLocalDay = (value = new Date()) => {
+  const date = value instanceof Date ? value : new Date(value);
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate());
+};
+const startOfLocalMonth = (value = new Date()) => {
+  const date = startOfLocalDay(value);
+  return new Date(date.getFullYear(), date.getMonth(), 1);
+};
+const addLocalDays = (value, days = 0) => {
+  const date = startOfLocalDay(value);
+  date.setDate(date.getDate() + Number(days || 0));
+  return date;
+};
+const addLocalMonths = (value, months = 0) => {
+  const date = startOfLocalMonth(value);
+  return new Date(date.getFullYear(), date.getMonth() + Number(months || 0), 1);
+};
+const toIsoDate = (value) => {
+  const date = startOfLocalDay(value);
+  return `${date.getFullYear()}-${padDatePart(date.getMonth() + 1)}-${padDatePart(date.getDate())}`;
+};
+const parseIsoDate = (value) => {
+  const text = String(value || '').trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(text)) {
+    return null;
+  }
+  const [year, month, day] = text.split('-').map((part) => Number(part));
+  const parsed = new Date(year, month - 1, day);
+  if (
+    parsed.getFullYear() !== year
+    || parsed.getMonth() !== month - 1
+    || parsed.getDate() !== day
+  ) {
+    return null;
+  }
+  return parsed;
+};
+const formatCalendarMonthLabel = (value) => startOfLocalMonth(value).toLocaleDateString('id-ID', {
+  month: 'long',
+  year: 'numeric',
+});
+const formatSelectedDateLabel = (value) => {
+  const parsed = parseIsoDate(value);
+  if (!parsed) {
+    return 'Pilih tanggal';
+  }
+  return parsed.toLocaleDateString('id-ID', {
+    day: '2-digit',
+    month: 'long',
+    year: 'numeric',
+  });
+};
+const buildCalendarCells = (cursorDate) => {
+  const monthStart = startOfLocalMonth(cursorDate);
+  const nativeWeekday = monthStart.getDay();
+  const mondayOffset = nativeWeekday === 0 ? 6 : nativeWeekday - 1;
+  const gridStart = addLocalDays(monthStart, -mondayOffset);
+
+  return Array.from({ length: 42 }, (_, index) => {
+    const date = addLocalDays(gridStart, index);
+    return {
+      key: toIsoDate(date),
+      iso: toIsoDate(date),
+      label: String(date.getDate()),
+      inCurrentMonth: date.getMonth() === monthStart.getMonth(),
+    };
+  });
+};
 
 const PaymentSummary = ({
   subtotal,
@@ -20,15 +91,27 @@ const PaymentSummary = ({
   changeAmount,
   paymentNotes,
   onChangePaymentNotes,
+  receivableDueDate,
+  onChangeReceivableDueDate,
+  showReceivableDueDate = false,
+  receivableDueDateRequired = false,
   onSaveTransaction,
+  saveActionVisible = true,
+  saveActionLabel = 'Simpan Draft',
   onPreviewReceipt,
   onProcessOrder,
   onCancelTransaction,
+  cancelActionLabel = 'Batal Transaksi',
   isSubmitting,
   deferPaymentMethodSelection = false,
 }) => {
   const toMoney = (value) => `Rp. ${Number(value || 0).toLocaleString('id-ID')}`;
   const [isPaymentMethodModalOpen, setIsPaymentMethodModalOpen] = useState(false);
+  const [isReceivableDueDateModalOpen, setIsReceivableDueDateModalOpen] = useState(false);
+  const [calendarCursor, setCalendarCursor] = useState(() => startOfLocalMonth(parseIsoDate(receivableDueDate) || new Date()));
+  const calendarCells = useMemo(() => buildCalendarCells(calendarCursor), [calendarCursor]);
+  const discountInputFocusedRef = useRef(false);
+  const [discountInputDisplay, setDiscountInputDisplay] = useState(discountAmount || '');
   const methodOptions = Array.isArray(paymentMethodOptions) && paymentMethodOptions.length > 0
     ? paymentMethodOptions
     : ['Cash', 'Transfer', 'QRIS', 'Card'];
@@ -43,6 +126,62 @@ const PaymentSummary = ({
       : normalizedMethod === 'saldo pelanggan'
         ? { label: 'Settlement Saldo', tone: 'wallet' }
         : { label: 'Masuk Rekening', tone: 'noncash' };
+
+  const deriveDiscountRawInput = (value) => {
+    const cleaned = String(value || '').replace(/[^0-9.,]/g, '').trim();
+    const normalized = cleaned.replace(/\./g, '');
+    if (!normalized || /^0+(,0{0,2})?$/.test(normalized)) {
+      return '';
+    }
+    return normalized.replace(/,00$/, '');
+  };
+
+  const formatIntegerWithDotSeparator = (value) => {
+    const digits = String(value || '').replace(/[^0-9]/g, '').replace(/^0+(?=\d)/, '') || '0';
+    return digits.replace(/\B(?=(\d{3})+(?!\d))/g, '.');
+  };
+
+  const formatDiscountEditingDisplay = (value) => {
+    const text = String(value || '').replace(/[^0-9.,]/g, '').trim();
+    if (!text) {
+      return '';
+    }
+
+    const lastCommaIndex = text.lastIndexOf(',');
+    const lastDotIndex = text.lastIndexOf('.');
+    const separatorIndex = Math.max(lastCommaIndex, lastDotIndex);
+    if (separatorIndex < 0) {
+      return `Rp ${formatIntegerWithDotSeparator(text)}`;
+    }
+
+    const fractionalRaw = text.slice(separatorIndex + 1);
+    const fractionalDigits = fractionalRaw.replace(/[^0-9]/g, '');
+    const hasExplicitDecimal = text.endsWith(',') || text.endsWith('.') || fractionalDigits.length <= 2;
+    if (!hasExplicitDecimal) {
+      return `Rp ${formatIntegerWithDotSeparator(text)}`;
+    }
+
+    const integerDigits = text.slice(0, separatorIndex).replace(/[^0-9]/g, '') || '0';
+    return `Rp ${formatIntegerWithDotSeparator(integerDigits)},${fractionalDigits.slice(0, 2)}`;
+  };
+
+  useEffect(() => {
+    if (!discountInputFocusedRef.current) {
+      setDiscountInputDisplay(discountAmount || '');
+    }
+  }, [discountAmount]);
+
+  useEffect(() => {
+    if (isReceivableDueDateModalOpen) {
+      setCalendarCursor(startOfLocalMonth(parseIsoDate(receivableDueDate) || new Date()));
+    }
+  }, [isReceivableDueDateModalOpen, receivableDueDate]);
+
+  const handleDiscountChangeText = (value) => {
+    const nextDisplay = formatDiscountEditingDisplay(value);
+    setDiscountInputDisplay(nextDisplay);
+    onChangeDiscountAmount?.(deriveDiscountRawInput(nextDisplay) || '0');
+  };
 
   return (
     <View style={styles.wrapper}>
@@ -65,9 +204,17 @@ const PaymentSummary = ({
               />
               <Text style={styles.percentText}>%</Text>
               <TextInput
-                value={discountAmount}
-                onChangeText={onChangeDiscountAmount}
-                keyboardType="numeric"
+                value={discountInputDisplay}
+                onFocus={() => {
+                  discountInputFocusedRef.current = true;
+                  setDiscountInputDisplay(formatDiscountEditingDisplay(deriveDiscountRawInput(discountAmount)));
+                }}
+                onBlur={() => {
+                  discountInputFocusedRef.current = false;
+                  setDiscountInputDisplay(discountAmount || '');
+                }}
+                onChangeText={handleDiscountChangeText}
+                keyboardType="decimal-pad"
                 placeholder="0"
                 style={styles.input}
               />
@@ -77,6 +224,16 @@ const PaymentSummary = ({
           <View style={styles.row}>
             <Text style={styles.label}>Total Harga</Text>
             <Text style={styles.value}>{toMoney(grandTotal)}</Text>
+          </View>
+
+          <View style={styles.previewDock}>
+            <Pressable
+              onPress={onPreviewReceipt}
+              style={[styles.previewButton, isSubmitting ? styles.buttonDisabled : null]}
+              disabled={isSubmitting}
+            >
+              <Text style={styles.previewButtonText}>Preview Nota</Text>
+            </Pressable>
           </View>
         </View>
 
@@ -161,6 +318,38 @@ const PaymentSummary = ({
             <Text style={styles.value}>{paymentStatus}</Text>
           </View>
 
+          {showReceivableDueDate ? (
+            <View style={styles.row}>
+              <Text style={styles.label}>Tempo Piutang</Text>
+              <View style={styles.receivableDueField}>
+                <Pressable
+                  onPress={() => setIsReceivableDueDateModalOpen(true)}
+                  style={[
+                    styles.input,
+                    styles.receivableDueInput,
+                    receivableDueDateRequired && !String(receivableDueDate || '').trim()
+                      ? styles.inputRequired
+                      : null,
+                  ]}
+                >
+                  <Text
+                    style={[
+                      styles.receivableDueInputText,
+                      !receivableDueDate ? styles.receivableDueInputPlaceholder : null,
+                    ]}
+                  >
+                    {formatSelectedDateLabel(receivableDueDate)}
+                  </Text>
+                </Pressable>
+                <Text style={styles.receivableDueHelper}>
+                  {receivableDueDateRequired
+                    ? 'Wajib diisi untuk piutang/DP.'
+                    : 'Tanggal janji bayar customer.'}
+                </Text>
+              </View>
+            </View>
+          ) : null}
+
           <View style={styles.row}>
             <Text style={styles.label}>Nominal Bayar</Text>
             <TextInput
@@ -192,19 +381,90 @@ const PaymentSummary = ({
       </View>
 
       <View style={styles.bottomActions}>
-        <Pressable onPress={onSaveTransaction} style={[styles.button, isSubmitting ? styles.buttonDisabled : null]} disabled={isSubmitting}>
-          <Text style={styles.buttonText}>{isSubmitting ? 'Memproses...' : 'Simpan Draft'}</Text>
-        </Pressable>
-        <Pressable onPress={onPreviewReceipt} style={[styles.button, styles.secondaryActionButton, isSubmitting ? styles.buttonDisabled : null]} disabled={isSubmitting}>
-          <Text style={[styles.buttonText, styles.secondaryActionButtonText]}>Preview Nota</Text>
-        </Pressable>
+        {saveActionVisible ? (
+          <Pressable onPress={onSaveTransaction} style={[styles.button, isSubmitting ? styles.buttonDisabled : null]} disabled={isSubmitting}>
+            <Text style={styles.buttonText}>{isSubmitting ? 'Memproses...' : saveActionLabel}</Text>
+          </Pressable>
+        ) : null}
         <Pressable onPress={onProcessOrder} style={[styles.button, isSubmitting ? styles.buttonDisabled : null]} disabled={isSubmitting}>
           <Text style={styles.buttonText}>Proses Orderan</Text>
         </Pressable>
         <Pressable onPress={onCancelTransaction} style={[styles.button, styles.cancelButton, isSubmitting ? styles.buttonDisabled : null]} disabled={isSubmitting}>
-          <Text style={styles.buttonText}>Batal Transaksi</Text>
+          <Text style={styles.buttonText}>{cancelActionLabel}</Text>
         </Pressable>
       </View>
+
+      <Modal
+        visible={isReceivableDueDateModalOpen}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setIsReceivableDueDateModalOpen(false)}
+      >
+        <View style={styles.modalBackdrop}>
+          <View style={styles.calendarModalCard}>
+            <Text style={styles.modalTitle}>Pilih Tempo Piutang</Text>
+            <Text style={styles.calendarSelectedText}>
+              {receivableDueDate
+                ? `Tanggal dipilih: ${formatSelectedDateLabel(receivableDueDate)}`
+                : 'Pilih tanggal janji bayar customer.'}
+            </Text>
+            <View style={styles.calendarNavRow}>
+              <Pressable
+                style={styles.calendarNavButton}
+                onPress={() => setCalendarCursor((prev) => addLocalMonths(prev, -1))}
+              >
+                <Text style={styles.calendarNavButtonText}>{'<'}</Text>
+              </Pressable>
+              <Text style={styles.calendarMonthLabel}>{formatCalendarMonthLabel(calendarCursor)}</Text>
+              <Pressable
+                style={styles.calendarNavButton}
+                onPress={() => setCalendarCursor((prev) => addLocalMonths(prev, 1))}
+              >
+                <Text style={styles.calendarNavButtonText}>{'>'}</Text>
+              </Pressable>
+            </View>
+            <View style={styles.calendarDayHeaderRow}>
+              {CALENDAR_DAY_LABELS.map((label) => (
+                <Text key={label} style={styles.calendarDayHeaderText}>{label}</Text>
+              ))}
+            </View>
+            <View style={styles.calendarGrid}>
+              {calendarCells.map((cell) => {
+                const selected = cell.iso === String(receivableDueDate || '').trim();
+                return (
+                  <Pressable
+                    key={cell.key}
+                    style={[
+                      styles.calendarDayCell,
+                      !cell.inCurrentMonth ? styles.calendarDayCellMuted : null,
+                      selected ? styles.calendarDayCellSelected : null,
+                    ]}
+                    onPress={() => {
+                      onChangeReceivableDueDate?.(cell.iso);
+                      setIsReceivableDueDateModalOpen(false);
+                    }}
+                  >
+                    <Text
+                      style={[
+                        styles.calendarDayCellText,
+                        !cell.inCurrentMonth ? styles.calendarDayCellTextMuted : null,
+                        selected ? styles.calendarDayCellTextSelected : null,
+                      ]}
+                    >
+                      {cell.label}
+                    </Text>
+                  </Pressable>
+                );
+              })}
+            </View>
+            <View style={styles.modalActions}>
+              <Pressable style={styles.secondaryButton} onPress={() => setIsReceivableDueDateModalOpen(false)}>
+                <Text style={styles.secondaryButtonText}>Tutup</Text>
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      </Modal>
 
       <Modal
         visible={isPaymentMethodModalOpen}
@@ -404,6 +664,33 @@ const styles = StyleSheet.create({
     backgroundColor: '#eef1f6',
     color: '#5a6578',
   },
+  inputRequired: {
+    borderColor: '#d33a2c',
+    backgroundColor: '#fff7f6',
+  },
+  receivableDueField: {
+    flex: 1,
+    minWidth: 170,
+    gap: 4,
+  },
+  receivableDueInput: {
+    width: '100%',
+    justifyContent: 'center',
+  },
+  receivableDueInputText: {
+    color: '#14233d',
+    fontSize: 12,
+    fontWeight: '800',
+    textAlign: 'right',
+  },
+  receivableDueInputPlaceholder: {
+    color: '#718096',
+  },
+  receivableDueHelper: {
+    color: '#8a4b00',
+    fontSize: 10,
+    fontWeight: '700',
+  },
   notesInput: {
     minHeight: 60,
     textAlign: 'left',
@@ -431,6 +718,24 @@ const styles = StyleSheet.create({
     marginTop: 10,
     justifyContent: 'center',
   },
+  previewDock: {
+    alignSelf: 'flex-start',
+    alignItems: 'flex-start',
+    marginTop: 10,
+  },
+  previewButton: {
+    borderWidth: 1,
+    borderColor: '#9aa9c1',
+    backgroundColor: '#f7f9fd',
+    borderRadius: 8,
+    paddingHorizontal: 13,
+    paddingVertical: 8,
+  },
+  previewButtonText: {
+    color: '#1d355d',
+    fontSize: 12,
+    fontWeight: '800',
+  },
   button: {
     paddingHorizontal: 9,
     paddingVertical: 7,
@@ -448,13 +753,6 @@ const styles = StyleSheet.create({
   cancelButton: {
     borderColor: '#982222',
     backgroundColor: '#c53333',
-  },
-  secondaryActionButton: {
-    borderColor: '#b9c8e1',
-    backgroundColor: '#f5f9ff',
-  },
-  secondaryActionButtonText: {
-    color: '#1f4e9b',
   },
   buttonDisabled: {
     opacity: 0.65,
@@ -475,11 +773,99 @@ const styles = StyleSheet.create({
     borderRadius: 16,
     padding: 14,
   },
+  calendarModalCard: {
+    width: '100%',
+    maxWidth: 430,
+    borderWidth: 1,
+    borderColor: '#c8d8f2',
+    backgroundColor: '#ffffff',
+    borderRadius: 16,
+    padding: 14,
+  },
   modalTitle: {
     fontSize: 14,
     fontWeight: '800',
     color: '#11469f',
     marginBottom: 8,
+  },
+  calendarSelectedText: {
+    color: '#435674',
+    fontSize: 11,
+    fontWeight: '700',
+    marginBottom: 10,
+  },
+  calendarNavRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 10,
+  },
+  calendarNavButton: {
+    borderWidth: 1,
+    borderColor: '#b9c8e1',
+    backgroundColor: '#f5f9ff',
+    borderRadius: 8,
+    width: 36,
+    height: 32,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  calendarNavButtonText: {
+    color: '#174a8c',
+    fontSize: 16,
+    fontWeight: '900',
+  },
+  calendarMonthLabel: {
+    color: '#13294b',
+    fontSize: 13,
+    fontWeight: '900',
+    textTransform: 'capitalize',
+  },
+  calendarDayHeaderRow: {
+    flexDirection: 'row',
+    marginBottom: 5,
+  },
+  calendarDayHeaderText: {
+    flex: 1,
+    textAlign: 'center',
+    color: '#5c6b83',
+    fontSize: 10,
+    fontWeight: '900',
+  },
+  calendarGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    borderWidth: 1,
+    borderColor: '#dce5f4',
+    borderRadius: 10,
+    overflow: 'hidden',
+  },
+  calendarDayCell: {
+    width: `${100 / 7}%`,
+    minHeight: 38,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#ffffff',
+    borderRightWidth: 1,
+    borderBottomWidth: 1,
+    borderColor: '#edf1f7',
+  },
+  calendarDayCellMuted: {
+    backgroundColor: '#f6f8fc',
+  },
+  calendarDayCellSelected: {
+    backgroundColor: '#0755b8',
+  },
+  calendarDayCellText: {
+    color: '#1f2d46',
+    fontSize: 12,
+    fontWeight: '800',
+  },
+  calendarDayCellTextMuted: {
+    color: '#9aa5b5',
+  },
+  calendarDayCellTextSelected: {
+    color: '#ffffff',
   },
   modalList: {
     maxHeight: 240,

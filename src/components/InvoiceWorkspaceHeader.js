@@ -42,6 +42,8 @@ const APPROVAL_FILTERS = [
   { key: 'rejected', label: 'Ditolak' },
 ];
 
+const DATE_FILTER_DISABLED_AREAS = new Set(['draft', 'approval', 'receivable']);
+
 const resolveAreaCount = (summary = {}, key = '') => {
   if (key === 'draft') return Number(summary?.draftCount || 0) || 0;
   if (key === 'success') return Number(summary?.successCount || 0) || 0;
@@ -187,10 +189,13 @@ const InvoiceWorkspaceHeader = ({
   const [calendarCursor, setCalendarCursor] = useState(() => resolveInitialCalendarCursor(invoiceDateFrom, invoiceDateTo));
   const calendarCells = useMemo(() => buildCalendarCells(calendarCursor), [calendarCursor]);
   const pendingRealtimeCount = Math.max(Number(invoiceRealtimeState?.pendingCount || 0) || 0, 0);
+  const shouldShowDateFilter = !DATE_FILTER_DISABLED_AREAS.has(String(invoiceFilter || '').trim());
   const cacheSource = String(invoiceListMeta?.source || '').trim();
   const realtimeMessage = cacheSource === 'local_success_cache'
     ? 'Invoice sukses tampil dari cache lokal. Search/Refresh tetap ambil server.'
-    : String(invoiceRealtimeState?.message || '').trim();
+    : cacheSource === 'local_success_cache_date_filter'
+      ? 'Invoice sukses sesuai tanggal tampil dari cache lokal. Sinkron server tetap berjalan.'
+      : String(invoiceRealtimeState?.message || '').trim();
 
   const openDateModal = () => {
     setDraftDateFrom(String(invoiceDateFrom || '').trim());
@@ -347,35 +352,38 @@ const InvoiceWorkspaceHeader = ({
       style={styles.searchInput}
     />
 
-    <View style={styles.datePickerCard}>
-      <Text style={styles.datePickerTitle}>Filter Tanggal</Text>
-      <Text style={styles.datePickerMeta}>
-        {invoiceDateFrom || invoiceDateTo
-          ? `Periode aktif: ${invoiceDateFrom || 'awal'} s/d ${invoiceDateTo || 'akhir'}`
-          : 'Periode aktif: Semua tanggal'}
-      </Text>
+    {shouldShowDateFilter ? (
+      <View style={styles.datePickerCard}>
+        <Text style={styles.datePickerTitle}>Filter Tanggal</Text>
+        <Text style={styles.datePickerMeta}>
+          {invoiceDateFrom || invoiceDateTo
+            ? `Periode aktif: ${invoiceDateFrom || 'awal'} s/d ${invoiceDateTo || 'akhir'}`
+            : 'Periode aktif: Semua tanggal'}
+        </Text>
 
-      <View style={styles.dateActionRow}>
-        <Pressable
-          style={styles.dateOpenButton}
-          onPress={openDateModal}
-        >
-          <Text style={styles.dateOpenButtonText}>
-            Buka Kalender
-          </Text>
-        </Pressable>
-        <Pressable
-          style={styles.dateResetButton}
-          onPress={handleClearDateFilter}
-        >
-          <Text style={styles.dateResetButtonText}>
-            Reset Tanggal
-          </Text>
-        </Pressable>
+        <View style={styles.dateActionRow}>
+          <Pressable
+            style={styles.dateOpenButton}
+            onPress={openDateModal}
+          >
+            <Text style={styles.dateOpenButtonText}>
+              Buka Kalender
+            </Text>
+          </Pressable>
+          <Pressable
+            style={styles.dateResetButton}
+            onPress={handleClearDateFilter}
+          >
+            <Text style={styles.dateResetButtonText}>
+              Reset Tanggal
+            </Text>
+          </Pressable>
+        </View>
       </View>
-    </View>
+    ) : null}
 
-    <Modal
+    {shouldShowDateFilter ? (
+      <Modal
       visible={isDateModalVisible}
       transparent
       animationType="fade"
@@ -478,8 +486,9 @@ const InvoiceWorkspaceHeader = ({
           </View>
         </View>
       </View>
-    </Modal>
-  </>
+      </Modal>
+    ) : null}
+    </>
   );
 };
 

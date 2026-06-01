@@ -29,6 +29,7 @@ const InvoiceWorkspaceRowCard = ({
   displayId,
   invoiceNo,
   customerName,
+  auditSummaryLines,
   snapshotState,
   invoiceStatusLabel,
   invoiceStatusColor,
@@ -55,9 +56,11 @@ const InvoiceWorkspaceRowCard = ({
   total,
   dueTotal,
   paidTotal,
+  receivableDueMeta,
   createdAtText,
   draftExpiryLabel,
   draftExpired,
+  draftStockState,
   isDeleting,
   isApprovalRow,
   canCreateManualApproval,
@@ -66,6 +69,7 @@ const InvoiceWorkspaceRowCard = ({
   canContinueDraft,
   canDeleteDraft,
   canPayReceivable,
+  canRemindReceivable,
   canOpenProviderPayment,
   canPrintBillingNote,
   onContinueDraft,
@@ -77,6 +81,7 @@ const InvoiceWorkspaceRowCard = ({
   onRejectManualApproval,
   onResolveManualApproval,
   onOpenReceivablePayment,
+  onRemindReceivable,
   onReprintInvoice,
   onPrintBillingNote,
   onShareBillingNote,
@@ -85,6 +90,11 @@ const InvoiceWorkspaceRowCard = ({
     <View style={styles.draftInfo}>
       <Text style={styles.draftTitle}>#{displayId} | {invoiceNo}</Text>
       <Text style={styles.draftMeta}>{customerName}</Text>
+      {Array.isArray(auditSummaryLines) && auditSummaryLines.length > 0 ? (
+        auditSummaryLines.map((line, index) => (
+          <Text key={`audit-line-${index}`} style={styles.draftMeta}>{line}</Text>
+        ))
+      ) : null}
       {snapshotState ? (
         <View
           style={[
@@ -94,6 +104,18 @@ const InvoiceWorkspaceRowCard = ({
         >
           <Text style={[styles.draftSnapshotBadgeText, { color: snapshotState.color }]}>
             {snapshotState.label}
+          </Text>
+        </View>
+      ) : null}
+      {isDraftRow && draftStockState?.key === 'out_of_stock' ? (
+        <View
+          style={[
+            styles.draftSnapshotBadge,
+            styles.draftStockEmptyBadge,
+          ]}
+        >
+          <Text style={[styles.draftSnapshotBadgeText, styles.draftStockEmptyBadgeText]}>
+            {draftStockState.label || 'Stok Habis'}
           </Text>
         </View>
       ) : null}
@@ -214,6 +236,17 @@ const InvoiceWorkspaceRowCard = ({
           Piutang: {formatRupiah(dueTotal)} | Terbayar: {formatRupiah(paidTotal)}
         </Text>
       ) : null}
+      {dueTotal > 0 && receivableDueMeta?.label ? (
+        <Text
+          style={[
+            styles.receivableDueText,
+            receivableDueMeta.isOverdue ? styles.receivableOverdueText : null,
+          ]}
+        >
+          Jatuh Tempo: {receivableDueMeta.label}
+          {receivableDueMeta.statusLabel ? ` | ${receivableDueMeta.statusLabel}` : ''}
+        </Text>
+      ) : null}
       <Text style={styles.draftMeta}>Tanggal: {createdAtText}</Text>
       {isDraftRow ? (
         <Text
@@ -245,20 +278,6 @@ const InvoiceWorkspaceRowCard = ({
               <Text style={styles.continueDraftButtonText}>Detail</Text>
             </Pressable>
           )}
-          {!canContinueDraft && dueTotal > 0 ? (
-            <Pressable
-              style={[
-                styles.receivablePayButton,
-                !canPayReceivable ? styles.draftActionDisabled : null,
-              ]}
-              disabled={!canPayReceivable}
-              onPress={onOpenReceivablePayment}
-            >
-              <Text style={styles.receivablePayButtonText}>
-                {canPayReceivable ? 'Lanjut Pembayaran' : 'Belum Bisa Dibayar'}
-              </Text>
-            </Pressable>
-          ) : null}
           {canDeleteDraft ? (
             <Pressable
               style={[
@@ -331,6 +350,11 @@ const InvoiceWorkspaceRowCard = ({
               <Text style={styles.receivablePayButtonText}>
                 {canPayReceivable ? 'Bayar Piutang' : 'Belum Bisa Dibayar'}
               </Text>
+            </Pressable>
+          ) : null}
+          {!isApprovalRow && dueTotal > 0 && canRemindReceivable ? (
+            <Pressable style={styles.deleteDraftButton} onPress={onRemindReceivable}>
+              <Text style={styles.deleteDraftButtonText}>Reminder WA</Text>
             </Pressable>
           ) : null}
           {canPrintBillingNote ? (

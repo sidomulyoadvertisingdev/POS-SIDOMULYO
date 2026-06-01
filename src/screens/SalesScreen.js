@@ -45,6 +45,8 @@ import {
   fetchPosFinishings,
   fetchPosMaterials,
   fetchPosClosingSummary,
+  fetchAllPosOrders,
+  fetchAllPosOrderTransactions,
   fetchPosOrderDetail,
   fetchPosOrdersPage,
   fetchPosOrderTransactionsPage,
@@ -63,8 +65,11 @@ import {
   fetchUserDirectory,
   fetchDanaQrisPaymentStatus,
   pickupPosOrder,
+  logPosOrderPreviewReceipt,
   releasePosProductionItem,
   releasePosProofingToProduction,
+  returnPosProofingToCashier,
+  returnPosProofingToCashierReminder,
   sendPosProofingToDesign,
   sendPosProofingWhatsapp,
   fetchAuthMe,
@@ -75,6 +80,8 @@ import {
   topUpCustomerDeposit,
   uploadPosProofingFinalFile,
   uploadPosProofingPreview,
+  buildPosProductionDelayWhatsapp,
+  updatePosProductionLayoutPlan,
   updatePosProductionItemStatus,
   updatePosOrderStatus,
 } from '../services/erpApi';
@@ -157,6 +164,45 @@ const formatDateText = (value) => {
     return String(value || '-');
   }
   return formatDate(parsed);
+};
+const formatDateInputValue = (value) => {
+  if (!value) return '';
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    const text = String(value || '').trim();
+    return /^\d{4}-\d{2}-\d{2}$/.test(text) ? text : '';
+  }
+  const year = parsed.getFullYear();
+  const month = String(parsed.getMonth() + 1).padStart(2, '0');
+  const day = String(parsed.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+};
+const isReceivableTransactionType = (value) => ['dp', 'unpaid'].includes(String(value || '').trim().toLowerCase());
+const resolveReceivableDueMeta = (row) => {
+  const rawDueAt = String(row?.invoice?.due_at || row?.due_at || row?.deadline || '').trim();
+  if (!rawDueAt) {
+    return { label: '', statusLabel: 'Tempo belum diisi', isOverdue: false, overdueDays: 0 };
+  }
+  const due = new Date(rawDueAt);
+  if (Number.isNaN(due.getTime())) {
+    return { label: rawDueAt, statusLabel: '', isOverdue: false, overdueDays: 0 };
+  }
+  const today = new Date();
+  const dueStart = new Date(due.getFullYear(), due.getMonth(), due.getDate()).getTime();
+  const todayStart = new Date(today.getFullYear(), today.getMonth(), today.getDate()).getTime();
+  const diffDays = Math.floor((todayStart - dueStart) / 86400000);
+  if (diffDays > 0) {
+    return {
+      label: formatDateText(rawDueAt),
+      statusLabel: `Lewat ${diffDays} hari`,
+      isOverdue: true,
+      overdueDays: diffDays,
+    };
+  }
+  if (diffDays === 0) {
+    return { label: formatDateText(rawDueAt), statusLabel: 'Jatuh tempo hari ini', isOverdue: false, overdueDays: 0 };
+  }
+  return { label: formatDateText(rawDueAt), statusLabel: `${Math.abs(diffDays)} hari lagi`, isOverdue: false, overdueDays: 0 };
 };
 const diffDaysFromNow = (value) => {
   if (!value) return 0;
@@ -584,6 +630,122 @@ const formatIsoDate = (date) => {
   const day = String(date.getDate()).padStart(2, '0');
   return `${year}-${month}-${day}`;
 };
+const REPORT_CALENDAR_DAY_LABELS = ['Sen', 'Sel', 'Rab', 'Kam', 'Jum', 'Sab', 'Min'];
+const parseReportIsoDate = (value) => {
+  const text = String(value || '').trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(text)) {
+    return null;
+  }
+  const [year, month, day] = text.split('-').map((part) => Number(part));
+  const parsed = new Date(year, month - 1, day);
+  if (
+    parsed.getFullYear() !== year
+    || parsed.getMonth() !== month - 1
+    || parsed.getDate() !== day
+  ) {
+    return null;
+  }
+  return parsed;
+};
+const startOfReportLocalDay = (value = new Date()) => {
+  const date = value instanceof Date ? value : new Date(value);
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate());
+};
+const startOfReportLocalMonth = (value = new Date()) => {
+  const date = startOfReportLocalDay(value);
+  return new Date(date.getFullYear(), date.getMonth(), 1);
+};
+const addReportLocalDays = (value, days = 0) => {
+  const date = startOfReportLocalDay(value);
+  date.setDate(date.getDate() + Number(days || 0));
+  return date;
+};
+const addReportLocalMonths = (value, months = 0) => {
+  const date = startOfReportLocalMonth(value);
+  return new Date(date.getFullYear(), date.getMonth() + Number(months || 0), 1);
+};
+const formatReportCalendarMonthLabel = (value) => startOfReportLocalMonth(value).toLocaleDateString('id-ID', {
+  month: 'long',
+  year: 'numeric',
+});
+const formatReportSelectedDateLabel = (value) => {
+  const parsed = parseReportIsoDate(value);
+  if (!parsed) {
+    return 'Pilih tanggal';
+  }
+  return parsed.toLocaleDateString('id-ID', {
+    day: '2-digit',
+    month: 'long',
+    year: 'numeric',
+  });
+};
+const buildReportCalendarCells = (cursorDate) => {
+  const monthStart = startOfReportLocalMonth(cursorDate);
+  const nativeWeekday = monthStart.getDay();
+  const mondayOffset = nativeWeekday === 0 ? 6 : nativeWeekday - 1;
+  const gridStart = addReportLocalDays(monthStart, -mondayOffset);
+
+  return Array.from({ length: 42 }, (_, index) => {
+    const date = addReportLocalDays(gridStart, index);
+    return {
+      key: formatIsoDate(date),
+      iso: formatIsoDate(date),
+      label: String(date.getDate()),
+      inCurrentMonth: date.getMonth() === monthStart.getMonth(),
+    };
+  });
+};
+const REPORT_PERIOD_OPTIONS = [
+  ['daily', 'Harian'],
+  ['weekly', 'Mingguan'],
+  ['monthly', 'Bulanan'],
+  ['quarterly', 'Quarter'],
+  ['yearly', 'Tahunan'],
+];
+const REPORT_SCOPE_OPTIONS = [
+  ['all', 'Semua'],
+  ['self', 'Saya'],
+  ['user', 'User'],
+];
+const REPORT_ADDON_SECTIONS = [
+  { key: 'memorize', label: 'Memorize', code: 'ME', iconSource: require('../../assets/menu-icons/report.svg') },
+  { key: 'finance', label: 'Keuangan', code: 'KE', iconSource: require('../../assets/menu-icons/closing-store.svg') },
+  { key: 'cash_bank', label: 'Kas & Bank', code: 'KB', iconSource: require('../../assets/menu-icons/closing-store.svg') },
+  { key: 'receivable', label: 'Piutang', code: 'PI', iconSource: require('../../assets/menu-icons/invoice.svg') },
+  { key: 'sales', label: 'Penjualan', code: 'PJ', iconSource: require('../../assets/menu-icons/input-order.svg') },
+  { key: 'sales_staff', label: 'Tenaga Penjual', code: 'TP', iconSource: require('../../assets/menu-icons/input-order.svg') },
+  { key: 'audit', label: 'Pemeriksaan', code: 'AU', iconSource: require('../../assets/menu-icons/closing-archive.svg') },
+];
+const addDays = (date, amount) => {
+  const next = new Date(date);
+  next.setDate(next.getDate() + amount);
+  return next;
+};
+const reportPeriodRange = (dateText, period) => {
+  const anchor = new Date(`${dateText || formatIsoDate(new Date())}T00:00:00`);
+  const safeAnchor = Number.isNaN(anchor.getTime()) ? new Date() : anchor;
+  const start = new Date(safeAnchor);
+  const end = new Date(safeAnchor);
+  if (period === 'weekly') {
+    const day = start.getDay() || 7;
+    start.setDate(start.getDate() - day + 1);
+    end.setTime(addDays(start, 6).getTime());
+  } else if (period === 'monthly') {
+    start.setDate(1);
+    end.setFullYear(start.getFullYear(), start.getMonth() + 1, 0);
+  } else if (period === 'quarterly') {
+    const quarterStartMonth = Math.floor(start.getMonth() / 3) * 3;
+    start.setMonth(quarterStartMonth, 1);
+    end.setFullYear(start.getFullYear(), quarterStartMonth + 3, 0);
+  } else if (period === 'yearly') {
+    start.setMonth(0, 1);
+    end.setMonth(11, 31);
+  }
+  return {
+    from: formatIsoDate(start),
+    to: formatIsoDate(end),
+  };
+};
 const getDraftExpiryMeta = () => {
   return {
     isValid: true,
@@ -660,6 +822,15 @@ const parseJsonObject = (value) => {
     return null;
   }
   return null;
+};
+const stableSerialize = (value) => {
+  if (Array.isArray(value)) {
+    return `[${value.map((entry) => stableSerialize(entry)).join(',')}]`;
+  }
+  if (value && typeof value === 'object') {
+    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stableSerialize(value[key])}`).join(',')}}`;
+  }
+  return JSON.stringify(value ?? null);
 };
 const parseJsonArray = (value) => {
   if (!value) return [];
@@ -957,6 +1128,32 @@ const normalizeMoneyAmountInput = (value) => {
 
   const normalizedInteger = integerDigits || '0';
   return `${normalizedInteger}.${fractionalDigits}`;
+};
+const sanitizeMoneyAmountTextInput = (value) => String(value || '').replace(/[^0-9.,]/g, '').trim();
+const formatIntegerWithDotSeparator = (value) => {
+  const digits = String(value || '').replace(/[^0-9]/g, '').replace(/^0+(?=\d)/, '') || '0';
+  return digits.replace(/\B(?=(\d{3})+(?!\d))/g, '.');
+};
+const formatRupiahMoneyInputDisplay = (value) => {
+  const text = sanitizeMoneyAmountTextInput(value);
+  if (!text) {
+    return 'Rp 0,00';
+  }
+
+  const lastCommaIndex = text.lastIndexOf(',');
+  const lastDotIndex = text.lastIndexOf('.');
+  const separatorIndex = Math.max(lastCommaIndex, lastDotIndex);
+  if (separatorIndex < 0) {
+    return `Rp ${formatIntegerWithDotSeparator(text)},00`;
+  }
+
+  const integerDigits = text.slice(0, separatorIndex).replace(/[^0-9]/g, '') || '0';
+  const fractionalDigits = text.slice(separatorIndex + 1).replace(/[^0-9]/g, '');
+  if (fractionalDigits.length > 2) {
+    return `Rp ${formatIntegerWithDotSeparator(`${integerDigits}${fractionalDigits}`)},00`;
+  }
+
+  return `Rp ${formatIntegerWithDotSeparator(integerDigits)},${fractionalDigits.padEnd(2, '0').slice(0, 2)}`;
 };
 const parseMoneyAmountInput = (value) => {
   const normalized = normalizeMoneyAmountInput(value);
@@ -1887,19 +2084,58 @@ const resolveItemGrandTotal = (item, pricingSummaryInput = null) => {
 const PROOFING_FLOW_NONE = 'none';
 const PROOFING_FLOW_PROOFING_FIRST = 'proofing_first';
 const PROOFING_FLOW_PAY_FIRST = 'pay_first';
+const PROOFING_CHOICE_PROOFING = 'proofing';
+const PROOFING_CHOICE_NONE = 'none';
 const ORDER_SUBMIT_MODE_PROOFING = 'proofing';
+const PROOFING_TYPE_CASHIER = 'cashier';
+const PROOFING_TYPE_DESIGN = 'design';
+const FOLLOW_UP_SHARE_BILL = 'share_bill';
+const FOLLOW_UP_SHARE_AND_PRINT = 'share_and_print';
+const FOLLOW_UP_SAVE_AS_DRAFT = 'save_as_draft';
 const normalizeProofingFlow = (value, proofingRequired = false) => {
   const normalized = String(value || '').trim().toLowerCase();
+  if (normalized === PROOFING_FLOW_NONE) {
+    return PROOFING_FLOW_NONE;
+  }
   if ([PROOFING_FLOW_PROOFING_FIRST, PROOFING_FLOW_PAY_FIRST].includes(normalized)) {
     return normalized;
   }
   return proofingRequired ? PROOFING_FLOW_PROOFING_FIRST : PROOFING_FLOW_NONE;
 };
+const proofingChoiceToFlow = (value) => (
+  value === PROOFING_CHOICE_NONE ? PROOFING_FLOW_NONE : PROOFING_FLOW_PROOFING_FIRST
+);
+const proofingFlowToChoice = (value) => (
+  String(value || '').trim().toLowerCase() === PROOFING_FLOW_NONE
+    ? PROOFING_CHOICE_NONE
+    : PROOFING_CHOICE_PROOFING
+);
 const proofingFlowToLabel = (value) => {
   const key = normalizeProofingFlow(value);
-  if (key === PROOFING_FLOW_PROOFING_FIRST) return 'Proofing dulu';
-  if (key === PROOFING_FLOW_PAY_FIRST) return 'Bayar dulu';
-  return 'Tanpa proofing design';
+  if (key === PROOFING_FLOW_PROOFING_FIRST) return 'Proofing';
+  if (key === PROOFING_FLOW_PAY_FIRST) return 'Proofing';
+  return 'Tanpa Proofing';
+};
+const normalizeProofingType = (value) => {
+  const key = String(value || '').trim().toLowerCase();
+  return [PROOFING_TYPE_CASHIER, PROOFING_TYPE_DESIGN].includes(key) ? key : '';
+};
+const proofingTypeToLabel = (value) => (
+  normalizeProofingType(value) === PROOFING_TYPE_CASHIER ? 'Proofing Kasir'
+    : normalizeProofingType(value) === PROOFING_TYPE_DESIGN ? 'Proofing Design'
+      : '-'
+);
+const normalizeFollowUpMethod = (value) => {
+  const key = String(value || '').trim().toLowerCase();
+  return [FOLLOW_UP_SHARE_BILL, FOLLOW_UP_SHARE_AND_PRINT, FOLLOW_UP_SAVE_AS_DRAFT].includes(key)
+    ? key
+    : FOLLOW_UP_SHARE_BILL;
+};
+const followUpMethodToLabel = (value) => {
+  const key = normalizeFollowUpMethod(value);
+  if (key === FOLLOW_UP_SHARE_AND_PRINT) return 'Share & Print Tagihan';
+  if (key === FOLLOW_UP_SAVE_AS_DRAFT) return 'Simpan Sebagai Draft';
+  return 'Share Tagihan';
 };
 const normalizeProofingStatusKey = (value) => {
   const key = String(value || '').trim().toLowerCase();
@@ -2093,7 +2329,7 @@ const buildReceiptProofingNotes = (items = []) => {
         statusLabel,
         truncateReceiptProofingLabel(productLabel, 24),
         timeLabel,
-        proofingFlow === PROOFING_FLOW_PAY_FIRST ? 'Flow bayar dulu' : '',
+        proofingFlow === PROOFING_FLOW_PAY_FIRST ? 'Legacy proofing' : '',
         designerName ? `Des. ${truncateReceiptProofingLabel(designerName, 16)}` : '',
         statusLabel === 'Revisi' && revisionNote ? `Rev: ${truncateReceiptProofingLabel(revisionNote, 28)}` : '',
       ].filter(Boolean).join(' | ');
@@ -2165,6 +2401,68 @@ const deriveProofingFlowFromCartItems = (items = []) => {
     Boolean(backendItem?.proofing_required),
   );
 };
+const buildDraftDirtySignature = ({
+  selectedCustomerId,
+  transactionDate,
+  cartItems,
+  discountPercent,
+  discountAmount,
+  discountMode,
+  paymentMethod,
+  paymentAmount,
+  paymentNotes,
+  receivableDueDate,
+  proofingChoice,
+  proofingType,
+  proofingTargetUserId,
+  followUpMethod,
+  proofingReferenceFile,
+} = {}) => stableSerialize({
+  customerId: Number(selectedCustomerId || 0) || null,
+  transactionDate: String(transactionDate || '').trim(),
+  discountPercent: String(discountPercent || '0').trim(),
+  discountAmount: String(discountAmount || '0').trim(),
+  discountMode: String(discountMode || 'percent').trim(),
+  paymentMethod: String(paymentMethod || '').trim(),
+  paymentAmount: String(paymentAmount || '').trim(),
+  paymentNotes: String(paymentNotes || '').trim(),
+  receivableDueDate: String(receivableDueDate || '').trim(),
+  proofingChoice: String(proofingChoice || '').trim(),
+  proofingType: String(proofingType || '').trim(),
+  proofingTargetUserId: Number(proofingTargetUserId || 0) || null,
+  followUpMethod: String(followUpMethod || '').trim(),
+  proofingReferenceFile: normalizeCustomerReferenceFile(proofingReferenceFile),
+  items: (Array.isArray(cartItems) ? cartItems : []).map((item) => {
+    const backendItem = item?.backendItem || {};
+    const snapshot = parseJsonObject(backendItem?.spec_snapshot) || backendItem?.spec_snapshot || null;
+    return {
+      key: String(item?.key || item?.id || backendItem?.id || '').trim(),
+      productId: Number(backendItem?.product_id || item?.product_id || item?.id || 0) || null,
+      product: String(item?.product || backendItem?.product_name || '').trim(),
+      qty: Number(item?.qty || backendItem?.qty || 0) || 0,
+      size: String(item?.size || backendItem?.size_text || '').trim(),
+      finishing: String(item?.finishing || backendItem?.finishing_text || '').trim(),
+      material: String(item?.material || backendItem?.material_text || '').trim(),
+      lbMax: String(item?.lbMax || backendItem?.lb_max_text || '').trim(),
+      pages: Number(item?.pages || backendItem?.pages || 0) || 0,
+      note: String(item?.note || item?.notes || backendItem?.note || '').trim(),
+      lineTotal: roundMoney(Number(item?.lineTotal || backendItem?.line_total || 0)),
+      inputWidthMm: Number(backendItem?.input_width_mm || 0) || 0,
+      inputHeightMm: Number(backendItem?.input_height_mm || 0) || 0,
+      internalWidthMm: Number(backendItem?.internal_width_mm || 0) || 0,
+      internalHeightMm: Number(backendItem?.internal_height_mm || 0) || 0,
+      subtotal: roundMoney(Number(backendItem?.subtotal || 0)),
+      finishingTotal: roundMoney(Number(backendItem?.finishing_total || 0)),
+      expressFee: roundMoney(Number(backendItem?.express_fee || 0)),
+      negotiatedPrice: roundMoney(Number(backendItem?.negotiated_price || 0)),
+      materialProductId: Number(backendItem?.material_product_id || backendItem?.material_id || 0) || null,
+      finishings: Array.isArray(backendItem?.finishings) ? backendItem.finishings : [],
+      lbMaxRows: Array.isArray(backendItem?.lb_max) ? backendItem.lb_max : [],
+      finishingBreakdown: Array.isArray(backendItem?.finishing_breakdown) ? backendItem.finishing_breakdown : [],
+      specSnapshot: snapshot,
+    };
+  }),
+});
 const pickBrowserFile = ({ accept = '' } = {}) => new Promise((resolve, reject) => {
   if (Platform.OS !== 'web' || typeof document === 'undefined') {
     reject(new Error('Upload file proofing saat ini hanya tersedia di POS web/desktop.'));
@@ -2183,6 +2481,292 @@ const pickBrowserFile = ({ accept = '' } = {}) => new Promise((resolve, reject) 
   input.onerror = () => reject(new Error('Gagal membuka pemilih file.'));
   input.click();
 });
+const encodeLocalDesignMetadata = (payload = {}) => {
+  const json = JSON.stringify(payload || {});
+  if (typeof btoa === 'function') {
+    return btoa(unescape(encodeURIComponent(json)));
+  }
+  return json;
+};
+const sanitizeLocalDesignText = (value, fallback = 'lainnya') => {
+  const text = String(value || '').trim().replace(/[\\/:*?"<>|]+/g, '-').replace(/\s+/g, ' ');
+  return text || fallback;
+};
+const resolveLocalDesignSettings = (settings = {}) => {
+  const local = settings?.local_design_storage && typeof settings.local_design_storage === 'object'
+    ? settings.local_design_storage
+    : settings;
+  const targets = Array.isArray(local?.targets) ? local.targets : [];
+  const activeTargetId = String(local?.active_target_id || local?.activeTargetId || '').trim();
+  const selectedTarget = targets.find((target) => String(target?.id || '').trim() === activeTargetId)
+    || targets.find((target) => target && typeof target === 'object')
+    || null;
+  if (selectedTarget) {
+    return {
+      enabled: local?.enabled !== false,
+      rootPath: String(selectedTarget?.root_path || selectedTarget?.rootPath || 'D:\\file siap layout').trim(),
+      shareBaseUrl: String(selectedTarget?.share_base_url || selectedTarget?.shareBaseUrl || '').trim(),
+      shareFolder: String(selectedTarget?.share_folder || selectedTarget?.shareFolder || 'file siap layout').trim(),
+      folderTemplate: String(selectedTarget?.folder_template || selectedTarget?.folderTemplate || local?.folder_template || local?.folderTemplate || '{yyyy}\\{mm}\\{dd}\\{material}\\{priority}').trim(),
+      referenceFolderTemplate: String(selectedTarget?.reference_folder_template || selectedTarget?.referenceFolderTemplate || local?.reference_folder_template || local?.referenceFolderTemplate || '{yyyy}\\{mm}\\{dd}\\referensi-customer\\{invoice}').trim(),
+      serverName: String(selectedTarget?.server_name || selectedTarget?.serverName || '').trim(),
+      serverHost: String(selectedTarget?.server_host || selectedTarget?.serverHost || '').trim(),
+      targetId: String(selectedTarget?.id || '').trim(),
+    };
+  }
+  return {
+    enabled: local?.enabled !== false,
+    rootPath: String(local?.root_path || local?.rootPath || 'D:\\file siap layout').trim(),
+    shareBaseUrl: String(local?.share_base_url || local?.shareBaseUrl || '').trim(),
+    shareFolder: String(local?.share_folder || local?.shareFolder || 'file siap layout').trim(),
+    folderTemplate: String(local?.folder_template || local?.folderTemplate || '{yyyy}\\{mm}\\{dd}\\{material}\\{priority}').trim(),
+    referenceFolderTemplate: String(local?.reference_folder_template || local?.referenceFolderTemplate || '{yyyy}\\{mm}\\{dd}\\referensi-customer\\{invoice}').trim(),
+    serverName: String(local?.server_name || local?.serverName || '').trim(),
+    serverHost: String(local?.server_host || local?.serverHost || '').trim(),
+    targetId: String(local?.target_id || local?.targetId || '').trim(),
+  };
+};
+const createLocalDesignNetworkTarget = (source = {}, index = 0) => {
+  const resolved = resolveLocalDesignSettings(source);
+  const id = String(source?.id || source?.target_id || source?.targetId || '').trim()
+    || `target-${Date.now()}-${index}`;
+  const serverName = String(source?.server_name || source?.serverName || resolved.serverName || '').trim();
+  return {
+    id,
+    label: String(source?.label || source?.name || serverName || `Komputer ${index + 1}`).trim(),
+    enabled: source?.enabled !== false,
+    rootPath: resolved.rootPath,
+    shareBaseUrl: resolved.shareBaseUrl,
+    shareFolder: resolved.shareFolder,
+    folderTemplate: resolved.folderTemplate,
+    referenceFolderTemplate: resolved.referenceFolderTemplate,
+    serverName,
+    serverHost: resolved.serverHost,
+  };
+};
+const resolveActiveLocalDesignTarget = (settings = {}) => {
+  const targets = Array.isArray(settings?.targets) ? settings.targets : [];
+  return targets.find((target) => String(target?.id || '').trim() === String(settings?.activeTargetId || '').trim())
+    || targets[0]
+    || null;
+};
+const normalizeLocalDesignNetworkSettings = (settings = {}, fallback = {}) => {
+  const base = resolveLocalDesignSettings(fallback);
+  const local = settings?.local_design_storage && typeof settings.local_design_storage === 'object'
+    ? settings.local_design_storage
+    : settings;
+  const rawTargets = Array.isArray(local?.targets) ? local.targets : [];
+  const fallbackTarget = createLocalDesignNetworkTarget({
+    id: 'default-local-share',
+    label: base.serverName || 'Komputer Utama',
+    enabled: base.enabled,
+    rootPath: base.rootPath,
+    shareBaseUrl: base.shareBaseUrl,
+    shareFolder: base.shareFolder,
+    folderTemplate: base.folderTemplate,
+    referenceFolderTemplate: base.referenceFolderTemplate,
+    serverName: base.serverName,
+    serverHost: base.serverHost,
+  }, 0);
+  const targets = rawTargets.length > 0
+    ? rawTargets.map((target, index) => createLocalDesignNetworkTarget(target, index))
+    : [createLocalDesignNetworkTarget({
+      id: local?.active_target_id || local?.activeTargetId || fallbackTarget.id,
+      label: local?.label || local?.server_name || local?.serverName || fallbackTarget.label,
+      enabled: local?.target_enabled ?? local?.enabled ?? fallbackTarget.enabled,
+      rootPath: local?.root_path || local?.rootPath || fallbackTarget.rootPath,
+      shareBaseUrl: local?.share_base_url || local?.shareBaseUrl || fallbackTarget.shareBaseUrl,
+      shareFolder: local?.share_folder || local?.shareFolder || fallbackTarget.shareFolder,
+      folderTemplate: local?.folder_template || local?.folderTemplate || fallbackTarget.folderTemplate,
+      referenceFolderTemplate: local?.reference_folder_template || local?.referenceFolderTemplate || fallbackTarget.referenceFolderTemplate,
+      serverName: local?.server_name || local?.serverName || fallbackTarget.serverName,
+      serverHost: local?.server_host || local?.serverHost || fallbackTarget.serverHost,
+    }, 0)];
+  const activeTargetId = String(local?.active_target_id || local?.activeTargetId || '').trim();
+  const selectedTarget = targets.find((target) => String(target?.id || '').trim() === activeTargetId) || targets[0] || fallbackTarget;
+  return {
+    enabled: local?.enabled !== undefined ? local.enabled !== false : base.enabled,
+    activeTargetId: selectedTarget.id,
+    targets,
+    rootPath: selectedTarget.rootPath,
+    shareBaseUrl: selectedTarget.shareBaseUrl,
+    shareFolder: selectedTarget.shareFolder,
+    folderTemplate: selectedTarget.folderTemplate,
+    referenceFolderTemplate: selectedTarget.referenceFolderTemplate,
+    serverName: selectedTarget.serverName,
+    serverHost: selectedTarget.serverHost,
+    targetId: selectedTarget.id,
+  };
+};
+const loadStoredLocalDesignNetworkSettings = () => {
+  if (canUseLocalStorage()) {
+    try {
+      const raw = globalThis.localStorage.getItem(LOCAL_DESIGN_NETWORK_STORAGE_KEY);
+      if (!raw) return null;
+      const parsed = JSON.parse(raw);
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+        ? normalizeLocalDesignNetworkSettings(parsed)
+        : null;
+    } catch (_error) {
+      return null;
+    }
+  }
+  return memoryLocalDesignNetworkSettings ? normalizeLocalDesignNetworkSettings(memoryLocalDesignNetworkSettings) : null;
+};
+const persistLocalDesignNetworkSettings = (settings) => {
+  if (!settings || typeof settings !== 'object') {
+    if (canUseLocalStorage()) {
+      try {
+        globalThis.localStorage.removeItem(LOCAL_DESIGN_NETWORK_STORAGE_KEY);
+      } catch (_error) {
+        // ignore storage errors
+      }
+    }
+    memoryLocalDesignNetworkSettings = null;
+    return;
+  }
+  const next = normalizeLocalDesignNetworkSettings(settings);
+  if (canUseLocalStorage()) {
+    try {
+      globalThis.localStorage.setItem(LOCAL_DESIGN_NETWORK_STORAGE_KEY, JSON.stringify(next));
+    } catch (_error) {
+      // ignore storage errors
+    }
+  } else {
+    memoryLocalDesignNetworkSettings = next;
+  }
+};
+const uploadFileToLocalDesignStorage = async (file, row, settings = {}) => {
+  if (Platform.OS !== 'web' || typeof fetch !== 'function' || typeof window === 'undefined') {
+    throw new Error('Storage lokal file produksi hanya tersedia di aplikasi desktop/web.');
+  }
+  const localSettings = resolveLocalDesignSettings(settings);
+  const metadata = {
+    settings: localSettings,
+    fileName: String(file?.name || '').trim(),
+    mimeType: String(file?.type || '').trim(),
+    invoiceNo: String(row?.order?.invoice?.invoice_no || row?.proofing_code || '').trim(),
+    material: sanitizeLocalDesignText(row?.item?.material_text || row?.item?.name || 'bahan-lain'),
+    priority: sanitizeLocalDesignText(row?.item?.express_label || row?.item?.production_priority || row?.order?.production_priority || 'regular'),
+  };
+  const response = await fetch('/__local-design/save', {
+    method: 'POST',
+    headers: {
+      'Content-Type': file?.type || 'application/octet-stream',
+      'X-Design-File-Name': encodeURIComponent(String(file?.name || 'design-file')),
+      'X-Design-Metadata': encodeLocalDesignMetadata(metadata),
+    },
+    body: file,
+  });
+  const payload = await response.json().catch(() => null);
+  if (!response.ok) {
+    throw new Error(String(payload?.message || `Local design service gagal: ${response.status}`));
+  }
+  return payload;
+};
+const testLocalDesignNetworkConnection = async (settings = {}) => {
+  if (Platform.OS !== 'web' || typeof fetch !== 'function' || typeof window === 'undefined') {
+    throw new Error('Tes jaringan lokal hanya tersedia di aplikasi desktop/web.');
+  }
+  const localSettings = resolveLocalDesignSettings(settings);
+  const response = await fetch('/__local-design/test', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ settings: localSettings }),
+  });
+  const payload = await response.json().catch(() => null);
+  if (!response.ok) {
+    const error = new Error(String(payload?.message || `Tes jaringan lokal gagal: ${response.status}`));
+    error.payload = payload;
+    throw error;
+  }
+  return payload;
+};
+const CUSTOMER_REFERENCE_ACCEPT = '.cdr,.ai,.eps,.pdf,.psd,.png,.jpg,.jpeg,.webp,.svg,.tif,.tiff';
+const normalizeCustomerReferenceFile = (value = null) => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return null;
+  }
+  const originalName = String(
+    value.original_name
+    || value.design_original_name
+    || value.name
+    || value.file_name
+    || value.design_file_name
+    || '',
+  ).trim();
+  const fileName = String(value.file_name || value.design_file_name || originalName || '').trim();
+  const openUrl = String(
+    value.open_url
+    || value.design_open_url
+    || value.url
+    || value.public_url
+    || value.path
+    || value.layout_file_path
+    || value.relative_path
+    || value.design_relative_path
+    || '',
+  ).trim();
+  const filePath = String(value.path || value.layout_file_path || '').trim();
+  const relativePath = String(value.relative_path || value.design_relative_path || '').trim();
+  if (!originalName && !fileName && !openUrl && !filePath && !relativePath) {
+    return null;
+  }
+  return {
+    storage: String(value.storage || 'local_server').trim(),
+    source: 'customer_reference',
+    url: openUrl,
+    open_url: openUrl,
+    path: filePath,
+    relative_path: relativePath,
+    original_name: originalName || fileName,
+    file_name: fileName || originalName,
+    mime_type: String(value.mime_type || value.design_mime_type || '').trim(),
+    file_size: Number(value.file_size || value.design_file_size || 0) || 0,
+    root_path: String(value.root_path || value.design_root_path || '').trim(),
+    share_folder: String(value.share_folder || value.design_share_folder || '').trim(),
+    share_base_url: String(value.share_base_url || value.design_share_base_url || '').trim(),
+    server_name: String(value.server_name || value.design_server_name || '').trim(),
+    server_host: String(value.server_host || value.design_server_host || '').trim(),
+    workstation_name: String(value.workstation_name || '').trim(),
+    uploaded_at: String(value.uploaded_at || new Date().toISOString()).trim(),
+  };
+};
+const resolveCustomerReferenceFileFromSnapshot = (snapshotInput = null) => {
+  const snapshot = parseJsonObject(snapshotInput) || {};
+  const draftForm = parseJsonObject(snapshot?.draft_form) || {};
+  const cartRestore = parseJsonObject(snapshot?.cart_restore) || {};
+  return normalizeCustomerReferenceFile(
+    snapshot?.customer_reference_file
+    || draftForm?.customer_reference_file
+    || cartRestore?.customer_reference_file
+    || snapshot?.original_file
+    || draftForm?.original_file
+    || cartRestore?.original_file
+    || null,
+  ) || normalizeCustomerReferenceFile({
+    original_name: snapshot?.original_file_name
+      || snapshot?.customer_file_name
+      || draftForm?.original_file_name
+      || draftForm?.customer_file_name
+      || cartRestore?.original_file_name
+      || cartRestore?.customer_file_name
+      || '',
+    open_url: snapshot?.original_file_url
+      || snapshot?.customer_file_url
+      || draftForm?.original_file_url
+      || draftForm?.customer_file_url
+      || cartRestore?.original_file_url
+      || cartRestore?.customer_file_url
+      || '',
+    mime_type: snapshot?.original_file_mime_type
+      || draftForm?.original_file_mime_type
+      || cartRestore?.original_file_mime_type
+      || '',
+  });
+};
 const PROOFING_UPLOAD_SERVER_LIMIT_BYTES = 950 * 1024;
 const PROOFING_PREVIEW_MAX_DIMENSION = 1800;
 const formatFileSize = (bytes) => {
@@ -2310,6 +2894,7 @@ const PREPARE_LOADING_TEXT = 'tunggu dulu ya kaka BosLeonardo lagi kirim data';
 const REPRINT_SPEC_CACHE_KEY = 'pos_reprint_spec_cache_v1';
 const REPRINT_SPEC_CACHE_MAX = 120;
 const PRINTER_PROFILE_STORAGE_KEY = 'pos_printer_profile_v1';
+const LOCAL_DESIGN_NETWORK_STORAGE_KEY = 'pos_local_design_network_v1';
 const MASTER_SYNC_META_STORAGE_KEY = 'pos_master_sync_meta_v1';
 const MASTER_DATA_SNAPSHOT_STORAGE_KEY = 'pos_master_data_snapshot_v1';
 const INVOICE_SUCCESS_CACHE_KEY = 'pos_invoice_success_cache_v1';
@@ -2319,6 +2904,7 @@ const MASTER_SYNC_FULL_REFRESH_INTERVAL_MS = 5 * 60 * 1000;
 const MASTER_SYNC_FALLBACK_INTERVAL_MS = 45000;
 let memoryReprintSpecCache = [];
 let memoryPrinterProfile = null;
+let memoryLocalDesignNetworkSettings = null;
 let memoryMasterSyncMeta = {};
 let memoryMasterDataSnapshot = null;
 let memoryInvoiceSuccessCache = [];
@@ -5055,6 +5641,54 @@ const resolveInvoiceRowDateText = (row) => {
     || '',
   ).trim();
 };
+const resolveActorName = (...candidates) => {
+  for (const candidate of candidates) {
+    if (!candidate) continue;
+    if (typeof candidate === 'string') {
+      const text = candidate.trim();
+      if (text) return text;
+      continue;
+    }
+    if (typeof candidate === 'object') {
+      const text = toLabel(candidate.name, candidate.label, candidate.full_name, candidate.user_name, candidate.email);
+      if (text) return text;
+    }
+  }
+  return '';
+};
+const buildInvoiceRowAuditSummaryLines = (row, isDraftRow = false) => {
+  const audit = row?.audit && typeof row.audit === 'object' ? row.audit : {};
+  const createdBy = resolveActorName(
+    audit.input_by,
+    row?.created_by,
+    row?.createdBy,
+    row?.cashier,
+    row?.invoice?.created_by,
+    row?.invoice?.createdBy,
+  );
+  const paymentBy = resolveActorName(audit.payment_verified_by, row?.payment?.processed_by);
+  const completedBy = resolveActorName(audit.completed_by, row?.invoice?.finalized_by);
+  const proofingBy = resolveActorName(audit.proofing_by, row?.proofing?.proofing_by);
+  const lines = [];
+
+  if (isDraftRow && createdBy) {
+    lines.push(`Dibuat oleh: ${createdBy}`);
+  }
+  if (!isDraftRow && createdBy) {
+    lines.push(`Order dibuat oleh: ${createdBy}`);
+  }
+  if (!isDraftRow && paymentBy) {
+    lines.push(`Pembayaran diproses: ${paymentBy}`);
+  }
+  if (!isDraftRow && completedBy) {
+    lines.push(`Invoice diselesaikan: ${completedBy}`);
+  }
+  if (proofingBy) {
+    lines.push(`Proofing oleh: ${proofingBy}`);
+  }
+
+  return lines;
+};
 const parseInvoiceRowDateTimestamp = (row) => {
   const raw = resolveInvoiceRowDateText(row);
   if (!raw) {
@@ -5633,6 +6267,37 @@ const canUserApproveManualApproval = (user) => {
   return labels.some((label) => label === 'owner' || label === 'admin');
 };
 
+const collectUserPermissionNames = (user) => {
+  const rows = [
+    ...(Array.isArray(user?.permissions) ? user.permissions : []),
+    ...(Array.isArray(user?.permission_names) ? user.permission_names : []),
+  ];
+
+  return rows
+    .map((row) => (
+      row && typeof row === 'object'
+        ? toLabel(row.name, row.label, row.slug, row.code)
+        : String(row || '')
+    ))
+    .map((value) => normalizeText(value))
+    .filter(Boolean);
+};
+
+const canUserPreviewInternalReceipt = (user) => {
+  const permissionNames = collectUserPermissionNames(user);
+  if (permissionNames.includes('sales.create')) {
+    return true;
+  }
+
+  const roleLabels = collectUserRoleLabels(user);
+  return roleLabels.some((label) => (
+    label.includes('owner')
+    || label.includes('admin')
+    || label.includes('kasir')
+    || label.includes('cashier')
+  ));
+};
+
 const INVOICE_AREA_MENU_FILTER_MAP = Object.freeze({
   draft_orders: 'draft',
   invoice_success: 'success',
@@ -5646,6 +6311,8 @@ const INVOICE_AREA_FILTER_MENU_MAP = Object.freeze({
   approval: 'approval_queue',
   receivable: 'receivable',
 });
+
+const INVOICE_ACTIVE_WORK_AREAS = new Set(['draft', 'approval', 'receivable']);
 
 const DANA_QRIS_TERMINAL_STATUSES = new Set(['paid', 'failed', 'expired', 'cancelled', 'refund_required']);
 
@@ -6015,10 +6682,21 @@ const SalesScreen = ({ currentUser, onLogout }) => {
   const [selectedPaymentMethod, setSelectedPaymentMethod] = useState('');
   const [paymentAmount, setPaymentAmount] = useState('');
   const [paymentNotes, setPaymentNotes] = useState('');
-  const [selectedProofingFlow, setSelectedProofingFlow] = useState(PROOFING_FLOW_NONE);
+  const [receivableDueDate, setReceivableDueDate] = useState('');
+  const [selectedProofingChoice, setSelectedProofingChoice] = useState(PROOFING_CHOICE_PROOFING);
+  const [selectedProofingType, setSelectedProofingType] = useState('');
+  const [selectedProofingTargetUserId, setSelectedProofingTargetUserId] = useState(0);
+  const [selectedFollowUpMethod, setSelectedFollowUpMethod] = useState(FOLLOW_UP_SHARE_BILL);
+  const [proofingReferenceFile, setProofingReferenceFile] = useState(null);
+  const [processProofingUsers, setProcessProofingUsers] = useState([]);
+  const [isProcessProofingUsersLoading, setIsProcessProofingUsersLoading] = useState(false);
+  const [processProofingUsersError, setProcessProofingUsersError] = useState('');
+  const proofingFlowManuallySelectedRef = useRef(false);
   const [activeMenu, setActiveMenu] = useState('pos');
+  const [settingsMenu, setSettingsMenu] = useState('local_network');
   const [currentDraftSourceId, setCurrentDraftSourceId] = useState(null);
   const [currentQueuedDraftQueueId, setCurrentQueuedDraftQueueId] = useState(null);
+  const [openedDraftSignature, setOpenedDraftSignature] = useState('');
   const [invoiceSuccessCacheRows, setInvoiceSuccessCacheRows] = useState(() => loadInvoiceSuccessCache());
   const [draftInvoices, setDraftInvoices] = useState([]);
   const [invoiceWorkspaceRowsByArea, setInvoiceWorkspaceRowsByArea] = useState(() => ({
@@ -6044,7 +6722,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
   });
   const [draftTimeTick, setDraftTimeTick] = useState(() => Date.now());
   const [invoiceFilter, setInvoiceFilter] = useState('success');
-  const [approvalStatusFilter, setApprovalStatusFilter] = useState('all');
+  const [approvalStatusFilter, setApprovalStatusFilter] = useState('pending');
   const [invoiceSearch, setInvoiceSearch] = useState('');
   const [invoiceDateFrom, setInvoiceDateFrom] = useState(() => String(DEFAULT_INVOICE_DATE_FILTER?.from || '').trim());
   const [invoiceDateTo, setInvoiceDateTo] = useState(() => String(DEFAULT_INVOICE_DATE_FILTER?.to || '').trim());
@@ -6062,6 +6740,13 @@ const SalesScreen = ({ currentUser, onLogout }) => {
   const [updatingProductionItemId, setUpdatingProductionItemId] = useState(null);
   const [processingProofingId, setProcessingProofingId] = useState(null);
   const [closingReportDate, setClosingReportDate] = useState(formatIsoDate(new Date()));
+  const [isReportDateModalOpen, setIsReportDateModalOpen] = useState(false);
+  const [reportCalendarCursor, setReportCalendarCursor] = useState(() => startOfReportLocalMonth(new Date()));
+  const [reportPeriod, setReportPeriod] = useState('daily');
+  const [reportScope, setReportScope] = useState('all');
+  const [reportUserId, setReportUserId] = useState('');
+  const [reportUsers, setReportUsers] = useState([]);
+  const [activeReportAddon, setActiveReportAddon] = useState('memorize');
   const [closingReport, setClosingReport] = useState(null);
   const [isClosingReportLoading, setIsClosingReportLoading] = useState(false);
   const [closingDamageItems, setClosingDamageItems] = useState([]);
@@ -6096,15 +6781,35 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     visible: false,
     message: '',
   });
+  const previousCartHasProofingEligibleItemsRef = useRef(false);
   const cartHasProofingEligibleItems = useMemo(
     () => cartItems.some((item) => isProofingEligibleBackendItem(item?.backendItem || item || {})),
     [cartItems],
   );
+  const effectiveSelectedProofingFlow = cartHasProofingEligibleItems
+    ? proofingChoiceToFlow(selectedProofingChoice)
+    : PROOFING_FLOW_NONE;
+  const proofingChoiceRequiresType = effectiveSelectedProofingFlow !== PROOFING_FLOW_NONE;
   useEffect(() => {
-    if (!cartHasProofingEligibleItems && selectedProofingFlow !== PROOFING_FLOW_NONE) {
-      setSelectedProofingFlow(PROOFING_FLOW_NONE);
+    const previouslyEligible = previousCartHasProofingEligibleItemsRef.current;
+    previousCartHasProofingEligibleItemsRef.current = cartHasProofingEligibleItems;
+
+    if (!cartHasProofingEligibleItems && selectedProofingChoice !== PROOFING_CHOICE_NONE) {
+      setSelectedProofingChoice(PROOFING_CHOICE_NONE);
+      setSelectedProofingType('');
+      setSelectedProofingTargetUserId(0);
+      return;
     }
-  }, [cartHasProofingEligibleItems, selectedProofingFlow]);
+
+    if (
+      cartHasProofingEligibleItems
+      && !previouslyEligible
+      && !proofingFlowManuallySelectedRef.current
+      && selectedProofingChoice === PROOFING_CHOICE_NONE
+    ) {
+      setSelectedProofingChoice(PROOFING_CHOICE_PROOFING);
+    }
+  }, [cartHasProofingEligibleItems, selectedProofingChoice]);
   const isInvoiceAreaMenu = (menu) => Object.prototype.hasOwnProperty.call(INVOICE_AREA_MENU_FILTER_MAP, menu);
   const resolveInvoiceFilterForMenu = (menu) => INVOICE_AREA_MENU_FILTER_MAP[menu] || 'success';
   const resolveInvoiceMenuForFilter = (filter) => INVOICE_AREA_FILTER_MENU_MAP[filter] || 'invoice_success';
@@ -6114,7 +6819,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
 
     setActiveMenu(nextMenu);
     setInvoiceFilter(nextFilter);
-    setApprovalStatusFilter('all');
+    setApprovalStatusFilter(nextFilter === 'approval' ? 'pending' : 'all');
   };
   const openInvoiceAreaFilter = (filter) => {
     openInvoiceAreaMenu(resolveInvoiceMenuForFilter(filter));
@@ -6155,6 +6860,12 @@ const SalesScreen = ({ currentUser, onLogout }) => {
   const [manualApprovalModal, setManualApprovalModal] = useState(() => createManualApprovalModalState());
   const [isOrderPreviewOpen, setIsOrderPreviewOpen] = useState(false);
   const [isOrderPreviewSubmitting, setIsOrderPreviewSubmitting] = useState(false);
+  const [internalPreviewWatermark, setInternalPreviewWatermark] = useState(() => ({
+    label: 'PREVIEW INTERNAL',
+    userName: '',
+    accessedAt: '',
+    invoiceNo: '',
+  }));
   const [modalDetailPesanan, setModalDetailPesanan] = useState(false);
   const [modalPilihPembayaran, setModalPilihPembayaran] = useState(false);
   const [danaQrisModal, setDanaQrisModal] = useState(() => createDanaQrisModalState());
@@ -6167,6 +6878,11 @@ const SalesScreen = ({ currentUser, onLogout }) => {
   const [paymentMethodConfigs, setPaymentMethodConfigs] = useState(() => getDefaultPaymentMethodConfigs());
   const [printerProfile, setPrinterProfile] = useState(() => loadStoredPrinterProfile() || getDefaultPrinterProfile());
   const [hasSavedPrinterProfile, setHasSavedPrinterProfile] = useState(() => Boolean(loadStoredPrinterProfile()));
+  const [localDesignNetworkSettings, setLocalDesignNetworkSettings] = useState(() => loadStoredLocalDesignNetworkSettings());
+  const [hasSavedLocalDesignNetwork, setHasSavedLocalDesignNetwork] = useState(() => Boolean(loadStoredLocalDesignNetworkSettings()));
+  const [localDesignNetworkTest, setLocalDesignNetworkTest] = useState(null);
+  const [isTestingLocalDesignNetwork, setIsTestingLocalDesignNetwork] = useState(false);
+  const [hasUnsavedLocalDesignNetwork, setHasUnsavedLocalDesignNetwork] = useState(false);
   const [bankAccounts, setBankAccounts] = useState([]);
   const [selectedBankAccountId, setSelectedBankAccountId] = useState(null);
   const [depositModalVisible, setDepositModalVisible] = useState(false);
@@ -6183,6 +6899,56 @@ const SalesScreen = ({ currentUser, onLogout }) => {
   const [loadingDepositAccounts, setLoadingDepositAccounts] = useState(false);
   const paymentMethod = selectedPaymentMethod;
   const setPaymentMethod = setSelectedPaymentMethod;
+  const currentDraftDirtySignature = useMemo(() => buildDraftDirtySignature({
+    selectedCustomerId,
+    transactionDate,
+    cartItems,
+    discountPercent,
+    discountAmount,
+    discountMode,
+    paymentMethod,
+    paymentAmount,
+    paymentNotes,
+    receivableDueDate,
+    proofingChoice: selectedProofingChoice,
+    proofingType: selectedProofingType,
+    proofingTargetUserId: selectedProofingTargetUserId,
+    followUpMethod: selectedFollowUpMethod,
+    proofingReferenceFile,
+  }), [
+    selectedCustomerId,
+    transactionDate,
+    cartItems,
+    discountPercent,
+    discountAmount,
+    discountMode,
+    paymentMethod,
+    paymentAmount,
+    paymentNotes,
+    receivableDueDate,
+    selectedProofingChoice,
+    selectedProofingType,
+    selectedProofingTargetUserId,
+    selectedFollowUpMethod,
+    proofingReferenceFile,
+  ]);
+  const isReopenedDraftTransaction = Number(currentDraftSourceId || 0) > 0 || String(currentQueuedDraftQueueId || '').trim() !== '';
+  const hasReopenedDraftChanges = isReopenedDraftTransaction
+    && String(openedDraftSignature || '').trim() !== ''
+    && openedDraftSignature !== currentDraftDirtySignature;
+  const currentProofingReferenceFile = useMemo(() => {
+    const currentFile = normalizeCustomerReferenceFile(proofingReferenceFile);
+    if (currentFile) {
+      return currentFile;
+    }
+    for (const item of Array.isArray(cartItems) ? cartItems : []) {
+      const file = resolveCustomerReferenceFileFromSnapshot(item?.backendItem?.spec_snapshot);
+      if (file) {
+        return file;
+      }
+    }
+    return null;
+  }, [cartItems, proofingReferenceFile]);
   const danaQrisModalRef = useRef(danaQrisModal);
   const danaQrisPaidHandledRef = useRef(false);
   const danaQrisLastProviderSyncRef = useRef(0);
@@ -6811,6 +7577,8 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     pickedUpText: 'Belum diambil',
     cancellationText: '',
     providerPaymentSummary: null,
+    auditLines: [],
+    activityHistory: [],
     items: [],
     canPickup: false,
   });
@@ -6844,11 +7612,41 @@ const SalesScreen = ({ currentUser, onLogout }) => {
   const userRoleLabel = useMemo(() => extractUserRoleLabel(currentUser), [currentUser]);
   const currentUserId = useMemo(() => Number(currentUser?.id || currentUser?.user_id || 0) || 0, [currentUser]);
   const canApproveManualApprovalUser = useMemo(() => canUserApproveManualApproval(currentUser), [currentUser]);
+  const canPreviewInternalReceipt = useMemo(() => canUserPreviewInternalReceipt(currentUser), [currentUser]);
   const userInitial = useMemo(() => String(userDisplayName || 'U').trim().charAt(0).toUpperCase(), [userDisplayName]);
   const activePrinterProfile = useMemo(
     () => normalizePrinterProfile(printerProfile || getDefaultPrinterProfile()),
     [printerProfile],
   );
+  useEffect(() => {
+    if (!isOrderPreviewOpen || typeof document === 'undefined') {
+      return undefined;
+    }
+
+    const preventDefaultAction = (event) => {
+      event?.preventDefault?.();
+    };
+    const preventShortcutAction = (event) => {
+      const key = String(event?.key || '').toLowerCase();
+      if ((event?.ctrlKey || event?.metaKey) && ['a', 'c', 'p', 's', 'x'].includes(key)) {
+        event.preventDefault();
+      }
+    };
+
+    document.addEventListener('contextmenu', preventDefaultAction, true);
+    document.addEventListener('copy', preventDefaultAction, true);
+    document.addEventListener('cut', preventDefaultAction, true);
+    document.addEventListener('dragstart', preventDefaultAction, true);
+    document.addEventListener('keydown', preventShortcutAction, true);
+
+    return () => {
+      document.removeEventListener('contextmenu', preventDefaultAction, true);
+      document.removeEventListener('copy', preventDefaultAction, true);
+      document.removeEventListener('cut', preventDefaultAction, true);
+      document.removeEventListener('dragstart', preventDefaultAction, true);
+      document.removeEventListener('keydown', preventShortcutAction, true);
+    };
+  }, [isOrderPreviewOpen]);
   const printerStatusTone = hasSavedPrinterProfile ? 'active' : 'fallback';
   const printerStatusLabel = hasSavedPrinterProfile ? 'Printer Kasir Aktif' : 'Fallback Browser';
   const printerTargetSummary = useMemo(() => {
@@ -6914,6 +7712,29 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     return `${paperLabel} | ${profile.charsPerLine || '-'} karakter per baris`;
   }, [activePrinterProfile]);
   const posReceiptSettings = useMemo(() => normalizeReceiptSettings(posSettings), [posSettings]);
+  const backendLocalDesignSettings = useMemo(
+    () => normalizeLocalDesignNetworkSettings(posSettings),
+    [posSettings],
+  );
+  const activeLocalDesignNetworkSettings = useMemo(
+    () => normalizeLocalDesignNetworkSettings(localDesignNetworkSettings || {}, backendLocalDesignSettings),
+    [backendLocalDesignSettings, localDesignNetworkSettings],
+  );
+  const localDesignNetworkSummary = useMemo(() => {
+    const settings = activeLocalDesignNetworkSettings;
+    const target = resolveActiveLocalDesignTarget(settings);
+    const status = settings.enabled ? 'Aktif' : 'Nonaktif';
+    const server = [target?.serverName, target?.serverHost].filter(Boolean).join(' | ') || 'Belum diisi';
+    const share = target?.shareBaseUrl || 'Path share LAN belum diisi';
+    return {
+      status,
+      targetLabel: target?.label || 'Komputer Utama',
+      server,
+      share,
+      root: target?.rootPath || 'D:\\file siap layout',
+      count: Array.isArray(settings.targets) ? settings.targets.length : 0,
+    };
+  }, [activeLocalDesignNetworkSettings]);
 
   const handlePrinterProfileChange = (nextProfile) => {
     const defaultProfile = getDefaultPrinterProfile();
@@ -6965,11 +7786,205 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       ],
     );
   };
+  const handleChangeLocalDesignNetworkSetting = (field, value) => {
+    const current = normalizeLocalDesignNetworkSettings(activeLocalDesignNetworkSettings, backendLocalDesignSettings);
+    const activeTarget = resolveActiveLocalDesignTarget(current);
+    if (!activeTarget) {
+      return;
+    }
+    const updatedTarget = {
+      ...activeTarget,
+      [field]: value,
+      ...(field === 'serverName' && !String(activeTarget.label || '').trim()
+        ? { label: String(value || '').trim() || activeTarget.label }
+        : {}),
+    };
+    const nextTargets = current.targets.map((target) => (
+      String(target?.id || '') === String(activeTarget.id || '') ? updatedTarget : target
+    ));
+    const next = normalizeLocalDesignNetworkSettings({
+      ...current,
+      targets: nextTargets,
+      activeTargetId: activeTarget.id,
+    }, backendLocalDesignSettings);
+    setLocalDesignNetworkSettings(next);
+    setHasUnsavedLocalDesignNetwork(true);
+    setLocalDesignNetworkTest(null);
+  };
+  const handleSelectLocalDesignTarget = (targetId) => {
+    const current = normalizeLocalDesignNetworkSettings(activeLocalDesignNetworkSettings, backendLocalDesignSettings);
+    const next = normalizeLocalDesignNetworkSettings({
+      ...current,
+      activeTargetId: String(targetId || '').trim(),
+    }, backendLocalDesignSettings);
+    setLocalDesignNetworkSettings(next);
+    setHasUnsavedLocalDesignNetwork(true);
+    setLocalDesignNetworkTest(null);
+  };
+  const handleAddLocalDesignTarget = () => {
+    const current = normalizeLocalDesignNetworkSettings(activeLocalDesignNetworkSettings, backendLocalDesignSettings);
+    const nextIndex = (Array.isArray(current.targets) ? current.targets.length : 0) + 1;
+    const newTarget = createLocalDesignNetworkTarget({
+      id: `custom-share-${Date.now()}`,
+      label: `Komputer ${nextIndex}`,
+      rootPath: 'D:\\file siap layout',
+      shareFolder: 'file siap layout',
+      folderTemplate: '{yyyy}\\{mm}\\{dd}\\{material}\\{priority}',
+      referenceFolderTemplate: '{yyyy}\\{mm}\\{dd}\\referensi-customer\\{invoice}',
+    }, nextIndex - 1);
+    const next = normalizeLocalDesignNetworkSettings({
+      ...current,
+      targets: [...(current.targets || []), newTarget],
+      activeTargetId: newTarget.id,
+    }, backendLocalDesignSettings);
+    setLocalDesignNetworkSettings(next);
+    setHasUnsavedLocalDesignNetwork(true);
+    setLocalDesignNetworkTest(null);
+  };
+  const handleRemoveLocalDesignTarget = () => {
+    const current = normalizeLocalDesignNetworkSettings(activeLocalDesignNetworkSettings, backendLocalDesignSettings);
+    const activeTarget = resolveActiveLocalDesignTarget(current);
+    if (!activeTarget || (current.targets || []).length <= 1) {
+      openNotice('Sambungan Jaringan Lokal', 'Minimal harus ada satu komputer/share lokal.');
+      return;
+    }
+    const nextTargets = current.targets.filter((target) => String(target?.id || '') !== String(activeTarget.id || ''));
+    const next = normalizeLocalDesignNetworkSettings({
+      ...current,
+      targets: nextTargets,
+      activeTargetId: nextTargets[0]?.id || '',
+    }, backendLocalDesignSettings);
+    setLocalDesignNetworkSettings(next);
+    setHasUnsavedLocalDesignNetwork(true);
+    setLocalDesignNetworkTest(null);
+  };
+  const handleToggleLocalDesignNetwork = () => {
+    const next = normalizeLocalDesignNetworkSettings({
+      ...activeLocalDesignNetworkSettings,
+      enabled: !activeLocalDesignNetworkSettings.enabled,
+    }, backendLocalDesignSettings);
+    setLocalDesignNetworkSettings(next);
+    setHasUnsavedLocalDesignNetwork(true);
+    setLocalDesignNetworkTest(null);
+  };
+  const handleResetLocalDesignNetworkSettings = () => {
+    setLocalDesignNetworkSettings(null);
+    setHasSavedLocalDesignNetwork(false);
+    setHasUnsavedLocalDesignNetwork(false);
+    setLocalDesignNetworkTest(null);
+    persistLocalDesignNetworkSettings(null);
+    openNotice('Sambungan Jaringan Lokal', 'Setting jaringan lokal komputer ini dikembalikan ke default aplikasi.', null, {
+      autoCloseMs: 2200,
+    });
+  };
+  const handleTestLocalDesignNetwork = async () => {
+    try {
+      setIsTestingLocalDesignNetwork(true);
+      setLocalDesignNetworkTest(null);
+      const payload = await testLocalDesignNetworkConnection(activeLocalDesignNetworkSettings);
+      setLocalDesignNetworkTest(payload);
+      const lines = [
+        payload?.message || 'Sambungan jaringan lokal siap dipakai.',
+        ...(Array.isArray(payload?.checks) ? payload.checks.map((check) => `${check?.ok ? 'OK' : 'Gagal'} - ${check?.label}: ${check?.message}`) : []),
+      ];
+      openNotice('Tes Jaringan Lokal', lines.filter(Boolean).join('\n'), null, {
+        autoCloseMs: 3200,
+      });
+    } catch (error) {
+      const payload = error?.payload || null;
+      setLocalDesignNetworkTest(payload || {
+        ok: false,
+        message: error.message,
+        checks: [],
+      });
+      const lines = [
+        payload?.message || error.message,
+        ...(Array.isArray(payload?.checks) ? payload.checks.map((check) => `${check?.ok ? 'OK' : 'Gagal'} - ${check?.label}: ${check?.message}`) : []),
+      ];
+      openNotice('Tes Jaringan Lokal', lines.filter(Boolean).join('\n'));
+    } finally {
+      setIsTestingLocalDesignNetwork(false);
+    }
+  };
+  const handleSaveLocalDesignNetworkSettings = async () => {
+    try {
+      setIsTestingLocalDesignNetwork(true);
+      setLocalDesignNetworkTest(null);
+      const payload = await testLocalDesignNetworkConnection(activeLocalDesignNetworkSettings);
+      if (!payload?.ok) {
+        throw Object.assign(new Error(payload?.message || 'Sambungan jaringan lokal belum siap.'), { payload });
+      }
+      setLocalDesignNetworkTest(payload);
+      persistLocalDesignNetworkSettings(activeLocalDesignNetworkSettings);
+      setLocalDesignNetworkSettings(normalizeLocalDesignNetworkSettings(activeLocalDesignNetworkSettings, backendLocalDesignSettings));
+      setHasSavedLocalDesignNetwork(true);
+      setHasUnsavedLocalDesignNetwork(false);
+      const lines = [
+        'Setting jaringan lokal berhasil disimpan.',
+        ...(Array.isArray(payload?.checks) ? payload.checks.map((check) => `${check?.ok ? 'OK' : 'Gagal'} - ${check?.label}: ${check?.message}`) : []),
+      ];
+      openNotice('Simpan Jaringan Lokal', lines.filter(Boolean).join('\n'), null, {
+        autoCloseMs: 3200,
+      });
+    } catch (error) {
+      const payload = error?.payload || null;
+      setLocalDesignNetworkTest(payload || {
+        ok: false,
+        message: error.message,
+        checks: [],
+      });
+      const lines = [
+        'Setting belum disimpan karena sambungan belum valid.',
+        payload?.message || error.message,
+        ...(Array.isArray(payload?.checks) ? payload.checks.map((check) => `${check?.ok ? 'OK' : 'Gagal'} - ${check?.label}: ${check?.message}`) : []),
+      ];
+      openNotice('Simpan Jaringan Lokal Ditolak', lines.filter(Boolean).join('\n'));
+    } finally {
+      setIsTestingLocalDesignNetwork(false);
+    }
+  };
+
+  const ensureReportUsersLoaded = async () => {
+    if (reportUsers.length > 0) {
+      return reportUsers;
+    }
+    try {
+      const users = await fetchUserDirectory({ limit: 500 });
+      setReportUsers(Array.isArray(users) ? users : []);
+      return Array.isArray(users) ? users : [];
+    } catch (_error) {
+      setReportUsers([]);
+      return [];
+    }
+  };
+
+  const openReportDatePicker = () => {
+    setReportCalendarCursor(startOfReportLocalMonth(parseReportIsoDate(closingReportDate) || new Date()));
+    setIsReportDateModalOpen(true);
+  };
+
+  const buildReportRequestParams = (overrideDate = null) => {
+    const reportDate = String(overrideDate || closingReportDate || formatIsoDate(new Date())).trim();
+    const range = reportPeriodRange(reportDate, reportPeriod);
+    return {
+      date: reportDate,
+      date_from: range.from,
+      date_to: range.to,
+      period: reportPeriod,
+      scope: reportScope,
+      user_id: reportScope === 'user' ? reportUserId : '',
+    };
+  };
 
   const loadClosingReport = async (overrideDate = null) => {
-    const reportDate = String(overrideDate || closingReportDate || formatIsoDate(new Date())).trim();
+    const params = buildReportRequestParams(overrideDate);
+    const reportDate = String(params.date || '').trim();
     if (!reportDate) {
       openNotice('Laporan Close Order', 'Tanggal laporan wajib diisi.');
+      return null;
+    }
+    if (params.scope === 'user' && !(Number(params.user_id || 0) > 0)) {
+      openNotice('Laporan', 'Pilih user dulu untuk filter laporan per user.');
       return null;
     }
     if (!backendReady) {
@@ -6978,7 +7993,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     }
     try {
       setIsClosingReportLoading(true);
-      const payload = await fetchPosClosingSummary({ date: reportDate });
+      const payload = await fetchPosClosingSummary(params);
       const nextReport = payload && typeof payload === 'object' ? payload : null;
       setClosingReport(nextReport);
       return nextReport;
@@ -7028,6 +8043,9 @@ const SalesScreen = ({ currentUser, onLogout }) => {
 
   const loadClosingWorkspace = async (overrideDate = null) => {
     const reportDate = String(overrideDate || closingReportDate || formatIsoDate(new Date())).trim();
+    if (activeMenu === 'report') {
+      await ensureReportUsersLoaded();
+    }
     const [report, damageItems] = await Promise.all([
       loadClosingReport(reportDate),
       loadCloserOrderRecord(reportDate),
@@ -7164,6 +8182,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       posSettings: (posSettingsPayload && typeof posSettingsPayload === 'object' && !Array.isArray(posSettingsPayload)) || effectivePaymentMethods.length > 0
         ? {
           receipt: normalizeReceiptSettings(posSettingsPayload),
+          localDesignStorage: posSettingsPayload?.local_design_storage || null,
           paymentMethods: effectivePaymentMethods.length > 0
             ? effectivePaymentMethods
             : getDefaultPaymentMethodConfigs(),
@@ -7187,6 +8206,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       setPosSettings((prev) => ({
         ...prev,
         ...(nextSnapshot.posSettings.receipt || {}),
+        local_design_storage: nextSnapshot.posSettings.localDesignStorage || prev.local_design_storage,
       }));
       setPaymentMethodConfigs(Array.isArray(nextSnapshot.posSettings.paymentMethods) && nextSnapshot.posSettings.paymentMethods.length > 0
         ? nextSnapshot.posSettings.paymentMethods
@@ -7977,6 +8997,12 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       pickup: detailRow?.pickup || nestedOrder?.pickup || fallbackRow?.pickup || null,
       production: detailRow?.production || nestedOrder?.production || fallbackRow?.production || null,
       payment: detailRow?.payment || nestedOrder?.payment || fallbackRow?.payment || null,
+      audit: detailRow?.audit || nestedOrder?.audit || fallbackRow?.audit || null,
+      activity_history: Array.isArray(detailRow?.activity_history)
+        ? detailRow.activity_history
+        : Array.isArray(nestedOrder?.activity_history)
+          ? nestedOrder.activity_history
+          : (Array.isArray(fallbackRow?.activity_history) ? fallbackRow.activity_history : []),
       items: detailItems.length > 0
         ? detailItems
         : (Array.isArray(fallbackRow?.items) ? fallbackRow.items : []),
@@ -8118,7 +9144,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       paymentTargetName,
       paymentStatus,
       paymentAmount: isCustomerDepositPaymentMethod(paymentMethod) ? grandTotal : paidAmount,
-      proofingFlowLabel: cartHasProofingEligibleItems ? proofingFlowToLabel(selectedProofingFlow) : 'Tidak perlu proofing',
+      proofingFlowLabel: cartHasProofingEligibleItems ? proofingFlowToLabel(effectiveSelectedProofingFlow) : 'Tidak perlu proofing',
       discountAmount: finalDiscount,
       taxAmount: 0,
       extraChargeAmount: 0,
@@ -8127,19 +9153,10 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       notes: paymentNotes || '-',
       items: cartItems.map((item, index) => {
         const proofingEligible = isProofingEligibleBackendItem(item?.backendItem || item);
-        const proofingRequired = Boolean(
-          item?.proofing_required
-          ?? item?.backendItem?.proofing_required
-          ?? (proofingEligible && selectedProofingFlow !== PROOFING_FLOW_NONE),
-        );
+        const proofingRequired = proofingEligible && effectiveSelectedProofingFlow !== PROOFING_FLOW_NONE;
         return {
           proofingRequired,
-          proofingFlow: normalizeProofingFlow(
-            item?.proofing_flow
-            ?? item?.backendItem?.proofing_flow
-            ?? selectedProofingFlow,
-            proofingRequired,
-          ),
+          proofingFlow: proofingRequired ? effectiveSelectedProofingFlow : PROOFING_FLOW_NONE,
           no: index + 1,
           product: String(resolveReceiptProductName(item, item?.product || '-') || '-'),
           qty: Number(item?.qty || 0),
@@ -8321,41 +9338,6 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     } catch (error) {
       openNotice(noticeTitle, `Gagal menyalin detail pesanan: ${error.message}`);
     }
-  };
-
-  const buildProductionWorkOrderReceiptData = (snapshot) => {
-    const productionNotes = [
-      `Estimasi: ${String(snapshot?.estimatedDoneAt || '-').trim() || '-'}`,
-      `Prioritas: ${String(snapshot?.priorityLabel || 'Normal').trim() || 'Normal'}`,
-      'Checklist Produksi',
-      '[ ] Desain / brief siap',
-      '[ ] Ukuran + bahan cek',
-      '[ ] Finishing sesuai',
-      '[ ] Qty sesuai',
-      '[ ] Siap proses',
-      'TTD Produksi: ____________',
-      'Catatan: ________________',
-    ];
-
-    return buildReceiptDataFromSnapshot(snapshot, {
-      invoiceNo: `SPK-${String(snapshot?.draftNo || 'PREVIEW').replace(/^DRF-/, '') || 'PREVIEW'}`,
-      receiptSettingsInput: {
-        ...posSettings,
-        receipt_title: 'SPK PRODUKSI',
-        receipt_show_payment_detail: false,
-      },
-      detailOverrides: {
-        footerNotes: productionNotes,
-        thankYouText: 'SPK PRODUKSI',
-      },
-      paymentOverride: null,
-    });
-  };
-
-  const handlePrintProductionWorkOrder = () => {
-    const receiptData = buildProductionWorkOrderReceiptData(orderPreviewSnapshot);
-    const html = buildBrowserReceiptPreviewHtml(receiptData, activePrinterProfile);
-    printHtmlDocument(html, 'Cetak Nota SPK');
   };
 
   const buildReceiptDataFromSnapshot = (snapshot, options = {}) => {
@@ -8936,115 +9918,107 @@ const SalesScreen = ({ currentUser, onLogout }) => {
   const buildBillingNoteHtml = (payload) => {
     const note = String(payload?.transaction?.note || '').trim();
     const qrisImageUrl = String(payload?.paymentOptions?.qrisImageUrl || '').trim();
-    const reviewQrUrl = String(payload?.store?.reviewQrUrl || qrisImageUrl || '').trim();
-    const paidTotal = Number(payload?.amounts?.paid || 0) || 0;
     const dueTotal = Number(payload?.amounts?.due || 0) || 0;
     const totalAmount = Number(payload?.amounts?.total || 0) || dueTotal;
-    const title = 'Nota Tagihan';
-    const watermark = dueTotal > 0 ? 'TAGIHAN' : 'LUNAS';
-    const paymentMethodLabel = String(payload?.transaction?.paymentMethodLabel || '').trim() || 'Tunai / Transfer / QRIS';
+    const transferLines = Array.isArray(payload?.paymentOptions?.transferLines)
+      ? payload.paymentOptions.transferLines.filter(Boolean).slice(0, 3)
+      : [];
     return `<!doctype html>
 <html>
 <head>
   <meta charset="utf-8" />
   <title>Tagihan Pesanan ${escapeHtml(payload?.transaction?.billingNo || '')}</title>
   <style>
-    @page { size: 80mm auto; margin: 3mm; }
+    @page { size: 80mm auto; margin: 2.5mm; }
     * { box-sizing: border-box; }
     body { margin: 0; background: #f3f3f3; color: #050505; font-family: "Arial Narrow", Arial, Helvetica, sans-serif; }
-    .sheet { position: relative; overflow: hidden; width: 80mm; min-height: 100vh; margin: 0 auto; background: #fff; padding: 3mm 2.5mm 2.5mm; }
-    .watermark { position: absolute; inset: 42mm auto auto 8mm; z-index: 0; color: rgba(0,0,0,0.055); font-size: 35mm; font-weight: 900; letter-spacing: 2mm; transform: rotate(-33deg); transform-origin: center; white-space: nowrap; pointer-events: none; }
-    .content { position: relative; z-index: 1; }
-    .brand { text-align: center; border-bottom: 2.2px solid #111; padding-bottom: 5px; }
-    .logo { max-width: 47mm; max-height: 18mm; object-fit: contain; display: block; margin: 0 auto 1px; filter: grayscale(1) contrast(1.35); }
-    .brand-name { font-size: 15px; font-weight: 900; letter-spacing: 0.4px; text-transform: uppercase; line-height: 1.05; }
-    .brand-address { font-size: 12px; margin-top: 4px; line-height: 1.12; }
-    .brand-phone { font-size: 11px; margin-top: 4px; line-height: 1.15; white-space: nowrap; }
-    .title { text-align: center; font-size: 18px; font-weight: 900; letter-spacing: 0.8px; padding: 6px 0 5px; border-bottom: 2.2px solid #111; text-transform: uppercase; }
-    .meta { display: grid; grid-template-columns: 1fr 1fr; gap: 5mm; padding: 5px 0 6px; border-bottom: 2.2px solid #111; }
-    .meta-row { display: grid; grid-template-columns: 17mm 3mm minmax(0, 1fr); font-size: 11px; line-height: 1.55; break-inside: avoid; }
+    .sheet { width: 80mm; margin: 0 auto; background: #fff; padding: 2mm 2.2mm 2.5mm; }
+    .brand { text-align: center; border-bottom: 2.4px solid #111; padding-bottom: 5px; }
+    .logo { max-width: 43mm; max-height: 17mm; object-fit: contain; display: block; margin: 0 auto 1px; filter: grayscale(1) contrast(1.45); }
+    .brand-name { font-size: 15.5px; font-weight: 900; letter-spacing: 0.2px; text-transform: uppercase; line-height: 1.08; }
+    .brand-address { font-size: 12.5px; margin-top: 4px; line-height: 1.12; }
+    .brand-phone { font-size: 11.2px; margin-top: 4px; line-height: 1.15; white-space: nowrap; }
+    .title { text-align: center; font-size: 19px; font-weight: 900; letter-spacing: 0.3px; padding: 6px 0 5px; border-bottom: 2.4px solid #111; text-transform: uppercase; }
+    .meta { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); column-gap: 4mm; padding: 5px 0 6px; border-bottom: 2.4px solid #111; }
+    .meta-row { display: grid; grid-template-columns: 18mm 3mm minmax(0, 1fr); font-size: 11.2px; line-height: 1.55; break-inside: avoid; }
     .meta-row strong { font-weight: 700; }
-    .items-head, .item-grid { display: grid; grid-template-columns: minmax(0, 1fr) 9mm 18mm 21mm; gap: 1.5mm; align-items: start; }
-    .items-head { font-size: 11px; font-weight: 900; padding: 5px 0 4px; border-bottom: 2px solid #111; }
+    .items-head, .item-grid { display: grid; grid-template-columns: minmax(0, 1fr) 8mm 17mm 20mm; gap: 1.4mm; align-items: start; }
+    .items-head { font-size: 11.2px; font-weight: 900; padding: 5px 0 4px; border-bottom: 2px solid #111; }
     .billing-item { padding: 5px 0 6px; border-bottom: 1.5px dashed #111; break-inside: avoid; }
-    .item-grid { font-size: 11px; line-height: 1.15; }
+    .item-grid { font-size: 11.2px; line-height: 1.15; }
     .item-name { font-weight: 900; }
     .item-qty, .item-price, .item-total { text-align: right; white-space: nowrap; }
-    .item-details { margin-top: 4px; font-size: 10.8px; line-height: 1.35; }
-    .detail-row { display: grid; grid-template-columns: 27mm 3mm minmax(0, 1fr); }
+    .item-details { margin-top: 5px; font-size: 10.8px; line-height: 1.38; }
+    .detail-row { display: grid; grid-template-columns: 28mm 3mm minmax(0, 1fr); }
     .detail-row b { font-weight: 400; }
     .detail-row em { font-style: normal; }
-    .summary { padding: 7px 0 5px; border-bottom: 2.2px solid #111; }
+    .summary { padding: 7px 0 6px; border-bottom: 2.4px solid #111; }
     .summary-main { display: grid; grid-template-columns: 1fr auto; gap: 8px; align-items: baseline; font-weight: 900; }
-    .summary-main .label { font-size: 16px; }
-    .summary-main .value { font-size: 18px; }
-    .summary-row { display: grid; grid-template-columns: 31mm 3mm minmax(0, 1fr); align-items: baseline; font-size: 11px; line-height: 1.45; }
-    .summary-row .amount { text-align: right; }
-    .summary-row.due { font-weight: 900; }
-    .note { border-bottom: 2.2px solid #111; padding: 5px 0; font-size: 10.8px; line-height: 1.35; }
-    .terms { padding: 6px 0; border-bottom: 1.5px dashed #111; font-size: 10.7px; line-height: 1.35; }
-    .terms strong { font-weight: 900; }
-    .review { text-align: center; padding: 5px 0 4px; }
-    .review-title { font-size: 11.5px; font-weight: 900; margin-bottom: 4px; }
-    .review img { width: 22mm; height: 22mm; object-fit: contain; filter: grayscale(1) contrast(1.45); }
-    .qr-fallback { width: 22mm; height: 22mm; margin: 0 auto; border: 2px solid #111; display: grid; place-items: center; font-size: 10px; font-weight: 900; background:
+    .summary-main .label { font-size: 17px; }
+    .summary-main .value { font-size: 19px; }
+    .payment { padding: 7px 0 6px; border-bottom: 1.5px dashed #111; }
+    .payment-title { display: flex; align-items: center; gap: 7px; justify-content: center; font-size: 11.5px; font-weight: 900; margin-bottom: 5px; }
+    .payment-title:before, .payment-title:after { content: ""; flex: 1; border-top: 1.6px solid #111; }
+    .payment ul { margin: 0 0 3px 7mm; padding-left: 4mm; font-size: 11px; line-height: 1.45; }
+    .payment li { padding-left: 1mm; }
+    .payment-qr { text-align: center; margin-top: 1px; }
+    .payment-qr img { width: 29mm; height: 29mm; object-fit: contain; filter: grayscale(1) contrast(1.5); }
+    .qr-fallback { width: 29mm; height: 29mm; margin: 0 auto; border: 2px solid #111; display: grid; place-items: center; font-size: 10px; font-weight: 900; background:
       linear-gradient(90deg, #111 10%, transparent 10% 20%, #111 20% 28%, transparent 28% 42%, #111 42% 50%, transparent 50% 64%, #111 64% 76%, transparent 76%),
       linear-gradient(#111 10%, transparent 10% 22%, #111 22% 34%, transparent 34% 48%, #111 48% 60%, transparent 60% 72%, #111 72% 84%, transparent 84%);
       background-size: 5mm 5mm;
       color: #fff;
     }
-    .hotline { display: flex; align-items: center; justify-content: center; gap: 6px; font-size: 11px; padding: 2px 0 5px; border-bottom: 2.2px solid #111; }
-    .wa-icon { width: 6mm; height: 6mm; border: 1.7px solid #111; border-radius: 999px; display: inline-flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 900; line-height: 1; }
-    .footer { text-align: center; font-size: 11px; font-weight: 900; padding-top: 5px; }
-    @media print { body { background: #fff; } .sheet { margin: 0; width: 100%; min-height: auto; } }
+    .note { border-bottom: 2.4px solid #111; padding: 5px 0; font-size: 10.8px; line-height: 1.35; }
+    .terms { padding: 6px 0; border-bottom: 2.4px solid #111; font-size: 10.7px; line-height: 1.35; }
+    .terms strong { font-weight: 900; }
+    .footer { text-align: center; font-size: 11.5px; font-weight: 900; padding-top: 5px; }
+    @media print { body { background: #fff; } .sheet { margin: 0; width: 100%; } }
   </style>
 </head>
 <body>
   <div class="sheet">
-    <div class="watermark">${escapeHtml(watermark)}</div>
-    <div class="content">
-      <div class="brand">
-        ${payload?.store?.logoUrl ? `<img class="logo" src="${escapeHtml(payload.store.logoUrl)}" />` : ''}
-        <div class="brand-name">${escapeHtml(payload?.store?.name || 'SIDOMULYO ADVERTISING & PRINTING')}</div>
-        <div class="brand-address">${escapeHtml(payload?.store?.address || '')}</div>
-        <div class="brand-phone">${escapeHtml(payload?.store?.phone || '')}</div>
-      </div>
-      <div class="title">${escapeHtml(title)}</div>
-      <div class="meta">
-        <div>
-          <div class="meta-row"><span>No. Nota</span><span>:</span><strong>${escapeHtml(payload?.transaction?.billingNo || '-')}</strong></div>
-          <div class="meta-row"><span>Tanggal</span><span>:</span><span>${escapeHtml(payload?.transaction?.date || '-')}</span></div>
-          <div class="meta-row"><span>Pelanggan</span><span>:</span><strong>${escapeHtml(payload?.transaction?.customer || '-')}</strong></div>
-          <div class="meta-row"><span>Dicetak</span><span>:</span><span>${escapeHtml(payload?.transaction?.printedAt || '-')}</span></div>
-        </div>
-        <div>
-          <div class="meta-row"><span>No. Order</span><span>:</span><strong>${escapeHtml(payload?.transaction?.orderNo || '-')}</strong></div>
-          <div class="meta-row"><span>Kasir</span><span>:</span><span>${escapeHtml(payload?.transaction?.cashier || '-')}</span></div>
-          <div class="meta-row"><span>No. HP</span><span>:</span><span>${escapeHtml(payload?.transaction?.customerPhone || '-')}</span></div>
-        </div>
-      </div>
-      <div class="items-head"><div>Nama Item</div><div class="item-qty">Qty</div><div class="item-price">Harga</div><div class="item-total">Subtotal</div></div>
-      ${(payload?.items || []).map((item) => renderBillingItemHtml(item)).join('')}
-      <div class="summary">
-        <div class="summary-main"><div class="label">Total</div><div class="value">${escapeHtml(formatBillingAmount(totalAmount))}</div></div>
-        <div class="summary-row"><span>Pembayaran</span><span></span><span class="amount">${escapeHtml(formatBillingAmount(paidTotal))}</span></div>
-        ${paidTotal > 0 ? `<div class="summary-row due"><span>Sisa Tagihan</span><span></span><span class="amount">${escapeHtml(formatBillingAmount(dueTotal))}</span></div>` : ''}
-        <div class="summary-row"><span>Metode Bayar</span><span>:</span><span>${escapeHtml(paymentMethodLabel)}</span></div>
-      </div>
-      <div class="note">Catatan : ${escapeHtml(note || '-')}</div>
-      <div class="terms">
-        <strong>Pesanan diproses setelah pembayaran diterima.</strong><br />
-        Customer wajib mengecek file, tulisan, ukuran, jumlah, dan desain sebelum produksi.<br />
-        <strong>Kesalahan file/design yg sudah di approve dan ttd di form proofing, design bukan tanggung jawab Sidomulyo.</strong><br />
-        Bukti pembayaran wajib dikirim ke WhatsApp untuk mendapatkan Nota Lunas.
-      </div>
-      <div class="review">
-        <div class="review-title">Ulas kami untuk selalu bertumbuh</div>
-        ${reviewQrUrl ? `<img src="${escapeHtml(reviewQrUrl)}" />` : '<div class="qr-fallback">QR</div>'}
-      </div>
-      <div class="hotline"><span class="wa-icon">☎</span><span>No. Hotline Service ${escapeHtml(payload?.store?.hotline || '+62 888-6858-761')}</span></div>
-      <div class="footer">Terima kasih telah memilih kami</div>
+    <div class="brand">
+      ${payload?.store?.logoUrl ? `<img class="logo" src="${escapeHtml(payload.store.logoUrl)}" />` : ''}
+      <div class="brand-name">${escapeHtml(payload?.store?.name || 'SIDOMULYO ADVERTISING & PRINTING')}</div>
+      <div class="brand-address">${escapeHtml(payload?.store?.address || '')}</div>
+      <div class="brand-phone">${escapeHtml(payload?.store?.phone || '')}</div>
     </div>
+    <div class="title">TAGIHAN PESANAN</div>
+    <div class="meta">
+      <div>
+        <div class="meta-row"><span>No. Tagihan</span><span>:</span><strong>${escapeHtml(payload?.transaction?.billingNo || '-')}</strong></div>
+        <div class="meta-row"><span>Tanggal</span><span>:</span><span>${escapeHtml(payload?.transaction?.date || '-')}</span></div>
+        <div class="meta-row"><span>Pelanggan</span><span>:</span><strong>${escapeHtml(payload?.transaction?.customer || '-')}</strong></div>
+      </div>
+      <div>
+        <div class="meta-row"><span>No. Order</span><span>:</span><strong>${escapeHtml(payload?.transaction?.orderNo || '-')}</strong></div>
+        <div class="meta-row"><span>Kasir</span><span>:</span><span>${escapeHtml(payload?.transaction?.cashier || '-')}</span></div>
+        <div class="meta-row"><span>No. HP</span><span>:</span><span>${escapeHtml(payload?.transaction?.customerPhone || '-')}</span></div>
+      </div>
+    </div>
+    <div class="items-head"><div>Nama Item</div><div class="item-qty">Qty</div><div class="item-price">Harga</div><div class="item-total">Subtotal</div></div>
+    ${(payload?.items || []).map((item) => renderBillingItemHtml(item)).join('')}
+    <div class="summary">
+      <div class="summary-main"><div class="label">Total Tagihan</div><div class="value">${escapeHtml(formatBillingAmount(dueTotal || totalAmount))}</div></div>
+    </div>
+    <div class="payment">
+      <div class="payment-title">Pilihan Pembayaran</div>
+      <ul>
+        <li>Tunai</li>
+        ${transferLines.map((line) => `<li>${escapeHtml(line)}</li>`).join('')}
+        <li>QRIS</li>
+      </ul>
+      <div class="payment-qr">${qrisImageUrl ? `<img src="${escapeHtml(qrisImageUrl)}" />` : '<div class="qr-fallback">QRIS</div>'}</div>
+    </div>
+    <div class="note">Catatan : ${escapeHtml(note || '-')}</div>
+    <div class="terms">
+      <strong>Pesanan diproses setelah pembayaran diterima.</strong><br />
+      Customer wajib mengecek file, tulisan, ukuran, jumlah, dan desain sebelum produksi.<br />
+      <strong>Kesalahan file/design yg sudah di approve dan ttd di (form prooving), design bukan tanggung jawab Sidomulyo</strong><br />
+      Bukti pembayaran wajib dikirim ke WhatsApp untuk mendapatkan Nota Lunas.
+    </div>
+    <div class="footer">Tolong diperiksa dan dicek dengan teliti.</div>
   </div>
 </body>
 </html>`;
@@ -9115,6 +10089,43 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       });
     } catch (error) {
       openNotice('Nota Tagihan', error.message || 'Gagal share nota tagihan.');
+    }
+  };
+
+  const handleRemindReceivableDue = async (row) => {
+    const customerName = String(row?.customer?.name || 'Pelanggan').trim() || 'Pelanggan';
+    const rawPhone = String(row?.customer?.phone || '').trim();
+    const invoiceNo = String(row?.invoice?.invoice_no || '-').trim() || '-';
+    const dueTotal = roundMoney(Number(row?.invoice?.due_total || 0));
+    const dueMeta = resolveReceivableDueMeta(row);
+    let normalizedPhone = '';
+    try {
+      normalizedPhone = rawPhone ? normalizeIndonesianPhone(rawPhone, { allowEmpty: true }) : '';
+    } catch (_error) {
+      normalizedPhone = '';
+    }
+
+    const text = [
+      `Halo ${customerName},`,
+      `Kami mengingatkan tagihan invoice ${invoiceNo} sebesar ${formatRupiah(dueTotal)}.`,
+      dueMeta?.label ? `Jatuh tempo: ${dueMeta.label}${dueMeta.statusLabel ? ` (${dueMeta.statusLabel})` : ''}.` : 'Tanggal jatuh tempo belum tercatat.',
+      'Mohon segera melakukan pembayaran atau konfirmasi ke kasir Sidomulyo.',
+      'Terima kasih.',
+    ].join('\n');
+
+    try {
+      await copyTextToClipboard(text);
+      if (normalizedPhone) {
+        const opened = await openExternalUrl(`https://wa.me/${normalizedPhone.replace(/^\+/, '')}?text=${encodeURIComponent(text)}`);
+        if (opened) {
+          return;
+        }
+      }
+      openNotice('Reminder Piutang', 'Teks reminder sudah disalin. Nomor WA customer belum valid atau WhatsApp tidak bisa dibuka.', null, {
+        autoCloseMs: 2400,
+      });
+    } catch (error) {
+      openNotice('Reminder Piutang', error.message || 'Gagal membuat reminder piutang.');
     }
   };
 
@@ -10397,7 +11408,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     [discountPercent],
   );
   const parsedDiscountAmount = useMemo(
-    () => Math.min(Math.max(Number(discountAmount) || 0, 0), subtotal),
+    () => Math.min(Math.max(parseMoneyAmountInput(discountAmount), 0), subtotal),
     [discountAmount, subtotal],
   );
   const calculatedDiscountFromPercent = useMemo(
@@ -10413,9 +11424,9 @@ const SalesScreen = ({ currentUser, onLogout }) => {
 
   const discountAmountDisplay = useMemo(() => {
     if (discountMode === 'percent') {
-      return String(calculatedDiscountFromPercent);
+      return formatRupiahMoneyInputDisplay(String(calculatedDiscountFromPercent));
     }
-    return discountAmount;
+    return formatRupiahMoneyInputDisplay(discountAmount);
   }, [discountMode, calculatedDiscountFromPercent, discountAmount]);
 
   const grandTotal = useMemo(() => Math.max(subtotal - finalDiscount, 0), [subtotal, finalDiscount]);
@@ -10468,6 +11479,10 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     () => mapPaymentStatusToTransactionType(paymentStatus),
     [paymentStatus],
   );
+  const showReceivableDueDateInput = isReceivableTransactionType(transactionType)
+    && !isCustomerDepositPaymentMethod(paymentMethod);
+  const receivableDueDateRequired = showReceivableDueDateInput
+    && String(paymentMethod || '').trim() !== '';
   const selectedCustomer = useMemo(
     () => customers.find((row) => Number(row.id) === Number(selectedCustomerId)) || null,
     [customers, selectedCustomerId],
@@ -11784,6 +12799,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       view: 'workspace',
       area: String(options?.area || invoiceFilter || 'success'),
     };
+    const dateFilterDisabled = INVOICE_ACTIVE_WORK_AREAS.has(requestOptions.area);
 
     if (keyword) {
       requestOptions.search = keyword;
@@ -11792,10 +12808,10 @@ const SalesScreen = ({ currentUser, onLogout }) => {
 
     const dateFrom = String(options?.dateFrom ?? invoiceDateFrom ?? '').trim();
     const dateTo = String(options?.dateTo ?? invoiceDateTo ?? '').trim();
-    if (dateFrom) {
+    if (!dateFilterDisabled && dateFrom) {
       requestOptions.date_from = dateFrom;
     }
-    if (dateTo) {
+    if (!dateFilterDisabled && dateTo) {
       requestOptions.date_to = dateTo;
     }
     return requestOptions;
@@ -11896,10 +12912,14 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       ...options,
       page: requestPage,
     });
+    const invoiceSuccessDateFilterActive = invoiceRequestOptions.area === 'success'
+      && !invoiceRequestOptions.search
+      && Boolean(String(invoiceRequestOptions.date_from || '').trim() || String(invoiceRequestOptions.date_to || '').trim());
     const canUseSuccessCache = invoiceRequestOptions.area === 'success'
       && !invoiceRequestOptions.search
       && !appendRows
-      && !options?.forceServer;
+      && !options?.forceServer
+      && !invoiceSuccessDateFilterActive;
     if (canUseSuccessCache) {
       const cachedRows = invoiceSuccessCacheRows.length > 0 ? invoiceSuccessCacheRows : loadInvoiceSuccessCache();
       if (cachedRows.length > 0) {
@@ -11919,6 +12939,32 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       }
     }
 
+    let showedInvoiceSuccessDateCachePreview = false;
+    if (invoiceSuccessDateFilterActive && !appendRows && !options?.forceServer) {
+      const cachedRows = invoiceSuccessCacheRows.length > 0 ? invoiceSuccessCacheRows : loadInvoiceSuccessCache();
+      const dateFilteredCacheRows = cachedRows.filter((row) => (
+        isInvoiceRowInDateRange(row, invoiceRequestOptions.date_from, invoiceRequestOptions.date_to)
+      ));
+      if (dateFilteredCacheRows.length > 0) {
+        showedInvoiceSuccessDateCachePreview = true;
+        setDraftInvoices(dateFilteredCacheRows);
+        updateInvoiceWorkspaceAreaSnapshot(dateFilteredCacheRows, {
+          area: 'success',
+          replaceAreas: ['success'],
+        });
+        setInvoiceListMeta({
+          currentPage: 1,
+          lastPage: 1,
+          hasMore: false,
+          total: dateFilteredCacheRows.length,
+          searchMode: false,
+          source: 'local_success_cache_date_filter',
+        });
+        markInvoiceRealtimeUpdatesApplied();
+        hydrateDanaInvoiceMonitorsFromRows(dateFilteredCacheRows);
+      }
+    }
+
     try {
       setIsDraftLoading(true);
       let rows = [];
@@ -11927,20 +12973,53 @@ const SalesScreen = ({ currentUser, onLogout }) => {
 
       if (invoiceRequestOptions.area !== 'approval') {
         try {
-          const response = await fetchPosOrderTransactionsPage(invoiceRequestOptions);
-          rows = Array.isArray(response?.data) ? response.data : [];
-          pageMeta = response?.meta || null;
+          if (invoiceSuccessDateFilterActive) {
+            rows = await fetchAllPosOrderTransactions({
+              ...invoiceRequestOptions,
+              perPage: 200,
+              maxPages: 200,
+            });
+            pageMeta = {
+              currentPage: 1,
+              lastPage: 1,
+              hasMore: false,
+              total: rows.length,
+            };
+          } else {
+            const response = await fetchPosOrderTransactionsPage(invoiceRequestOptions);
+            rows = Array.isArray(response?.data) ? response.data : [];
+            pageMeta = response?.meta || null;
+          }
         } catch (error) {
           invoiceLoadError = error;
           try {
-            const fallbackResponse = await fetchPosOrdersPage(invoiceRequestOptions);
-            rows = Array.isArray(fallbackResponse?.data) ? fallbackResponse.data : [];
-            pageMeta = fallbackResponse?.meta || null;
+            if (invoiceSuccessDateFilterActive) {
+              rows = await fetchAllPosOrders({
+                ...invoiceRequestOptions,
+                perPage: 200,
+                maxPages: 200,
+              });
+              pageMeta = {
+                currentPage: 1,
+                lastPage: 1,
+                hasMore: false,
+                total: rows.length,
+              };
+            } else {
+              const fallbackResponse = await fetchPosOrdersPage(invoiceRequestOptions);
+              rows = Array.isArray(fallbackResponse?.data) ? fallbackResponse.data : [];
+              pageMeta = fallbackResponse?.meta || null;
+            }
             invoiceLoadError = null;
           } catch (fallbackError) {
             invoiceLoadError = new Error(`${error.message}\nFallback daftar order juga gagal: ${fallbackError.message}`);
           }
         }
+      }
+
+      if (invoiceLoadError && invoiceSuccessDateFilterActive && showedInvoiceSuccessDateCachePreview) {
+        openNotice('Invoice', `Data cache lokal ditampilkan dulu. Sinkron server gagal: ${invoiceLoadError.message}`);
+        return;
       }
 
       const approvalRows = approvalRowsInput || await fetchReceivableApprovalRows().catch(() => []);
@@ -11974,6 +13053,16 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         openNotice('Invoice', `Gagal memuat invoice: ${invoiceLoadError.message}`);
       }
     } catch (error) {
+      if (showedInvoiceSuccessDateCachePreview) {
+        setInvoiceListMeta((prev) => ({
+          ...prev,
+          hasMore: false,
+          searchMode: false,
+          source: 'local_success_cache_date_filter',
+        }));
+        openNotice('Invoice', `Data cache lokal ditampilkan dulu. Sinkron server gagal: ${error.message}`);
+        return;
+      }
       setDraftInvoices(queueRows);
       updateInvoiceWorkspaceAreaSnapshot(queueRows, { area: 'draft' });
       setInvoiceListMeta({
@@ -12604,6 +13693,62 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     }
   };
 
+  const handleUpdateProductionLayoutPlan = async (row, layoutStatus) => {
+    const itemId = Number(row?.id || 0);
+    if (itemId <= 0) {
+      return;
+    }
+
+    try {
+      setUpdatingProductionItemId(itemId);
+      await updatePosProductionLayoutPlan(itemId, {
+        layout_status: layoutStatus,
+      });
+      await loadProductionItems();
+      openNotice('Layout Produksi', layoutStatus === 'langsung_cetak'
+        ? `Item #${itemId} ditandai langsung cetak.`
+        : `Item #${itemId} masuk proses layout.`, null, {
+        showDefaultAction: false,
+        autoCloseMs: 1400,
+      });
+    } catch (error) {
+      openNotice(
+        'Layout Produksi',
+        String(formatBackendValidationError(error) || error?.message || 'Gagal menyimpan rencana layout.').trim(),
+      );
+    } finally {
+      setUpdatingProductionItemId(null);
+    }
+  };
+
+  const handleBuildProductionDelayWhatsapp = async (row, payload = {}) => {
+    const itemId = Number(row?.id || 0);
+    if (itemId <= 0) {
+      return;
+    }
+
+    try {
+      setUpdatingProductionItemId(itemId);
+      const response = await buildPosProductionDelayWhatsapp(itemId, payload);
+      const whatsappUrl = String(response?.whatsapp?.whatsapp_url || '').trim();
+      if (whatsappUrl) {
+        await Linking.openURL(whatsappUrl);
+      }
+      await loadProductionItems();
+      openNotice('Info Delay WA', 'Link WhatsApp keterlambatan sudah dibuat.', null, {
+        showDefaultAction: false,
+        autoCloseMs: 1600,
+      });
+    } catch (error) {
+      openNotice(
+        'Info Delay WA',
+        String(formatBackendValidationError(error) || error?.message || 'Gagal membuat link WhatsApp keterlambatan.').trim(),
+      );
+    } finally {
+      setUpdatingProductionItemId(null);
+    }
+  };
+
   const handleReleaseProductionItem = async (row) => {
     const itemId = Number(row?.id || 0);
     if (itemId <= 0) {
@@ -12653,32 +13798,112 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     }
   };
 
+  const handleOpenProofingCustomerWhatsapp = async (row) => {
+    const proofingId = Number(row?.id || 0);
+    const rawPhone = String(
+      row?.customer?.phone
+      || row?.order?.customer?.phone
+      || row?.latest_log?.customer?.phone
+      || '',
+    ).trim();
+
+    try {
+      const normalizedPhone = normalizeIndonesianPhone(rawPhone, { allowEmpty: false });
+      const opened = await openExternalUrl(`https://wa.me/${normalizedPhone}`);
+      if (!opened) {
+        throw new Error('WhatsApp / browser tidak bisa membuka chat pembeli.');
+      }
+    } catch (error) {
+      openNotice(
+        'Proofing',
+        `Gagal membuka WhatsApp pembeli${proofingId > 0 ? ` untuk proofing #${proofingId}` : ''}: ${error.message}`,
+      );
+    }
+  };
+
   const handleOpenProofingUploadedFile = async (row, source = 'preview') => {
     const proofingId = Number(row?.id || 0);
     if (!(proofingId > 0)) {
       return;
     }
 
-    const normalizedSource = String(source || '').trim().toLowerCase() === 'final' ? 'final' : 'preview';
+    const requestedSource = String(source || '').trim().toLowerCase();
+    const normalizedSource = requestedSource === 'original'
+      ? 'original'
+      : requestedSource === 'final'
+        ? 'final'
+        : 'preview';
     const fileObject = row?.[`${normalizedSource}_file`] && typeof row[`${normalizedSource}_file`] === 'object'
       ? row[`${normalizedSource}_file`]
-      : null;
-    const fallbackUrl = normalizedSource === 'final'
-      ? (row?.final_url || row?.preview_url)
-      : (row?.preview_url || row?.final_url);
-    const targetUrl = String(fileObject?.url || fallbackUrl || '').trim();
+      : normalizedSource === 'original' && row?.buyer_file && typeof row.buyer_file === 'object'
+        ? row.buyer_file
+        : normalizedSource === 'original' && row?.customer_file && typeof row.customer_file === 'object'
+          ? row.customer_file
+          : normalizedSource === 'original' && row?.customer_reference_file && typeof row.customer_reference_file === 'object'
+            ? row.customer_reference_file
+            : normalizedSource === 'original' && row?.item?.customer_reference_file && typeof row.item.customer_reference_file === 'object'
+              ? row.item.customer_reference_file
+              : null;
+    const snapshot = parseJsonObject(row?.item?.spec_snapshot) || parseJsonObject(row?.spec_snapshot) || {};
+    const draftForm = parseJsonObject(snapshot?.draft_form) || {};
+    const cartRestore = parseJsonObject(snapshot?.cart_restore) || {};
+    const fallbackUrl = normalizedSource === 'original'
+      ? (
+        row?.original_url
+        || row?.buyer_file_url
+        || row?.customer_file_url
+        || row?.customer_reference_file_url
+        || row?.source_file_url
+        || row?.artwork_url
+        || row?.item?.original_url
+        || row?.item?.buyer_file_url
+        || row?.item?.customer_file_url
+        || row?.item?.customer_reference_file_url
+        || snapshot?.original_file_url
+        || snapshot?.customer_file_url
+        || snapshot?.buyer_file_url
+        || snapshot?.customer_reference_file?.open_url
+        || snapshot?.customer_reference_file?.url
+        || snapshot?.customer_reference_file?.path
+        || snapshot?.customer_reference_file?.relative_path
+        || draftForm?.original_file_url
+        || draftForm?.customer_file_url
+        || draftForm?.customer_reference_file?.open_url
+        || draftForm?.customer_reference_file?.url
+        || draftForm?.customer_reference_file?.path
+        || draftForm?.customer_reference_file?.relative_path
+        || cartRestore?.original_file_url
+        || cartRestore?.customer_file_url
+        || cartRestore?.customer_reference_file?.open_url
+        || cartRestore?.customer_reference_file?.url
+        || cartRestore?.customer_reference_file?.path
+        || cartRestore?.customer_reference_file?.relative_path
+      )
+      : normalizedSource === 'final'
+        ? (row?.final_url || row?.preview_url)
+        : (row?.preview_url || row?.final_url);
+    const targetUrl = String(
+      fileObject?.url
+      || fileObject?.open_url
+      || fileObject?.path
+      || fileObject?.relative_path
+      || fallbackUrl
+      || '',
+    ).trim();
     if (!targetUrl) {
-      openNotice('Proofing', 'File upload proofing belum tersedia.');
+      openNotice('Proofing', normalizedSource === 'original'
+        ? 'File asli pembeli belum tersedia. Isi link/file asli dari fitur invoice terlebih dahulu.'
+        : 'File upload proofing belum tersedia.');
       return;
     }
 
     try {
       const opened = await openExternalUrl(targetUrl);
       if (!opened) {
-        throw new Error('Browser tidak bisa membuka file upload proofing.');
+        throw new Error('Browser tidak bisa membuka file.');
       }
     } catch (error) {
-      openNotice('Proofing', `Gagal membuka file proofing #${proofingId}: ${error.message}`);
+      openNotice('Proofing', `Gagal membuka file #${proofingId}: ${error.message}`);
     }
   };
 
@@ -12772,6 +13997,47 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     });
   };
 
+  const ensureProcessProofingUsersLoaded = async (targetRoleInput = selectedProofingType || PROOFING_TYPE_DESIGN) => {
+    if (processProofingUsers.length > 0) {
+      return processProofingUsers;
+    }
+    setIsProcessProofingUsersLoading(true);
+    setProcessProofingUsersError('');
+    try {
+      const users = await fetchUserDirectory({ limit: 500 });
+      setProcessProofingUsers(users);
+      const normalizedRole = normalizeProofingTargetRole(targetRoleInput);
+      const filteredUsers = filterProofingTargetUsers(users, normalizedRole);
+      if (filteredUsers.length === 0) {
+        setProcessProofingUsersError(`Belum ada user role ${proofingTargetRoleLabel(normalizedRole)} di directory.`);
+      } else if (!(Number(selectedProofingTargetUserId || 0) > 0)) {
+        setSelectedProofingTargetUserId(Number(filteredUsers[0]?.id || 0) || 0);
+      }
+      return users;
+    } catch (error) {
+      setProcessProofingUsers([]);
+      setSelectedProofingTargetUserId(0);
+      setProcessProofingUsersError(`Gagal memuat daftar PIC proofing: ${formatBackendValidationError(error) || error.message}`);
+      return [];
+    } finally {
+      setIsProcessProofingUsersLoading(false);
+    }
+  };
+
+  const handleSelectProcessProofingRole = async (targetRole) => {
+    const normalizedRole = normalizeProofingTargetRole(targetRole);
+    setSelectedProofingType(normalizedRole);
+    setProcessProofingUsersError('');
+    const users = processProofingUsers.length > 0
+      ? processProofingUsers
+      : await ensureProcessProofingUsersLoaded(normalizedRole);
+    const filteredUsers = filterProofingTargetUsers(users, normalizedRole);
+    setSelectedProofingTargetUserId(Number(filteredUsers[0]?.id || 0) || 0);
+    if (filteredUsers.length === 0) {
+      setProcessProofingUsersError(`Belum ada user role ${proofingTargetRoleLabel(normalizedRole)} di directory.`);
+    }
+  };
+
   const handleSubmitProofingSendTarget = async () => {
     const row = proofingSendModal.row;
     const proofingId = Number(row?.id || 0);
@@ -12849,9 +14115,16 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         await uploadPosProofingPreview(proofingId, uploadFile);
       }
       await loadProofingItems();
+      const wasRevisionUpload = mode !== 'final' && normalizeProofingStatusKey(row?.status) === 'revision';
+      const revisionSummary = row?.revision_summary && typeof row.revision_summary === 'object'
+        ? row.revision_summary
+        : {};
+      const nextRevisionRound = Math.max(Number(revisionSummary?.revision_count || 0) + 1, 1);
       openNotice(
         'Proofing',
-        `${mode === 'final' ? 'File final' : 'Preview'} proofing #${proofingId} berhasil diupload.`,
+        wasRevisionUpload
+          ? `Revisi proofing #${proofingId} berhasil diupload. Status menjadi waiting respon customer revisi ${nextRevisionRound}.`
+          : `${mode === 'final' ? 'File final' : 'Preview'} proofing #${proofingId} berhasil diupload.`,
         null,
         {
           showDefaultAction: false,
@@ -12902,7 +14175,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     }
   };
 
-  const handleReleaseProofingToProduction = async (row) => {
+  const handleReleaseProofingToProduction = async (row, payload = {}) => {
     const proofingId = Number(row?.id || 0);
     if (!(proofingId > 0)) {
       return;
@@ -12910,7 +14183,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
 
     try {
       setProcessingProofingId(proofingId);
-      await releasePosProofingToProduction(proofingId);
+      await releasePosProofingToProduction(proofingId, payload);
       await Promise.all([
         loadProofingItems(),
         loadProductionItems().catch(() => {}),
@@ -12930,6 +14203,145 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         'Gerbang Produksi',
         blockerMessage || `Gagal melepas proofing #${proofingId} ke produksi: ${error.message}`,
       );
+    } finally {
+      setProcessingProofingId(null);
+    }
+  };
+
+  const handleUploadLocalProductionFile = async (row) => {
+    const proofingId = Number(row?.id || 0);
+    if (hasUnsavedLocalDesignNetwork) {
+      openNotice('Sambungan Jaringan Lokal', 'Simpan dan tes sambungan jaringan lokal terlebih dahulu sebelum upload file produksi.');
+      return null;
+    }
+    const file = await pickBrowserFile({
+      accept: '.cdr,.ai,.eps,.pdf,.psd,.png,.jpg,.jpeg,.webp',
+    });
+    if (!file) {
+      return null;
+    }
+
+    try {
+      setProcessingProofingId(proofingId);
+      const metadata = await uploadFileToLocalDesignStorage(file, row, activeLocalDesignNetworkSettings);
+      openNotice(
+        'Storage Lokal Produksi',
+        `File ${String(metadata?.design_file_name || file.name || '').trim() || 'produksi'} tersimpan di ${String(metadata?.design_relative_path || metadata?.layout_file_path || '').trim()}.`,
+        null,
+        {
+          showDefaultAction: false,
+          autoCloseMs: 2200,
+        },
+      );
+      return metadata;
+    } catch (error) {
+      openNotice(
+        'Storage Lokal Produksi',
+        `Gagal menyimpan file produksi lokal: ${error.message}. Pastikan aplikasi desktop dipakai dan folder lokal bisa ditulis.`,
+      );
+      return null;
+    } finally {
+      setProcessingProofingId(null);
+    }
+  };
+
+  const handleUploadCustomerProofingReference = async () => {
+    try {
+      if (hasUnsavedLocalDesignNetwork) {
+        openNotice('Sambungan Jaringan Lokal', 'Simpan dan tes sambungan jaringan lokal terlebih dahulu sebelum upload file referensi customer.');
+        return;
+      }
+      const file = await pickBrowserFile({ accept: CUSTOMER_REFERENCE_ACCEPT });
+      if (!file) {
+        return;
+      }
+
+      const baseSettings = resolveLocalDesignSettings(activeLocalDesignNetworkSettings);
+      const referenceStorageSettings = {
+        local_design_storage: {
+          enabled: baseSettings.enabled,
+          root_path: baseSettings.rootPath,
+          share_base_url: baseSettings.shareBaseUrl,
+          share_folder: baseSettings.shareFolder,
+          folder_template: baseSettings.referenceFolderTemplate || '{yyyy}\\{mm}\\{dd}\\referensi-customer\\{invoice}',
+          reference_folder_template: baseSettings.referenceFolderTemplate,
+          server_name: baseSettings.serverName,
+          server_host: baseSettings.serverHost,
+        },
+      };
+      const fallbackInvoice = String(
+        orderNumber
+        || orderPreviewSnapshot?.draftNo
+        || selectedCustomer?.name
+        || 'REFERENSI-CUSTOMER',
+      ).trim();
+      const pseudoRow = {
+        proofing_code: fallbackInvoice,
+        order: {
+          production_priority: 'proofing',
+          invoice: {
+            invoice_no: fallbackInvoice,
+          },
+        },
+        item: {
+          name: 'Referensi customer',
+          material_text: 'referensi-customer',
+          production_priority: 'proofing',
+        },
+      };
+
+      const metadata = await uploadFileToLocalDesignStorage(file, pseudoRow, referenceStorageSettings);
+      const referenceFile = normalizeCustomerReferenceFile({
+        ...metadata,
+        source: 'customer_reference',
+        uploaded_by_id: Number(currentUser?.id || 0) || null,
+        uploaded_by_name: String(currentUser?.name || currentUser?.username || '').trim(),
+      });
+      setProofingReferenceFile(referenceFile);
+      openNotice(
+        'Referensi Customer',
+        `File ${referenceFile?.original_name || file.name || 'referensi'} tersimpan lokal. Backend hanya akan menyimpan metadata file.`,
+        null,
+        {
+          showDefaultAction: false,
+          autoCloseMs: 2200,
+        },
+      );
+    } catch (error) {
+      openNotice(
+        'Referensi Customer',
+        `Gagal menyimpan referensi customer: ${error.message}. Pastikan aplikasi desktop dipakai dan folder lokal bisa ditulis.`,
+      );
+    }
+  };
+
+  const handleReturnProofingToCashier = async (row, withReminder = false) => {
+    const proofingId = Number(row?.id || 0);
+    if (!(proofingId > 0)) {
+      return;
+    }
+
+    try {
+      setProcessingProofingId(proofingId);
+      if (withReminder) {
+        await returnPosProofingToCashierReminder(proofingId);
+      } else {
+        await returnPosProofingToCashier(proofingId);
+      }
+      await loadProofingItems();
+      openNotice(
+        'Proofing',
+        withReminder
+          ? `Proofing #${proofingId} dikembalikan ke kasir dan reminder kepala ops/kepala toko dicatat.`
+          : `Proofing #${proofingId} dikembalikan ke kasir untuk kejelasan pelunasan.`,
+        null,
+        {
+          showDefaultAction: false,
+          autoCloseMs: 1800,
+        },
+      );
+    } catch (error) {
+      openNotice('Proofing', `Gagal mengirim proofing #${proofingId} kembali ke kasir: ${error.message}`);
     } finally {
       setProcessingProofingId(null);
     }
@@ -12972,12 +14384,20 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         ))
         .filter((item) => Number(item?.backendItem?.product_id || 0) > 0);
 
+      const restoredProofingFlow = deriveProofingFlowFromCartItems(cartFromQueue);
+      const restoredProofingChoice = proofingFlowToChoice(restoredProofingFlow);
+      const restoredCustomerId = Number(payload?.customer_id || 0) || null;
+      const restoredPaymentMethod = normalizePaymentMethodLabel(payload?.payment?.method || 'Cash');
+      const restoredPaymentAmount = String(Math.max(0, Number(payload?.payment?.amount || 0)));
+      const restoredPaymentNotes = stripWorkflowSystemNotes(payload?.payment?.note || payload?.note || payload?.notes || '');
+      const restoredReceivableDueDate = formatDateInputValue(payload?.due_at || payload?.invoice?.due_at || '');
       setCartItems(cartFromQueue);
-      setSelectedProofingFlow(deriveProofingFlowFromCartItems(cartFromQueue));
+      proofingFlowManuallySelectedRef.current = false;
+      setSelectedProofingChoice(restoredProofingChoice);
       setCurrentDraftSourceId(null);
       setCurrentQueuedDraftQueueId(queueId || null);
       setOrderNumber('');
-      setSelectedCustomerId(Number(payload?.customer_id || 0) || null);
+      setSelectedCustomerId(restoredCustomerId);
       setProductName('');
       setSelectedProductId(null);
       setNegotiatedPriceInput('');
@@ -12997,9 +14417,26 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       setDiscountPercent('0');
       setDiscountAmount('0');
       setDiscountMode('percent');
-      setPaymentMethod(normalizePaymentMethodLabel(payload?.payment?.method || 'Cash'));
-      setPaymentAmount(String(Math.max(0, Number(payload?.payment?.amount || 0))));
-      setPaymentNotes(stripWorkflowSystemNotes(payload?.payment?.note || payload?.note || payload?.notes || ''));
+      setPaymentMethod(restoredPaymentMethod);
+      setPaymentAmount(restoredPaymentAmount);
+      setPaymentNotes(restoredPaymentNotes);
+      setReceivableDueDate(restoredReceivableDueDate);
+      setOpenedDraftSignature(buildDraftDirtySignature({
+        selectedCustomerId: restoredCustomerId,
+        transactionDate,
+        cartItems: cartFromQueue,
+        discountPercent: '0',
+        discountAmount: '0',
+        discountMode: 'percent',
+        paymentMethod: restoredPaymentMethod,
+        paymentAmount: restoredPaymentAmount,
+        paymentNotes: restoredPaymentNotes,
+        receivableDueDate: restoredReceivableDueDate,
+        proofingChoice: restoredProofingChoice,
+        proofingType: '',
+        proofingTargetUserId: 0,
+        followUpMethod: FOLLOW_UP_SHARE_BILL,
+      }));
       setLastSyncInfo(`Lanjut Draft Antrian${payload?.invoice_no ? ` | ${payload.invoice_no}` : ''}`);
       setActiveMenu('pos');
       return;
@@ -13068,12 +14505,28 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         return;
       }
 
+      const restoredProofingFlow = deriveProofingFlowFromCartItems(cartFromDraft);
+      const restoredProofingChoice = proofingFlowToChoice(restoredProofingFlow);
+      const restoredCustomerId = Number(order?.customer?.id || order?.customer_id || 0) || null;
+      const restoredPaymentMethod = normalizePaymentMethodLabel(
+        order?.payment?.method
+        || order?.payment_method
+        || order?.invoice?.payment_method
+        || 'Cash',
+      );
+      const restoredPaymentAmount = String(Math.max(0, Number(order?.invoice?.paid_total || order?.paid_total || 0)));
+      const restoredPaymentNotes = stripWorkflowSystemNotes(order?.payment?.note || order?.note || order?.notes || '');
+      const restoredReceivableDueDate = formatDateInputValue(order?.invoice?.due_at || order?.due_at || '');
       setCartItems(cartFromDraft);
-      setSelectedProofingFlow(deriveProofingFlowFromCartItems(cartFromDraft));
+      proofingFlowManuallySelectedRef.current = false;
+      setSelectedProofingChoice(restoredProofingChoice);
+      setSelectedProofingType('');
+      setSelectedProofingTargetUserId(0);
+      setSelectedFollowUpMethod(FOLLOW_UP_SHARE_BILL);
       setCurrentDraftSourceId(selectedId);
       setCurrentQueuedDraftQueueId(null);
       setOrderNumber('');
-      setSelectedCustomerId(Number(order?.customer?.id || order?.customer_id || 0) || null);
+      setSelectedCustomerId(restoredCustomerId);
       setProductName('');
       setSelectedProductId(null);
       setNegotiatedPriceInput('');
@@ -13093,14 +14546,26 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       setDiscountPercent('0');
       setDiscountAmount('0');
       setDiscountMode('percent');
-      setPaymentMethod(normalizePaymentMethodLabel(
-        order?.payment?.method
-        || order?.payment_method
-        || order?.invoice?.payment_method
-        || 'Cash',
-      ));
-      setPaymentAmount(String(Math.max(0, Number(order?.invoice?.paid_total || order?.paid_total || 0))));
-      setPaymentNotes(stripWorkflowSystemNotes(order?.payment?.note || order?.note || order?.notes || ''));
+      setPaymentMethod(restoredPaymentMethod);
+      setPaymentAmount(restoredPaymentAmount);
+      setPaymentNotes(restoredPaymentNotes);
+      setReceivableDueDate(restoredReceivableDueDate);
+      setOpenedDraftSignature(buildDraftDirtySignature({
+        selectedCustomerId: restoredCustomerId,
+        transactionDate,
+        cartItems: cartFromDraft,
+        discountPercent: '0',
+        discountAmount: '0',
+        discountMode: 'percent',
+        paymentMethod: restoredPaymentMethod,
+        paymentAmount: restoredPaymentAmount,
+        paymentNotes: restoredPaymentNotes,
+        receivableDueDate: restoredReceivableDueDate,
+        proofingChoice: restoredProofingChoice,
+        proofingType: '',
+        proofingTargetUserId: 0,
+        followUpMethod: FOLLOW_UP_SHARE_BILL,
+      }));
       setLastSyncInfo(
         `Lanjut Draft #${selectedId}${order?.invoice?.invoice_no ? ` | ${order.invoice.invoice_no}` : ''}`,
       );
@@ -13127,6 +14592,9 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       if (isQueueRow) {
         const queueId = String(row?.__queue_id || rowId.replace(/^queue-/, ''));
         consumeQueuedDraftByQueueId(queueId);
+        if (String(currentQueuedDraftQueueId || '').trim() === queueId) {
+          setOpenedDraftSignature('');
+        }
         setDraftInvoices((prev) => (Array.isArray(prev) ? prev : []).filter((draft) => String(draft?.id || '') !== rowId));
         await loadDraftInvoices();
         openNotice('Invoice', 'Draft dari antrian berhasil dihapus.');
@@ -13152,6 +14620,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
 
       if (Number(currentDraftSourceId || 0) === selectedId) {
         setCurrentDraftSourceId(null);
+        setOpenedDraftSignature('');
       }
       setDraftInvoices((prev) => prev.filter((draft) => Number(draft?.id || 0) !== selectedId));
       await loadDraftInvoices();
@@ -13631,6 +15100,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     setOrderNumber('');
     setCurrentDraftSourceId(null);
     setCurrentQueuedDraftQueueId(null);
+    setOpenedDraftSignature('');
     setSelectedCustomerId(null);
     setTransactionDate(formatDate(new Date()));
     setProductName('');
@@ -13649,13 +15119,20 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     setPages('1');
     resetBookConfiguratorState();
     setCartItems([]);
+    proofingFlowManuallySelectedRef.current = false;
     setDiscountPercent('0');
     setDiscountAmount('0');
     setDiscountMode('percent');
     setPaymentMethod('');
     setPaymentAmount('');
     setPaymentNotes('');
-    setSelectedProofingFlow(PROOFING_FLOW_NONE);
+    setReceivableDueDate('');
+    setSelectedProofingChoice(PROOFING_CHOICE_PROOFING);
+    setSelectedProofingType('');
+    setSelectedProofingTargetUserId(0);
+    setSelectedFollowUpMethod(FOLLOW_UP_SHARE_BILL);
+    setProofingReferenceFile(null);
+    setProcessProofingUsersError('');
     setSelectedBankAccountId(null);
     setLastSyncInfo('');
     setQueueCount(loadOrderQueue().length);
@@ -13664,6 +15141,10 @@ const SalesScreen = ({ currentUser, onLogout }) => {
 
   const handleChangePaymentAmount = (value) => {
     setPaymentAmount(normalizeMoneyAmountInput(value));
+  };
+
+  const handleChangeReceivableDueDate = (value) => {
+    setReceivableDueDate(String(value || '').replace(/[^0-9-]/g, '').slice(0, 10));
   };
 
   const handleValidateProduct = async () => {
@@ -14228,9 +15709,29 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     }
 
     const proofingFlowForValidation = normalizeProofingFlow(
-      options?.proofingFlow ?? selectedProofingFlow,
-      Boolean(options?.proofingFlow) || selectedProofingFlow !== PROOFING_FLOW_NONE,
+      options?.proofingFlow ?? effectiveSelectedProofingFlow,
+      Boolean(options?.proofingFlow) || effectiveSelectedProofingFlow !== PROOFING_FLOW_NONE,
     );
+    const proofingTypeForValidation = normalizeProofingType(options?.proofingType ?? selectedProofingType);
+    const proofingTargetUserIdForValidation = Number(options?.proofingTargetUserId ?? selectedProofingTargetUserId ?? 0) || 0;
+    if (
+      options?.skipProofingTypeValidation !== true
+      && cartHasProofingEligibleItems
+      && proofingFlowForValidation !== PROOFING_FLOW_NONE
+      && !proofingTypeForValidation
+    ) {
+      openNotice('Jenis Proofing', 'Pilih Proofing Kasir atau Proofing Design sebelum melanjutkan.');
+      return null;
+    }
+    if (
+      options?.skipProofingTypeValidation !== true
+      && cartHasProofingEligibleItems
+      && proofingFlowForValidation !== PROOFING_FLOW_NONE
+      && !(proofingTargetUserIdForValidation > 0)
+    ) {
+      openNotice('PIC Proofing', 'Pilih user PIC proofing sebelum melanjutkan.');
+      return null;
+    }
     if (cartHasProofingEligibleItems && proofingFlowForValidation !== PROOFING_FLOW_NONE) {
       const rawCustomerPhone = String(
         selectedCustomer?.phone
@@ -14335,6 +15836,25 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       return null;
     }
 
+    const paymentTypeForValidation = mapPaymentStatusToTransactionType(paymentStatus);
+    const isProviderPaymentIntent = options?.danaQris === true || options?.danaGateway === true;
+    if (
+      mode !== 'draft'
+      && !isProviderPaymentIntent
+      && isReceivableTransactionType(paymentTypeForValidation)
+    ) {
+      const dueDate = String(receivableDueDate || '').trim();
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(dueDate)) {
+        openNotice('Tempo Piutang', 'Tanggal jatuh tempo piutang wajib diisi dengan format YYYY-MM-DD sebelum transaksi piutang/DP diproses.');
+        return null;
+      }
+      const parsedDueDate = new Date(`${dueDate}T00:00:00`);
+      if (Number.isNaN(parsedDueDate.getTime())) {
+        openNotice('Tempo Piutang', 'Tanggal jatuh tempo piutang tidak valid.');
+        return null;
+      }
+    }
+
     return { canonicalMethodLabel, selectedMethodConfig };
   };
 
@@ -14347,9 +15867,16 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     const isDraftMode = mode === 'draft';
     const isProofingWithoutPaymentMode = mode === ORDER_SUBMIT_MODE_PROOFING;
     const proofingFlowForSubmit = normalizeProofingFlow(
-      options?.proofingFlow ?? selectedProofingFlow,
-      Boolean(options?.proofingFlow) || selectedProofingFlow !== PROOFING_FLOW_NONE,
+      options?.proofingFlow ?? effectiveSelectedProofingFlow,
+      Boolean(options?.proofingFlow) || effectiveSelectedProofingFlow !== PROOFING_FLOW_NONE,
     );
+    const proofingTypeForSubmit = proofingFlowForSubmit !== PROOFING_FLOW_NONE
+      ? normalizeProofingType(options?.proofingType ?? selectedProofingType)
+      : '';
+    const proofingTargetUserIdForSubmit = proofingFlowForSubmit !== PROOFING_FLOW_NONE
+      ? (Number(options?.proofingTargetUserId ?? selectedProofingTargetUserId ?? 0) || 0)
+      : 0;
+    const followUpMethodForSubmit = normalizeFollowUpMethod(options?.followUpMethod ?? selectedFollowUpMethod);
     const { canonicalMethodLabel, selectedMethodConfig } = validation;
     const deferredPaymentMethodConfig = selectedMethodConfig
       || paymentMethodConfigs.find((row) => row?.isDefault)
@@ -14398,6 +15925,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       const customerId = await resolveCustomerId();
       const totalLine = cartItems.reduce((sum, item) => sum + (item.lineTotal || 0), 0);
       const discountToApply = Math.min(Math.max(finalDiscount, 0), totalLine);
+      const customerReferenceForSubmit = normalizeCustomerReferenceFile(currentProofingReferenceFile);
 
       const adjustedItems = cartItems.map((item, _index, arr) => {
         const line = item.lineTotal || 0;
@@ -14472,6 +16000,12 @@ const SalesScreen = ({ currentUser, onLogout }) => {
               ?? item?.backendItem?.requires_design
               ?? true,
             ),
+          },
+          checkout_flow: {
+            proofing_type: proofingTypeForSubmit || null,
+            proofing_target_role: proofingTypeForSubmit || null,
+            proofing_target_user_id: proofingTargetUserIdForSubmit || null,
+            follow_up_method: followUpMethodForSubmit,
           },
           specs: {
             ...currentSpecs,
@@ -14623,6 +16157,19 @@ const SalesScreen = ({ currentUser, onLogout }) => {
           ? normalizeProofingFlow(proofingFlowForSubmit, proofingFlowForSubmit !== PROOFING_FLOW_NONE)
           : PROOFING_FLOW_NONE;
         const effectiveProofingRequired = effectiveProofingFlow !== PROOFING_FLOW_NONE;
+        const effectiveCustomerReferenceFile = effectiveProofingRequired ? customerReferenceForSubmit : null;
+        const effectiveCustomerReferenceUrl = String(
+          effectiveCustomerReferenceFile?.open_url
+          || effectiveCustomerReferenceFile?.url
+          || effectiveCustomerReferenceFile?.path
+          || effectiveCustomerReferenceFile?.relative_path
+          || '',
+        ).trim();
+        const effectiveCustomerReferenceName = String(
+          effectiveCustomerReferenceFile?.original_name
+          || effectiveCustomerReferenceFile?.file_name
+          || '',
+        ).trim();
 
         mergedSnapshot.original_flow = {
           ...(parseJsonObject(mergedSnapshot?.original_flow) || {}),
@@ -14630,16 +16177,55 @@ const SalesScreen = ({ currentUser, onLogout }) => {
           requires_design: originalRequiresDesign,
           proofing_required: effectiveProofingRequired,
           proofing_flow: effectiveProofingFlow,
+          proofing_type: effectiveProofingRequired ? proofingTypeForSubmit : null,
+          proofing_target_role: effectiveProofingRequired ? proofingTypeForSubmit : null,
+          proofing_target_user_id: effectiveProofingRequired ? proofingTargetUserIdForSubmit : null,
+          follow_up_method: followUpMethodForSubmit,
         };
+        if (effectiveCustomerReferenceFile) {
+          mergedSnapshot.customer_reference_file = effectiveCustomerReferenceFile;
+          mergedSnapshot.original_file = effectiveCustomerReferenceFile;
+          mergedSnapshot.original_file_url = effectiveCustomerReferenceUrl;
+          mergedSnapshot.customer_file_url = effectiveCustomerReferenceUrl;
+          mergedSnapshot.original_file_name = effectiveCustomerReferenceName;
+          mergedSnapshot.customer_file_name = effectiveCustomerReferenceName;
+          mergedSnapshot.original_file_mime_type = effectiveCustomerReferenceFile.mime_type || '';
+        }
         mergedSnapshot.draft_form = {
           ...(parseJsonObject(mergedSnapshot?.draft_form) || {}),
           proofing_required: effectiveProofingRequired,
           proofing_flow: effectiveProofingFlow,
+          proofing_type: effectiveProofingRequired ? proofingTypeForSubmit : null,
+          proofing_target_role: effectiveProofingRequired ? proofingTypeForSubmit : null,
+          proofing_target_user_id: effectiveProofingRequired ? proofingTargetUserIdForSubmit : null,
+          follow_up_method: followUpMethodForSubmit,
+          ...(effectiveCustomerReferenceFile ? {
+            customer_reference_file: effectiveCustomerReferenceFile,
+            original_file: effectiveCustomerReferenceFile,
+            original_file_url: effectiveCustomerReferenceUrl,
+            customer_file_url: effectiveCustomerReferenceUrl,
+            original_file_name: effectiveCustomerReferenceName,
+            customer_file_name: effectiveCustomerReferenceName,
+            original_file_mime_type: effectiveCustomerReferenceFile.mime_type || '',
+          } : {}),
         };
         mergedSnapshot.cart_restore = {
           ...(parseJsonObject(mergedSnapshot?.cart_restore) || {}),
           proofing_required: effectiveProofingRequired,
           proofing_flow: effectiveProofingFlow,
+          proofing_type: effectiveProofingRequired ? proofingTypeForSubmit : null,
+          proofing_target_role: effectiveProofingRequired ? proofingTypeForSubmit : null,
+          proofing_target_user_id: effectiveProofingRequired ? proofingTargetUserIdForSubmit : null,
+          follow_up_method: followUpMethodForSubmit,
+          ...(effectiveCustomerReferenceFile ? {
+            customer_reference_file: effectiveCustomerReferenceFile,
+            original_file: effectiveCustomerReferenceFile,
+            original_file_url: effectiveCustomerReferenceUrl,
+            customer_file_url: effectiveCustomerReferenceUrl,
+            original_file_name: effectiveCustomerReferenceName,
+            customer_file_name: effectiveCustomerReferenceName,
+            original_file_mime_type: effectiveCustomerReferenceFile.mime_type || '',
+          } : {}),
         };
 
         return enforceDesignFirstFlow({
@@ -14659,6 +16245,10 @@ const SalesScreen = ({ currentUser, onLogout }) => {
           requires_design: isDraftMode ? false : originalRequiresDesign,
           proofing_required: effectiveProofingRequired,
           proofing_flow: effectiveProofingFlow,
+          proofing_type: effectiveProofingRequired ? proofingTypeForSubmit : null,
+          proofing_target_role: effectiveProofingRequired ? proofingTypeForSubmit : null,
+          proofing_target_user_id: effectiveProofingRequired ? proofingTargetUserIdForSubmit : null,
+          follow_up_method: followUpMethodForSubmit,
           production_status: isDraftMode ? 'not_required' : item?.backendItem?.production_status,
           spec_snapshot: mergedSnapshot,
         });
@@ -14667,6 +16257,13 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       const paymentTransactionType = isDraftMode || isProofingWithoutPaymentMode || usingDanaQris || usingDanaGateway
         ? 'unpaid'
         : transactionType;
+      const receivableDueAtForSubmit = !isDraftMode
+        && !isProofingWithoutPaymentMode
+        && !usingDanaQris
+        && !usingDanaGateway
+        && isReceivableTransactionType(paymentTransactionType)
+        ? String(receivableDueDate || '').trim()
+        : null;
       const paymentAmountPayload = isDraftMode || isProofingWithoutPaymentMode || usingDanaQris || usingDanaGateway
         ? 0
         : transactionType === 'full'
@@ -14681,10 +16278,14 @@ const SalesScreen = ({ currentUser, onLogout }) => {
 
       payload = {
         customer_id: customerId,
+        proofing_type: proofingTypeForSubmit || null,
+        proofing_target_role: proofingTypeForSubmit || null,
+        proofing_target_user_id: proofingTargetUserIdForSubmit || null,
+        follow_up_method: followUpMethodForSubmit,
         ...(Number(currentDraftSourceId || 0) > 0 ? { source_order_id: Number(currentDraftSourceId || 0) } : {}),
-        ...(mode === 'draft' ? { status: 'draft' } : {}),
+        ...(mode === 'draft' || isProofingWithoutPaymentMode ? { status: 'draft' } : {}),
         ...(isProofingWithoutPaymentMode ? { invoice_status: 'draft' } : {}),
-        due_at: null,
+        due_at: receivableDueAtForSubmit,
         discount_type: discountMode === 'percent' ? 'percent' : 'amount',
         discount_value: roundMoney(
           discountMode === 'percent'
@@ -14701,10 +16302,12 @@ const SalesScreen = ({ currentUser, onLogout }) => {
           mode === 'draft'
             ? 'Mode: Simpan Draft'
             : isProofingWithoutPaymentMode
-              ? 'Mode: Lanjut Proofing'
+              ? `Mode: ${followUpMethodToLabel(followUpMethodForSubmit)}`
               : 'Mode: Proses Orderan',
           currentDraftSourceId ? `Lanjutan Draft ID: ${currentDraftSourceId}` : '',
           cartHasProofingEligibleItems ? `Flow Proofing: ${proofingFlowToLabel(proofingFlowForSubmit)}` : '',
+          proofingTypeForSubmit ? `Jenis Proofing: ${proofingTypeToLabel(proofingTypeForSubmit)}` : '',
+          `Aksi Setelah Proofing: ${followUpMethodToLabel(followUpMethodForSubmit)}`,
           discountToApply > 0 ? `Diskon Order: ${discountToApply}` : '',
           paymentNotes ? `Catatan: ${paymentNotes}` : '',
         ]
@@ -14842,7 +16445,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         invoiceNo,
         items: buildReprintSnapshotItems(adjustedItems),
       });
-      if (!isDraftMode) {
+      if (!isDraftMode && !isProofingWithoutPaymentMode) {
         syncInvoiceSuccessCacheFromRows([created]);
       }
       let draftStatusWarning = '';
@@ -14922,7 +16525,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         mode === 'draft'
           ? 'Draft Berhasil Tersimpan'
           : isProofingWithoutPaymentMode
-            ? 'Order Masuk Proofing'
+            ? 'Draft Tagihan Berhasil Dibuat'
           : usingCustomerDeposit
             ? 'Order Berhasil Diproses'
             : 'Order Berhasil Diproses',
@@ -14947,6 +16550,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         ok: true,
         backendOrderId,
         invoiceNo,
+        createdRow: created,
         receipt: created?.receipt || null,
       };
     } catch (error) {
@@ -14977,7 +16581,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         if (mode === ORDER_SUBMIT_MODE_PROOFING) {
           openNotice(
             'Proofing Butuh Backend Online',
-            'Order belum masuk proofing karena server belum terhubung. Cek koneksi/backend lalu klik Lanjut Proofing lagi.',
+            'Order belum masuk proofing karena server belum terhubung. Cek koneksi/backend lalu ulangi aksi tagihan.',
           );
           return null;
         }
@@ -15007,7 +16611,9 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         const queuedPayload = payload || {
           customer_id: null,
           ...(mode === 'draft' ? { status: 'draft' } : {}),
-          due_at: null,
+          due_at: mode !== 'draft' && isReceivableTransactionType(transactionType)
+            ? String(receivableDueDate || '').trim() || null
+            : null,
           note: paymentNotes || null,
           notes: paymentNotes || null,
           items: cartItems.map((item) => enforceDesignFirstFlow(item.backendItem)),
@@ -15653,6 +17259,10 @@ const SalesScreen = ({ currentUser, onLogout }) => {
   const handleSaveTransaction = async () => {
     const result = await submitTransaction('draft');
     if (result?.ok) {
+      if (isReopenedDraftTransaction) {
+        setOpenedDraftSignature('');
+        resetTransaction();
+      }
       openInvoiceAreaMenu('draft_orders');
       await loadDraftInvoices();
     }
@@ -15664,8 +17274,14 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       return false;
     }
 
+    if (!canPreviewInternalReceipt) {
+      openNotice('Akses Ditolak', 'User ini tidak memiliki permission melihat preview nota internal kasir.');
+      return false;
+    }
+
     const validation = await validateTransactionBeforeSubmit('process', {
-      skipPaymentMethodValidation: !String(paymentMethod || '').trim(),
+      skipPaymentMethodValidation: true,
+      skipProofingTypeValidation: true,
     });
     if (!validation) {
       return false;
@@ -15677,8 +17293,52 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         return false;
       }
     }
-    setIsOrderPreviewOpen(true);
-    return true;
+
+    const previewNo = String(
+      orderPreviewReceiptData?.transaction?.invoiceNo
+      || orderPreviewSnapshot?.draftNo
+      || 'PREVIEW'
+    ).trim() || 'PREVIEW';
+    const openedAt = new Date();
+    setIsOrderPreviewSubmitting(true);
+    try {
+      const response = await logPosOrderPreviewReceipt({
+        preview_no: previewNo,
+        invoice_no: previewNo,
+        source_order_id: Number(currentDraftSourceId || 0) > 0 ? Number(currentDraftSourceId || 0) : null,
+        customer_id: Number(selectedCustomerId || 0) > 0 ? Number(selectedCustomerId || 0) : null,
+        customer_name: orderPreviewSnapshot?.customerName || '',
+        grand_total: roundMoney(orderPreviewSnapshot?.grandTotal || 0),
+        payment_method: orderPreviewSnapshot?.paymentMethod || '',
+        item_count: Array.isArray(orderPreviewSnapshot?.items) ? orderPreviewSnapshot.items.length : 0,
+        transaction_date: orderPreviewSnapshot?.transactionDate || transactionDate || '',
+      });
+      setInternalPreviewWatermark({
+        label: String(response?.watermark?.label || 'PREVIEW INTERNAL'),
+        userName: String(response?.watermark?.user_name || userDisplayName || 'User Login'),
+        accessedAt: String(response?.watermark?.accessed_at || openedAt.toLocaleString('id-ID', {
+          day: '2-digit',
+          month: '2-digit',
+          year: 'numeric',
+          hour: '2-digit',
+          minute: '2-digit',
+        })),
+        invoiceNo: String(response?.watermark?.invoice_no || previewNo),
+      });
+      setIsOrderPreviewOpen(true);
+      return true;
+    } catch (error) {
+      const isAccessError = Number(error?.status || 0) === 403;
+      openNotice(
+        isAccessError ? 'Akses Ditolak' : 'Preview Nota',
+        isAccessError
+          ? (error?.message || 'User tidak memiliki akses membuka preview nota internal.')
+          : `Preview belum dapat dibuka karena log audit gagal: ${error?.message || 'Koneksi backend gagal.'}`,
+      );
+      return false;
+    } finally {
+      setIsOrderPreviewSubmitting(false);
+    }
   };
 
   const handlePreviewReceipt = async () => {
@@ -15693,12 +17353,20 @@ const SalesScreen = ({ currentUser, onLogout }) => {
 
     const validation = await validateTransactionBeforeSubmit('process', {
       skipPaymentMethodValidation: true,
+      skipProofingTypeValidation: true,
     });
     if (!validation) {
       return false;
     }
 
     setModalDetailPesanan(true);
+    if (cartHasProofingEligibleItems) {
+      const initialRole = normalizeProofingTargetRole(selectedProofingType || PROOFING_TYPE_DESIGN);
+      if (!selectedProofingType) {
+        setSelectedProofingType(initialRole);
+      }
+      ensureProcessProofingUsersLoaded(initialRole).catch(() => {});
+    }
     return true;
   };
 
@@ -15706,7 +17374,39 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     await validateAndOpenProcessOrderDetail();
   };
 
-  const handleOpenPaymentMethodModalFromDetail = () => {
+  const handleSelectProofingFlow = (nextFlow) => {
+    const normalizedFlow = nextFlow === PROOFING_FLOW_NONE
+      ? PROOFING_FLOW_NONE
+      : PROOFING_FLOW_PROOFING_FIRST;
+    proofingFlowManuallySelectedRef.current = true;
+    setSelectedProofingChoice(proofingFlowToChoice(normalizedFlow));
+    if (normalizedFlow === PROOFING_FLOW_NONE) {
+      setSelectedProofingType('');
+      setSelectedProofingTargetUserId(0);
+    }
+  };
+
+  const handleOpenPaymentMethodModalFromDetail = async () => {
+    if (cartHasProofingEligibleItems && proofingChoiceRequiresType) {
+      const targetRole = normalizeProofingTargetRole(selectedProofingType || PROOFING_TYPE_DESIGN);
+      if (!selectedProofingType) {
+        setSelectedProofingType(targetRole);
+      }
+      const users = await ensureProcessProofingUsersLoaded(targetRole);
+      const filteredUsers = filterProofingTargetUsers(users, targetRole);
+      const currentTargetUserId = Number(selectedProofingTargetUserId || 0);
+      const selectedUserStillValid = filteredUsers.some((user) => Number(user?.id || 0) === currentTargetUserId);
+      const nextTargetUserId = selectedUserStillValid
+        ? currentTargetUserId
+        : (Number(filteredUsers[0]?.id || 0) || 0);
+      if (!(nextTargetUserId > 0)) {
+        openNotice('PIC Proofing', `Pilih user ${proofingTargetRoleLabel(targetRole)} untuk task proofing sebelum lanjut pembayaran.`);
+        return;
+      }
+      if (nextTargetUserId !== currentTargetUserId) {
+        setSelectedProofingTargetUserId(nextTargetUserId);
+      }
+    }
     setModalDetailPesanan(false);
     setModalPilihPembayaran(true);
   };
@@ -15766,7 +17466,11 @@ const SalesScreen = ({ currentUser, onLogout }) => {
   };
 
   const isProcessOrderMethodMissing = !String(paymentMethod || '').trim();
-  const isProcessOrderBlocked = isProcessOrderMethodMissing || processOrderNeedsAccountSelection;
+  const processOrderNeedsReceivableDueDate = showReceivableDueDateInput
+    && !/^\d{4}-\d{2}-\d{2}$/.test(String(receivableDueDate || '').trim());
+  const isProcessOrderBlocked = isProcessOrderMethodMissing
+    || processOrderNeedsAccountSelection
+    || processOrderNeedsReceivableDueDate;
 
   const handleDownloadPreviewReceiptPdf = async () => {
     const filenameBase = String(
@@ -15810,28 +17514,44 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     await handleSaveTransaction();
   };
 
-  const handleContinueProofingWithoutPayment = async () => {
+  const handleContinueProofingWithoutPayment = async (followUpMethodInput = selectedFollowUpMethod) => {
     if (isSubmitting) {
       openNotice('Informasi', 'Transaksi sedang diproses, mohon tunggu.');
       return;
     }
-    if (!cartHasProofingEligibleItems) {
-      openNotice('Flow Proofing', 'Keranjang ini belum memiliki item yang bisa masuk proofing.');
+    const proofingFlow = cartHasProofingEligibleItems
+      ? normalizeProofingFlow(effectiveSelectedProofingFlow, effectiveSelectedProofingFlow !== PROOFING_FLOW_NONE)
+      : PROOFING_FLOW_NONE;
+    const proofingType = proofingFlow !== PROOFING_FLOW_NONE ? normalizeProofingType(selectedProofingType) : '';
+    const proofingTargetUserId = proofingFlow !== PROOFING_FLOW_NONE ? Number(selectedProofingTargetUserId || 0) || 0 : 0;
+    if (proofingFlow !== PROOFING_FLOW_NONE && !proofingType) {
+      openNotice('Jenis Proofing', 'Pilih Proofing Kasir atau Proofing Design sebelum melanjutkan.');
       return;
     }
-
-    setSelectedProofingFlow(PROOFING_FLOW_PROOFING_FIRST);
+    if (proofingFlow !== PROOFING_FLOW_NONE && !(proofingTargetUserId > 0)) {
+      openNotice('PIC Proofing', 'Pilih user PIC proofing sebelum melanjutkan.');
+      return;
+    }
+    const followUpMethod = normalizeFollowUpMethod(followUpMethodInput);
     const result = await submitTransaction(ORDER_SUBMIT_MODE_PROOFING, {
       skipPaymentMethodValidation: true,
-      proofingFlow: PROOFING_FLOW_PROOFING_FIRST,
+      proofingFlow,
+      proofingType,
+      proofingTargetUserId,
+      followUpMethod,
     });
-    if (result?.ok) {
-      setModalDetailPesanan(false);
-      setModalPilihPembayaran(false);
-      setActiveMenu('proofing');
-      setProofingStatusFilter('all');
-      setProofingSearch('');
-      await loadProofingItems({ status: 'all', search: '' });
+      if (result?.ok) {
+        setModalDetailPesanan(false);
+        setModalPilihPembayaran(false);
+        const createdRow = result?.createdRow || (result?.backendOrderId ? { id: result.backendOrderId } : null);
+      if (createdRow) {
+        if (followUpMethod === FOLLOW_UP_SHARE_AND_PRINT) {
+          await handlePrintBillingNote(createdRow);
+        }
+        await handleShareBillingNote(createdRow);
+      }
+      openInvoiceAreaMenu('draft_orders');
+      await loadDraftInvoices({ page: 1, forceServer: true });
     }
   };
 
@@ -15912,6 +17632,26 @@ const SalesScreen = ({ currentUser, onLogout }) => {
   };
 
   const handleCancelTransaction = () => {
+    if (isReopenedDraftTransaction) {
+      const goBackToDraftList = () => {
+        resetTransaction();
+        openInvoiceAreaMenu('draft_orders');
+      };
+      if (hasReopenedDraftChanges) {
+        openNoticeActions(
+          'Kembali ke Draft',
+          'Ada perubahan draft yang belum disimpan. Kembali tanpa menyimpan perubahan?',
+          [
+            { label: 'Tetap Edit', role: 'secondary' },
+            { label: 'Kembali', onPress: goBackToDraftList },
+          ],
+        );
+        return;
+      }
+      goBackToDraftList();
+      return;
+    }
+
     if (
       !selectedCustomerId &&
       cartItems.length === 0 &&
@@ -15959,12 +17699,12 @@ const SalesScreen = ({ currentUser, onLogout }) => {
   const dateFilteredInvoiceRows = useMemo(
     () => {
       const rows = Array.isArray(visibleInvoiceRows) ? visibleInvoiceRows : [];
-      if (String(invoiceSearch || '').trim()) {
+      if (String(invoiceSearch || '').trim() || INVOICE_ACTIVE_WORK_AREAS.has(invoiceFilter)) {
         return rows;
       }
       return rows.filter((row) => isInvoiceRowInDateRange(row, invoiceDateFrom, invoiceDateTo));
     },
-    [invoiceDateFrom, invoiceDateTo, invoiceSearch, visibleInvoiceRows],
+    [invoiceDateFrom, invoiceDateTo, invoiceFilter, invoiceSearch, visibleInvoiceRows],
   );
   const activeManualApprovalLinks = useMemo(() => {
     const orderIds = new Set();
@@ -16013,9 +17753,9 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         || approvalContext.includes(keyword)
         || approvalNote.includes(keyword);
     };
-    const normalizeRows = (rows = [], predicate = () => true) => (
+    const normalizeRows = (rows = [], predicate = () => true, options = {}) => (
       filterInvoiceRowsForUser(rows, currentUser)
-        .filter((row) => isInvoiceRowInDateRange(row, invoiceDateFrom, invoiceDateTo))
+        .filter((row) => (options?.ignoreDateFilter ? true : isInvoiceRowInDateRange(row, invoiceDateFrom, invoiceDateTo)))
         .filter(matchesSearch)
         .filter(predicate)
     );
@@ -16028,6 +17768,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       draft: normalizeRows(
         mergeInvoiceRows(snapshot.draft, visibleRows.filter((row) => isDraftInvoiceRow(row))),
         (row) => isDraftInvoiceRow(row),
+        { ignoreDateFilter: true },
       ),
       success: normalizeRows(
         mergeInvoiceRows(snapshot.success, visibleRows.filter((row) => isInvoiceSuccessRow(row))),
@@ -16037,12 +17778,14 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         mergeInvoiceRows(snapshot.approval, visibleRows.filter((row) => isReceivableApprovalInvoiceRow(row))),
         (row) => {
           const approvalStatus = normalizeReceivableApprovalStatus(row?.approval?.status || row?.status);
-          return isReceivableApprovalInvoiceRow(row) && approvalStatus !== 'resolved';
+          return isReceivableApprovalInvoiceRow(row) && approvalStatus === 'pending';
         },
+        { ignoreDateFilter: true },
       ),
       receivable: normalizeRows(
         mergeInvoiceRows(snapshot.receivable, visibleRows.filter((row) => isReceivableInvoiceRow(row))),
         (row) => isReceivableInvoiceRow(row),
+        { ignoreDateFilter: true },
       ),
     };
   }, [currentUser, invoiceDateFrom, invoiceDateTo, invoiceSearch, invoiceWorkspaceRowsByArea, visibleInvoiceRows]);
@@ -16178,9 +17921,11 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       totalAmount: 0,
     });
     const dateRangeActive = Boolean(String(invoiceDateFrom || '').trim() || String(invoiceDateTo || '').trim());
-    const periodLabel = dateRangeActive
-      ? `${String(invoiceDateFrom || '').trim() || 'awal'} s/d ${String(invoiceDateTo || '').trim() || 'akhir'}`
-      : 'Semua tanggal';
+    const periodLabel = INVOICE_ACTIVE_WORK_AREAS.has(invoiceFilter)
+      ? 'Semua data aktif'
+      : (dateRangeActive
+        ? `${String(invoiceDateFrom || '').trim() || 'awal'} s/d ${String(invoiceDateTo || '').trim() || 'akhir'}`
+        : 'Semua tanggal');
 
     return {
       title: invoiceFilter === 'draft' ? 'Ringkasan Draft Tampil' : 'Ringkasan Invoice Sukses Tampil',
@@ -16342,6 +18087,8 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       pickedUpText: 'Belum diambil',
       cancellationText: '',
       providerPaymentSummary: null,
+      auditLines: [],
+      activityHistory: [],
       items: [],
       canPickup: false,
     });
@@ -16389,6 +18136,8 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     const trackingSummaryInfo = buildCustomerTrackingSummary(sourceRow);
     const cancellationText = resolveCancellationSummaryText(sourceRow?.cancellation);
     const providerPaymentSummary = resolveInvoiceProviderPaymentSummary(sourceRow);
+    const auditLines = buildInvoiceRowAuditSummaryLines(sourceRow, isDraftInvoiceRow(sourceRow));
+    const activityHistory = Array.isArray(sourceRow?.activity_history) ? sourceRow.activity_history : [];
     const items = Array.isArray(sourceRow?.items) ? sourceRow.items : [];
     const itemCount = items.length;
     const total = Number(
@@ -16535,6 +18284,8 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       pickedUpText,
       cancellationText,
       providerPaymentSummary,
+      auditLines,
+      activityHistory,
       items: detailItems,
       canPickup,
     });
@@ -16824,6 +18575,48 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       invoicePiutangCount: Math.max(0, Number(closingReport?.sales?.invoice_piutang_count || 0) || 0),
     };
   }, [closingReport]);
+  const reportPeriodMeta = useMemo(() => {
+    const range = closingReport?.period || reportPeriodRange(closingReportDate, reportPeriod);
+    const label = Object.fromEntries(REPORT_PERIOD_OPTIONS)[String(closingReport?.period?.type || reportPeriod)] || 'Harian';
+    return {
+      label,
+      from: String(range?.date_from || range?.from || closingReportDate || '-'),
+      to: String(range?.date_to || range?.to || closingReportDate || '-'),
+    };
+  }, [closingReport, closingReportDate, reportPeriod]);
+  const reportCalendarCells = useMemo(
+    () => buildReportCalendarCells(reportCalendarCursor),
+    [reportCalendarCursor],
+  );
+  const reportReceivablesPortfolio = useMemo(
+    () => closingReport?.receivables_portfolio && typeof closingReport.receivables_portfolio === 'object'
+      ? closingReport.receivables_portfolio
+      : {},
+    [closingReport],
+  );
+  const reportReceivableItems = useMemo(
+    () => Array.isArray(reportReceivablesPortfolio?.items) ? reportReceivablesPortfolio.items : [],
+    [reportReceivablesPortfolio],
+  );
+  const reportReceivableCashiers = useMemo(
+    () => Array.isArray(reportReceivablesPortfolio?.cashiers) ? reportReceivablesPortfolio.cashiers : [],
+    [reportReceivablesPortfolio],
+  );
+  const reportCashierProblemRows = useMemo(
+    () => Array.isArray(closingReport?.cashier_problem_report) ? closingReport.cashier_problem_report : [],
+    [closingReport],
+  );
+  const activeReportAddonMeta = useMemo(
+    () => REPORT_ADDON_SECTIONS.find((item) => item.key === activeReportAddon) || REPORT_ADDON_SECTIONS[0],
+    [activeReportAddon],
+  );
+  const showReportOverview = activeReportAddon === 'memorize';
+  const showReportReceivable = showReportOverview || activeReportAddon === 'receivable';
+  const showReportSales = showReportOverview || activeReportAddon === 'sales';
+  const showReportFinance = showReportOverview || ['finance', 'cash_bank'].includes(activeReportAddon);
+  const showReportCashierAudit = showReportOverview || ['sales_staff', 'audit'].includes(activeReportAddon);
+  const showReportClosingAudit = showReportOverview || ['audit', 'other'].includes(activeReportAddon);
+  const showReportComingSoon = false;
   const closingDamageSummary = useMemo(() => {
     const rows = Array.isArray(closingDamageItems) ? closingDamageItems : [];
     return rows.reduce((acc, row) => {
@@ -17240,6 +19033,13 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     (user) => Number(user?.id || 0) === Number(proofingSendModal.targetUserId || 0),
   );
   const proofingSendRow = proofingSendModal.row || {};
+  const processProofingTargetUsers = filterProofingTargetUsers(
+    processProofingUsers,
+    selectedProofingType || PROOFING_TYPE_DESIGN,
+  );
+  const processProofingSelectedUser = processProofingTargetUsers.find(
+    (user) => Number(user?.id || 0) === Number(selectedProofingTargetUserId || 0),
+  );
 
   if (isPreparingApp) {
     return (
@@ -17418,6 +19218,13 @@ const SalesScreen = ({ currentUser, onLogout }) => {
           </View>
         </View>
       </View>
+      <View style={styles.fixedTabsShell}>
+        <View style={styles.fixedTabsFrame}>
+          <View style={styles.tabsRow}>
+            {mainMenuTabs.map(renderMainMenuTab)}
+          </View>
+        </View>
+      </View>
       <ScrollView
         style={styles.mainScroll}
         contentContainerStyle={[
@@ -17428,10 +19235,6 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         showsVerticalScrollIndicator={!isDesktop}
       >
         <View style={styles.frame}>
-          <View style={styles.tabsRow}>
-            {mainMenuTabs.map(renderMainMenuTab)}
-          </View>
-
           {activeMenu === 'pos' ? (
             <>
               <View style={styles.transactionRow}>
@@ -17601,7 +19404,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                 discountAmount={discountAmountDisplay}
                 onChangeDiscountAmount={(value) => {
                   setDiscountMode('amount');
-                  setDiscountAmount(sanitizeNumericInput(value));
+                  setDiscountAmount(sanitizeMoneyAmountTextInput(value));
                 }}
                 grandTotal={grandTotal}
                 paymentMethod={paymentMethod}
@@ -17619,10 +19422,17 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                 changeAmount={changeAmount}
                 paymentNotes={paymentNotes}
                 onChangePaymentNotes={setPaymentNotes}
+                receivableDueDate={receivableDueDate}
+                onChangeReceivableDueDate={handleChangeReceivableDueDate}
+                showReceivableDueDate={showReceivableDueDateInput}
+                receivableDueDateRequired={receivableDueDateRequired}
                 onSaveTransaction={handleSaveTransaction}
+                saveActionVisible={!isReopenedDraftTransaction || hasReopenedDraftChanges}
+                saveActionLabel={isReopenedDraftTransaction ? 'Simpan Perubahan Draft' : 'Simpan Draft'}
                 onPreviewReceipt={handlePreviewReceipt}
                 onProcessOrder={handleProcessOrder}
                 onCancelTransaction={handleCancelTransaction}
+                cancelActionLabel={isReopenedDraftTransaction ? 'Kembali' : 'Batal Transaksi'}
                 isSubmitting={isSubmitting}
                 deferPaymentMethodSelection
               />
@@ -17764,7 +19574,9 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                     const invoiceId = Number(row?.invoice?.id || row?.approval?.invoiceId || 0) || 0;
                     const dueTotal = Number(row?.invoice?.due_total || 0) || 0;
                     const paidTotal = Number(row?.invoice?.paid_total || 0) || 0;
-                    const canPayReceivable = Boolean(row?.invoice?.can_pay);
+                    const receivableDueMeta = resolveReceivableDueMeta(row);
+                    const canPayReceivable = !isDraftRow && Boolean(row?.invoice?.can_pay);
+                    const canRemindReceivable = !isDraftRow && dueTotal > 0 && Boolean(receivableDueMeta?.isOverdue);
                     const canContinueDraftRow = isDraftRow && (row?.__source === 'queue' || isDraftCandidate(row));
                     const canDeleteDraftRow = canContinueDraftRow;
                     const isPaidInvoice = paymentLifecycle.key === 'paid';
@@ -17805,6 +19617,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                         displayId={displayId}
                         invoiceNo={invoiceNo}
                         customerName={customerName}
+                        auditSummaryLines={buildInvoiceRowAuditSummaryLines(row, isDraftRow)}
                         snapshotState={snapshotState}
                         invoiceStatusLabel={invoiceStatusLabel}
                         invoiceStatusColor={invoiceStatusColor}
@@ -17831,9 +19644,11 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                         total={total}
                         dueTotal={dueTotal}
                         paidTotal={paidTotal}
+                        receivableDueMeta={receivableDueMeta}
                         createdAtText={resolveInvoiceRowDateText(row) || '-'}
                         draftExpiryLabel={draftExpiry?.label || 'Draft aktif tersimpan'}
                         draftExpired={Boolean(draftExpiry?.isExpired)}
+                        draftStockState={row?.draft_stock_state || null}
                         isDeleting={isDeleting}
                         isApprovalRow={isApprovalRow}
                         canCreateManualApproval={canCreateManualApproval}
@@ -17842,6 +19657,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                         canContinueDraft={canContinueDraftRow}
                         canDeleteDraft={canDeleteDraftRow}
                         canPayReceivable={canPayReceivable}
+                        canRemindReceivable={canRemindReceivable}
                         canOpenProviderPayment={providerPaymentCanResume}
                         canPrintBillingNote={canPrintBillingNote}
                         onContinueDraft={() => handleContinueDraft(row)}
@@ -17853,6 +19669,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                         onRejectManualApproval={() => openManualApprovalDecisionModal(row, 'reject')}
                         onResolveManualApproval={() => openManualApprovalDecisionModal(row, 'resolve')}
                         onOpenReceivablePayment={() => handleOpenReceivablePaymentModal(row)}
+                        onRemindReceivable={() => handleRemindReceivableDue(row)}
                         onReprintInvoice={() => handleReprintInvoice(row)}
                         onPrintBillingNote={() => handlePrintBillingNote(row)}
                         onShareBillingNote={() => handleShareBillingNote(row)}
@@ -17888,6 +19705,8 @@ const SalesScreen = ({ currentUser, onLogout }) => {
               onRefresh={loadProductionItems}
               onUpdateStatus={handleUpdateProductionStatus}
               onReleaseToProduction={handleReleaseProductionItem}
+              onUpdateLayoutPlan={handleUpdateProductionLayoutPlan}
+              onBuildDelayWhatsapp={handleBuildProductionDelayWhatsapp}
               updatingItemId={updatingProductionItemId}
             />
           ) : activeMenu === 'proofing' ? (
@@ -17903,10 +19722,14 @@ const SalesScreen = ({ currentUser, onLogout }) => {
               onUploadPreview={(row) => handleUploadProofingFile(row, 'preview')}
               onUploadFinal={(row) => handleUploadProofingFile(row, 'final')}
               onOpenPublicLink={handleOpenProofingPublicLink}
+              onOpenCustomerWhatsapp={handleOpenProofingCustomerWhatsapp}
               onOpenPreviewFile={handleOpenProofingUploadedFile}
               onViewHistory={handleViewProofingHistory}
               onSendWhatsapp={handleSendProofingWhatsapp}
               onReleaseToProduction={handleReleaseProofingToProduction}
+              onUploadLocalProductionFile={handleUploadLocalProductionFile}
+              onReturnToCashier={(row) => handleReturnProofingToCashier(row, false)}
+              onReturnToCashierReminder={(row) => handleReturnProofingToCashier(row, true)}
               onPrintBillingNote={handlePrintBillingNote}
               onShareBillingNote={handleShareBillingNote}
               processingProofingId={processingProofingId}
@@ -17948,7 +19771,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                   <Text style={styles.reportHeroKicker}>SIDOMULYO POS</Text>
                   <Text style={styles.reportHeroTitle}>DASHBOARD LAPORAN</Text>
                   <Text style={styles.reportHeroSubtitle}>
-                    Laporan harian order, pembayaran, piutang, dan pergerakan kas yang siap dicetak untuk finance.
+                    Laporan dipisah harian, mingguan, bulanan, quarter, dan tahunan. Piutang aktif tetap tampil paling atas tanpa mengikuti filter periode.
                   </Text>
                 </View>
                 <Pressable
@@ -17959,16 +19782,98 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                 </Pressable>
               </View>
 
+              <View style={styles.reportWorkspace}>
+                <View style={styles.reportAddonPanel}>
+                  <ScrollView contentContainerStyle={styles.reportAddonList} showsVerticalScrollIndicator={false}>
+                    {REPORT_ADDON_SECTIONS.map((item) => {
+                      const active = activeReportAddon === item.key;
+                      return (
+                        <Pressable
+                          key={`report-addon-${item.key}`}
+                          style={[styles.reportAddonItem, active && styles.reportAddonItemActive]}
+                          onPress={() => setActiveReportAddon(item.key)}
+                        >
+                          <View style={[styles.reportAddonIcon, active && styles.reportAddonIconActive]}>
+                            <Image
+                              source={item.iconSource}
+                              style={[styles.reportAddonIconImage, active && styles.reportAddonIconImageActive]}
+                              resizeMode="contain"
+                            />
+                          </View>
+                          <Text style={[styles.reportAddonLabel, active && styles.reportAddonLabelActive]}>{item.label}</Text>
+                        </Pressable>
+                      );
+                    })}
+                  </ScrollView>
+                </View>
+                <View style={styles.reportMainContent}>
+                  <View style={styles.reportAddonHeader}>
+                    <View>
+                      <Text style={styles.reportAddonHeaderTitle}>{activeReportAddonMeta.label}</Text>
+                      <Text style={styles.reportAddonHeaderText}>Model add-on laporan aktif. Data utama tetap mengikuti filter periode dan user di bawah.</Text>
+                    </View>
+                    <View style={styles.reportAddonHeaderBadge}>
+                      <Text style={styles.reportAddonHeaderBadgeText}>{activeReportAddonMeta.code}</Text>
+                    </View>
+                  </View>
+
               <View style={styles.reportToolbar}>
                 <View style={styles.reportToolbarField}>
-                  <Text style={styles.reportToolbarLabel}>Tanggal Laporan</Text>
-                  <TextInput
-                    value={closingReportDate}
-                    onChangeText={setClosingReportDate}
-                    placeholder="YYYY-MM-DD"
-                    placeholderTextColor="#73839d"
-                    style={[styles.invoiceSearchInput, styles.reportDateInput, styles.reportToolbarInput]}
-                  />
+                  <Text style={styles.reportToolbarLabel}>Kategori Laporan</Text>
+                  <ScrollView horizontal contentContainerStyle={styles.reportChipWrap}>
+                    {REPORT_PERIOD_OPTIONS.map(([value, label]) => (
+                      <Pressable
+                        key={`report-period-${value}`}
+                        style={[styles.reportChip, reportPeriod === value && styles.reportChipActive]}
+                        onPress={() => setReportPeriod(value)}
+                      >
+                        <Text style={[styles.reportChipText, reportPeriod === value && styles.reportChipTextActive]}>{label}</Text>
+                      </Pressable>
+                    ))}
+                  </ScrollView>
+                </View>
+                <View style={styles.reportToolbarField}>
+                  <Text style={styles.reportToolbarLabel}>Filter User</Text>
+                  <ScrollView horizontal contentContainerStyle={styles.reportChipWrap}>
+                    {REPORT_SCOPE_OPTIONS.map(([value, label]) => (
+                      <Pressable
+                        key={`report-scope-${value}`}
+                        style={[styles.reportChip, reportScope === value && styles.reportChipActive]}
+                        onPress={async () => {
+                          setReportScope(value);
+                          if (value === 'user') {
+                            await ensureReportUsersLoaded();
+                          }
+                        }}
+                      >
+                        <Text style={[styles.reportChipText, reportScope === value && styles.reportChipTextActive]}>{label}</Text>
+                      </Pressable>
+                    ))}
+                  </ScrollView>
+                  {reportScope === 'user' ? (
+                    <ScrollView horizontal contentContainerStyle={styles.reportChipWrap}>
+                      {reportUsers.map((row) => (
+                        <Pressable
+                          key={`report-user-${row.id}`}
+                          style={[styles.reportChip, Number(reportUserId || 0) === Number(row.id || 0) && styles.reportChipActive]}
+                          onPress={() => setReportUserId(String(row.id))}
+                        >
+                          <Text style={[styles.reportChipText, Number(reportUserId || 0) === Number(row.id || 0) && styles.reportChipTextActive]}>{row.name || `User #${row.id}`}</Text>
+                        </Pressable>
+                      ))}
+                      {reportUsers.length === 0 ? <Text style={styles.reportEmptyText}>Tekan filter User untuk memuat daftar user.</Text> : null}
+                    </ScrollView>
+                  ) : null}
+                </View>
+                <View style={styles.reportToolbarField}>
+                  <Text style={styles.reportToolbarLabel}>{reportPeriod === 'daily' ? 'Tanggal Laporan' : 'Tanggal Acuan Periode'}</Text>
+                  <Pressable
+                    style={[styles.invoiceSearchInput, styles.reportDateInput, styles.reportToolbarInput, styles.reportDatePickerButton]}
+                    onPress={openReportDatePicker}
+                  >
+                    <Text style={styles.reportDatePickerText}>{formatReportSelectedDateLabel(closingReportDate)}</Text>
+                    <Text style={styles.reportDatePickerMeta}>{closingReportDate || 'Pilih tanggal'}</Text>
+                  </Pressable>
                 </View>
                 <View style={styles.reportToolbarActions}>
                   <Pressable style={styles.refreshButton} onPress={() => loadClosingWorkspace(closingReportDate)}>
@@ -17980,6 +19885,79 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                 </View>
               </View>
 
+              <Modal
+                visible={isReportDateModalOpen}
+                transparent
+                animationType="fade"
+                onRequestClose={() => setIsReportDateModalOpen(false)}
+              >
+                <View style={styles.popupBackdrop}>
+                  <View style={styles.reportCalendarModalCard}>
+                    <Text style={styles.reportCalendarTitle}>
+                      {reportPeriod === 'daily' ? 'Pilih Tanggal Laporan' : 'Pilih Tanggal Acuan Periode'}
+                    </Text>
+                    <Text style={styles.reportCalendarSelectedText}>
+                      Terpilih: {formatReportSelectedDateLabel(closingReportDate)}
+                    </Text>
+                    <View style={styles.reportCalendarNavRow}>
+                      <Pressable
+                        style={styles.reportCalendarNavButton}
+                        onPress={() => setReportCalendarCursor((current) => addReportLocalMonths(current, -1))}
+                      >
+                        <Text style={styles.reportCalendarNavButtonText}>{'<'}</Text>
+                      </Pressable>
+                      <Text style={styles.reportCalendarMonthLabel}>{formatReportCalendarMonthLabel(reportCalendarCursor)}</Text>
+                      <Pressable
+                        style={styles.reportCalendarNavButton}
+                        onPress={() => setReportCalendarCursor((current) => addReportLocalMonths(current, 1))}
+                      >
+                        <Text style={styles.reportCalendarNavButtonText}>{'>'}</Text>
+                      </Pressable>
+                    </View>
+                    <View style={styles.reportCalendarDayHeaderRow}>
+                      {REPORT_CALENDAR_DAY_LABELS.map((label) => (
+                        <Text key={`report-calendar-day-${label}`} style={styles.reportCalendarDayHeaderText}>{label}</Text>
+                      ))}
+                    </View>
+                    <View style={styles.reportCalendarGrid}>
+                      {reportCalendarCells.map((cell) => {
+                        const selected = cell.iso === closingReportDate;
+                        return (
+                          <Pressable
+                            key={cell.key}
+                            style={[
+                              styles.reportCalendarDayCell,
+                              !cell.inCurrentMonth ? styles.reportCalendarDayCellMuted : null,
+                              selected ? styles.reportCalendarDayCellSelected : null,
+                            ]}
+                            onPress={() => {
+                              setClosingReportDate(cell.iso);
+                              setIsReportDateModalOpen(false);
+                            }}
+                          >
+                            <Text
+                              style={[
+                                styles.reportCalendarDayCellText,
+                                !cell.inCurrentMonth ? styles.reportCalendarDayCellTextMuted : null,
+                                selected ? styles.reportCalendarDayCellTextSelected : null,
+                              ]}
+                            >
+                              {cell.label}
+                            </Text>
+                          </Pressable>
+                        );
+                      })}
+                    </View>
+                    <Pressable
+                      style={[styles.refreshButton, styles.reportCalendarCloseButton]}
+                      onPress={() => setIsReportDateModalOpen(false)}
+                    >
+                      <Text style={styles.refreshButtonText}>Tutup</Text>
+                    </Pressable>
+                  </View>
+                </View>
+              </Modal>
+
               {isClosingReportLoading ? (
                 <View style={styles.reportStateCard}>
                   <Text style={styles.reportStateTitle}>Sedang menyiapkan laporan close order...</Text>
@@ -17987,10 +19965,106 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                 </View>
               ) : closingReport ? (
                 <>
+                  {showReportComingSoon ? (
+                    <View style={styles.reportStateCard}>
+                      <Text style={styles.reportStateTitle}>{activeReportAddonMeta.label}</Text>
+                      <Text style={styles.reportStateText}>Kategori ini sudah disiapkan sebagai add-on laporan. Data akan mengikuti flow modul terkait saat sumber datanya aktif.</Text>
+                    </View>
+                  ) : null}
+                  {showReportReceivable ? (
+                    <>
+                  <View style={styles.reportBlockHeader}>
+                    <View>
+                      <Text style={styles.reportBlockTitle}>Piutang Aktif Wajib Terpantau</Text>
+                      <Text style={styles.reportBlockSubtitle}>Tidak mengikuti filter tanggal. Selalu tampil agar tagihan dan keterlambatan tidak tenggelam.</Text>
+                    </View>
+                    <Text style={[styles.reportBlockBadge, styles.reportReceivableBadge]}>Sensitif</Text>
+                  </View>
+                  <View style={styles.reportSummaryGrid}>
+                    <View style={[styles.reportSummaryCard, styles.reportSummaryCardWarning]}>
+                      <Text style={styles.reportSummaryLabel}>Total Piutang Aktif</Text>
+                      <Text style={styles.reportSummaryValue}>{formatRupiah(reportReceivablesPortfolio?.summary?.total || 0)}</Text>
+                    </View>
+                    <View style={[styles.reportSummaryCard, styles.reportSummaryCardWarning]}>
+                      <Text style={styles.reportSummaryLabel}>Piutang Terlambat</Text>
+                      <Text style={styles.reportSummaryValue}>{formatRupiah(reportReceivablesPortfolio?.overdue?.total || 0)}</Text>
+                    </View>
+                    <View style={[styles.reportSummaryCard, styles.reportSummaryCardInfo]}>
+                      <Text style={styles.reportSummaryLabel}>Jatuh Tempo Hari Ini</Text>
+                      <Text style={styles.reportSummaryValue}>{formatRupiah(reportReceivablesPortfolio?.due_today?.total || 0)}</Text>
+                    </View>
+                    <View style={[styles.reportSummaryCard, styles.reportSummaryCardInfo]}>
+                      <Text style={styles.reportSummaryLabel}>Tempo 3 Hari</Text>
+                      <Text style={styles.reportSummaryValue}>{formatRupiah(reportReceivablesPortfolio?.due_next_3_days?.total || 0)}</Text>
+                    </View>
+                  </View>
+                  <View style={styles.reportSectionCard}>
+                    <Text style={styles.reportSectionTitle}>Kolom Piutang Per Invoice</Text>
+                    {reportReceivableItems.length > 0 ? reportReceivableItems.slice(0, 12).map((row) => (
+                      <View key={`report-receivable-${row.invoice_id}`} style={styles.reportNestedItem}>
+                        <Text style={styles.reportNestedTitle}>{row.invoice_no} - {row.customer_name}</Text>
+                        <Text style={styles.reportNestedMeta}>
+                          {formatRupiah(row.due_total || 0)} | {row.status_label || '-'} | Jatuh tempo {row.due_at || '-'} | PIC {row.cashier_name || '-'}
+                        </Text>
+                      </View>
+                    )) : (
+                      <Text style={styles.reportEmptyText}>Tidak ada piutang aktif.</Text>
+                    )}
+                    {reportReceivableCashiers.length > 0 ? (
+                      <View style={styles.reportNestedList}>
+                        <Text style={styles.reportSectionHint}>Penanggung jawab piutang:</Text>
+                        {reportReceivableCashiers.slice(0, 8).map((row) => (
+                          <View key={`report-receivable-cashier-${row.cashier_id || row.cashier_name}`} style={styles.reportLineRow}>
+                            <Text style={styles.reportLineLabel}>{row.cashier_name || 'Kasir belum tercatat'} ({row.count || 0} invoice)</Text>
+                            <Text style={styles.reportLineValue}>{formatRupiah(row.total || 0)}{Number(row.max_overdue_days || 0) > 0 ? ` | telat ${row.max_overdue_days} hari` : ''}</Text>
+                          </View>
+                        ))}
+                      </View>
+                    ) : null}
+                  </View>
+                    </>
+                  ) : null}
+
+                  {showReportCashierAudit ? (
+                    <>
+                      <View style={styles.reportBlockHeader}>
+                        <View>
+                          <Text style={styles.reportBlockTitle}>Rapor Masalah Kasir</Text>
+                          <Text style={styles.reportBlockSubtitle}>Diambil dari piutang terlambat, selisih cash, closing belum final, koreksi laporan, dan pengajuan approval.</Text>
+                        </View>
+                        <Text style={styles.reportBlockBadge}>Audit Kasir</Text>
+                      </View>
+                      <View style={styles.reportSectionCard}>
+                        {reportCashierProblemRows.length > 0 ? reportCashierProblemRows.slice(0, 12).map((row) => (
+                          <View key={`cashier-problem-${row.user_id || row.user_name}`} style={styles.reportNestedItem}>
+                            <View style={styles.reportLineRow}>
+                              <Text style={styles.reportNestedTitle}>{row.user_name || 'User belum tercatat'} - {row.risk_label || 'Normal'}</Text>
+                              <Text style={styles.reportLineValue}>Skor {row.score || 0}</Text>
+                            </View>
+                            <Text style={styles.reportNestedMeta}>
+                              Piutang telat: {row.overdue_receivable_count || 0} ({formatRupiah(row.overdue_receivable_total || 0)}) | Selisih cash: {row.cash_difference_count || 0} | Closing belum final: {row.closing_not_final_count || 0}
+                            </Text>
+                            <Text style={styles.reportNestedMeta}>
+                              Campur tangan atasan: {row.supervisor_intervention_count || 0} | Revisi/koreksi: {row.correction_count || 0} | Pengajuan approval/edit: {row.manual_approval_count || 0} | Suspend: {row.suspend_count || 0}
+                            </Text>
+                            {(Array.isArray(row.notes) ? row.notes : []).slice(0, 3).map((note, index) => (
+                              <Text key={`cashier-problem-note-${row.user_id || row.user_name}-${index}`} style={styles.reportNestedMeta}>- {note}</Text>
+                            ))}
+                            <Text style={styles.reportNestedMeta}>{row.suspend_note || 'Suspend belum diaktifkan otomatis pada modul operasional.'}</Text>
+                          </View>
+                        )) : (
+                          <Text style={styles.reportEmptyText}>Belum ada masalah kasir yang tercatat pada periode dan filter ini.</Text>
+                        )}
+                      </View>
+                    </>
+                  ) : null}
+
+                  {showReportSales ? (
+                    <>
                   <View style={styles.reportBlockHeader}>
                     <View>
                       <Text style={styles.reportBlockTitle}>Ringkasan Omzet</Text>
-                      <Text style={styles.reportBlockSubtitle}>Tanggal laporan: {String(closingReport?.date || closingReportDate || '-')}</Text>
+                      <Text style={styles.reportBlockSubtitle}>{reportPeriodMeta.label}: {reportPeriodMeta.from} s/d {reportPeriodMeta.to}</Text>
                     </View>
                     <Text style={styles.reportBlockBadge}>Closing Finance</Text>
                   </View>
@@ -18020,7 +20094,22 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                       <Text style={styles.reportSummaryValue}>{formatRupiah(closingReport?.closing?.net_cash_movement || 0)}</Text>
                     </View>
                   </View>
+                  <View style={styles.reportSectionCard}>
+                    <Text style={styles.reportSectionTitle}>Qty Penjualan Masing-masing Produk</Text>
+                    {closingTopProducts.length > 0 ? closingTopProducts.map((row, index) => (
+                      <View key={`sales-product-qty-${row?.product_id || index}`} style={styles.reportLineRow}>
+                        <Text style={styles.reportLineLabel}>{index + 1}. {row?.product_name || '-'}</Text>
+                        <Text style={styles.reportLineValue}>{row?.total_qty || 0} pcs | {formatRupiah(row?.total_amount || 0)}</Text>
+                      </View>
+                    )) : (
+                      <Text style={styles.reportEmptyText}>Belum ada data qty produk pada filter ini.</Text>
+                    )}
+                  </View>
+                    </>
+                  ) : null}
 
+                  {showReportFinance ? (
+                    <>
                   <View style={styles.reportBlockHeader}>
                     <View>
                       <Text style={styles.reportBlockTitle}>Breakdown Pembayaran</Text>
@@ -18068,7 +20157,11 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                       <Text style={styles.reportSummaryValue}>{formatRupiah(closingNonCashSummary.total)}</Text>
                     </View>
                   </View>
+                    </>
+                  ) : null}
 
+                  {showReportClosingAudit ? (
+                    <>
                   <View style={styles.reportBlockHeader}>
                     <View>
                       <Text style={styles.reportBlockTitle}>Detail Laporan</Text>
@@ -18238,6 +20331,8 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                     )}
                   </View>
                   </View>
+                    </>
+                  ) : null}
 
                 </>
               ) : (
@@ -18246,8 +20341,239 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                   <Text style={styles.reportStateText}>Pilih tanggal lalu tekan Generate untuk memuat dashboard laporan.</Text>
                 </View>
               )}
+                </View>
+              </View>
             </View>
           ) : activeMenu === 'settings' ? (
+            <>
+              <View style={styles.settingsMenuBar}>
+                {[
+                  { key: 'local_network', label: 'Setting Jaringan Lokal' },
+                  { key: 'printer', label: 'Setting Printer' },
+                ].map((item) => {
+                  const active = settingsMenu === item.key;
+                  return (
+                    <Pressable
+                      key={`settings-menu-${item.key}`}
+                      style={[
+                        styles.settingsMenuButton,
+                        active ? styles.settingsMenuButtonActive : null,
+                      ]}
+                      onPress={() => setSettingsMenu(item.key)}
+                    >
+                      <Text
+                        style={[
+                          styles.settingsMenuButtonText,
+                          active ? styles.settingsMenuButtonTextActive : null,
+                        ]}
+                      >
+                        {item.label}
+                      </Text>
+                    </Pressable>
+                  );
+                })}
+              </View>
+              {settingsMenu === 'local_network' ? (
+              <View style={styles.debugPanel}>
+              <Text style={styles.debugTitle}>Sambungan Jaringan Lokal</Text>
+              <Text style={styles.debugText}>
+                Setting ini tersimpan di komputer aplikasi ini. Gunakan untuk menyambungkan komputer kasir, design, dan produksi ke folder share lokal satu jaringan.
+              </Text>
+              <View style={styles.printerStatusRow}>
+                <View
+                  style={[
+                    styles.printerStatusBadge,
+                    activeLocalDesignNetworkSettings.enabled ? styles.printerStatusBadgeActive : styles.printerStatusBadgeFallback,
+                  ]}
+                >
+                  <Text style={styles.printerStatusBadgeText}>
+                    {activeLocalDesignNetworkSettings.enabled ? 'Jaringan Lokal Aktif' : 'Jaringan Lokal Nonaktif'}
+                  </Text>
+                </View>
+                <Text style={styles.printerStatusHint}>
+                  {hasUnsavedLocalDesignNetwork
+                    ? 'Ada perubahan belum disimpan. Klik Simpan Sambungan untuk konfirmasi koneksi.'
+                    : hasSavedLocalDesignNetwork
+                      ? 'Menggunakan setting khusus komputer ini.'
+                      : 'Menggunakan default aplikasi sampai disimpan di komputer ini.'}
+                </Text>
+              </View>
+              <View style={styles.printerTargetCard}>
+                <Text style={styles.printerTargetLabel}>Ringkasan Sambungan</Text>
+                <Text style={styles.printerTargetPrimary}>
+                  {localDesignNetworkSummary.targetLabel} | {localDesignNetworkSummary.root}
+                </Text>
+                <Text style={styles.printerTargetSecondary}>Server: {localDesignNetworkSummary.server}</Text>
+                <Text style={styles.printerTargetSecondary}>Share LAN: {localDesignNetworkSummary.share}</Text>
+                <Text style={styles.printerTargetSecondary}>Total komputer/share tersimpan: {localDesignNetworkSummary.count}</Text>
+              </View>
+              <View style={styles.localNetworkTargetRow}>
+                {(activeLocalDesignNetworkSettings.targets || []).map((target) => {
+                  const active = String(target?.id || '') === String(activeLocalDesignNetworkSettings.activeTargetId || '');
+                  return (
+                    <Pressable
+                      key={`local-target-${target?.id}`}
+                      style={[
+                        styles.localNetworkTargetChip,
+                        active ? styles.localNetworkTargetChipActive : null,
+                      ]}
+                      onPress={() => handleSelectLocalDesignTarget(target?.id)}
+                    >
+                      <Text
+                        style={[
+                          styles.localNetworkTargetChipText,
+                          active ? styles.localNetworkTargetChipTextActive : null,
+                        ]}
+                      >
+                        {target?.label || target?.serverName || 'Komputer'}
+                      </Text>
+                    </Pressable>
+                  );
+                })}
+                <Pressable style={styles.localNetworkTargetAddButton} onPress={handleAddLocalDesignTarget}>
+                  <Text style={styles.localNetworkTargetAddText}>+ Tambah Komputer</Text>
+                </Pressable>
+              </View>
+              <View style={styles.localNetworkFormGrid}>
+                <View style={styles.localNetworkFormColumn}>
+                  <Text style={styles.reportInputLabel}>Nama Profil</Text>
+                  <TextInput
+                    value={resolveActiveLocalDesignTarget(activeLocalDesignNetworkSettings)?.label || ''}
+                    onChangeText={(text) => handleChangeLocalDesignNetworkSetting('label', text)}
+                    placeholder="Komputer Design / Produksi"
+                    placeholderTextColor="#8a9ab3"
+                    style={styles.reportInput}
+                  />
+                </View>
+                <View style={styles.localNetworkFormColumn}>
+                  <Text style={styles.reportInputLabel}>Nama Komputer / Server Lokal</Text>
+                  <TextInput
+                    value={activeLocalDesignNetworkSettings.serverName}
+                    onChangeText={(text) => handleChangeLocalDesignNetworkSetting('serverName', text)}
+                    placeholder="DESIGN-SERVER"
+                    placeholderTextColor="#8a9ab3"
+                    style={styles.reportInput}
+                  />
+                </View>
+                <View style={styles.localNetworkFormColumn}>
+                  <Text style={styles.reportInputLabel}>IP / Host LAN</Text>
+                  <TextInput
+                    value={activeLocalDesignNetworkSettings.serverHost}
+                    onChangeText={(text) => handleChangeLocalDesignNetworkSetting('serverHost', text)}
+                    placeholder="192.168.1.25"
+                    placeholderTextColor="#8a9ab3"
+                    style={styles.reportInput}
+                  />
+                </View>
+                <View style={styles.localNetworkFormColumn}>
+                  <Text style={styles.reportInputLabel}>Root Folder Lokal</Text>
+                  <TextInput
+                    value={activeLocalDesignNetworkSettings.rootPath}
+                    onChangeText={(text) => handleChangeLocalDesignNetworkSetting('rootPath', text)}
+                    placeholder="D:\\file siap layout"
+                    placeholderTextColor="#8a9ab3"
+                    style={styles.reportInput}
+                  />
+                </View>
+                <View style={styles.localNetworkFormColumn}>
+                  <Text style={styles.reportInputLabel}>Path Share LAN / UNC</Text>
+                  <TextInput
+                    value={activeLocalDesignNetworkSettings.shareBaseUrl}
+                    onChangeText={(text) => handleChangeLocalDesignNetworkSetting('shareBaseUrl', text)}
+                    placeholder="\\\\DESIGN-SERVER\\file siap layout"
+                    placeholderTextColor="#8a9ab3"
+                    style={styles.reportInput}
+                  />
+                </View>
+                <View style={styles.localNetworkFormColumn}>
+                  <Text style={styles.reportInputLabel}>Nama Share Folder</Text>
+                  <TextInput
+                    value={activeLocalDesignNetworkSettings.shareFolder}
+                    onChangeText={(text) => handleChangeLocalDesignNetworkSetting('shareFolder', text)}
+                    placeholder="file siap layout"
+                    placeholderTextColor="#8a9ab3"
+                    style={styles.reportInput}
+                  />
+                </View>
+                <View style={styles.localNetworkFormColumn}>
+                  <Text style={styles.reportInputLabel}>Template Folder Produksi</Text>
+                  <TextInput
+                    value={activeLocalDesignNetworkSettings.folderTemplate}
+                    onChangeText={(text) => handleChangeLocalDesignNetworkSetting('folderTemplate', text)}
+                    placeholder="{yyyy}\\{mm}\\{dd}\\{material}\\{priority}"
+                    placeholderTextColor="#8a9ab3"
+                    style={styles.reportInput}
+                  />
+                </View>
+                <View style={styles.localNetworkFormColumnWide}>
+                  <Text style={styles.reportInputLabel}>Template Folder Referensi Customer</Text>
+                  <TextInput
+                    value={activeLocalDesignNetworkSettings.referenceFolderTemplate}
+                    onChangeText={(text) => handleChangeLocalDesignNetworkSetting('referenceFolderTemplate', text)}
+                    placeholder="{yyyy}\\{mm}\\{dd}\\referensi-customer\\{invoice}"
+                    placeholderTextColor="#8a9ab3"
+                    style={styles.reportInput}
+                  />
+                  <Text style={styles.printerTargetSecondary}>
+                    Token: {'{yyyy}'}, {'{mm}'}, {'{dd}'}, {'{invoice}'}, {'{material}'}, {'{priority}'}.
+                  </Text>
+                </View>
+              </View>
+              <View style={styles.printerToolActions}>
+                <Pressable
+                  style={styles.printerSecondaryButton}
+                  disabled={isTestingLocalDesignNetwork}
+                  onPress={handleSaveLocalDesignNetworkSettings}
+                >
+                  <Text style={styles.printerSecondaryButtonText}>
+                    {isTestingLocalDesignNetwork ? 'Mengecek...' : 'Simpan Sambungan'}
+                  </Text>
+                </Pressable>
+                <Pressable
+                  style={styles.printerSecondaryButton}
+                  disabled={isTestingLocalDesignNetwork}
+                  onPress={handleTestLocalDesignNetwork}
+                >
+                  <Text style={styles.printerSecondaryButtonText}>
+                    {isTestingLocalDesignNetwork ? 'Mengetes...' : 'Tes Sambungan'}
+                  </Text>
+                </Pressable>
+                <Pressable style={styles.printerSecondaryButton} onPress={handleToggleLocalDesignNetwork}>
+                  <Text style={styles.printerSecondaryButtonText}>
+                    {activeLocalDesignNetworkSettings.enabled ? 'Nonaktifkan Sambungan' : 'Aktifkan Sambungan'}
+                  </Text>
+                </Pressable>
+                <Pressable style={styles.printerDangerButton} onPress={handleResetLocalDesignNetworkSettings}>
+                  <Text style={styles.printerDangerButtonText}>Reset Setting Lokal</Text>
+                </Pressable>
+                <Pressable style={styles.printerDangerButton} onPress={handleRemoveLocalDesignTarget}>
+                  <Text style={styles.printerDangerButtonText}>Hapus Komputer Aktif</Text>
+                </Pressable>
+              </View>
+              {localDesignNetworkTest ? (
+                <View style={[
+                  styles.localNetworkTestBox,
+                  localDesignNetworkTest?.ok ? styles.localNetworkTestBoxOk : styles.localNetworkTestBoxError,
+                ]}>
+                  <Text style={styles.localNetworkTestTitle}>
+                    {localDesignNetworkTest?.ok ? 'Tes terakhir berhasil' : 'Tes terakhir belum berhasil'}
+                  </Text>
+                  <Text style={styles.localNetworkTestText}>
+                    {localDesignNetworkTest?.message || '-'}
+                  </Text>
+                  {Array.isArray(localDesignNetworkTest?.checks) ? localDesignNetworkTest.checks.map((check) => (
+                    <Text
+                      key={`local-network-check-${check?.key || check?.label}`}
+                      style={styles.localNetworkTestText}
+                    >
+                      {check?.ok ? 'OK' : 'Gagal'} - {check?.label}: {check?.message}
+                    </Text>
+                  )) : null}
+                </View>
+              ) : null}
+              </View>
+              ) : null}
+              {settingsMenu === 'printer' ? (
             <View style={styles.debugPanel}>
               <Text style={styles.debugTitle}>Pengaturan Printer Kasir</Text>
               <Text style={styles.debugText}>Atur printer tujuan dan ukuran kertas struk sesuai printer yang dipakai di kasir.</Text>
@@ -18325,6 +20651,8 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                 <Text style={styles.debugText}>Mode produksi hanya menampilkan pengaturan printer, tanpa panel debug developer.</Text>
               )}
             </View>
+              ) : null}
+            </>
           ) : (
             <View style={styles.debugPanel}>
               <Text style={styles.debugTitle}>Menu belum tersedia.</Text>
@@ -18360,22 +20688,27 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         <View style={styles.popupBackdrop}>
           <View style={[styles.popupCard, styles.processOrderCard]}>
             <Text style={styles.popupTitle}>Detail Pesanan</Text>
-            <Text style={styles.processOrderHint}>
-              Periksa item, qty, harga, diskon, dan total akhir dulu. Jika customer belum bayar tetapi butuh proofing, gunakan Lanjut Proofing agar invoice tetap draft.
-            </Text>
-            <Text style={styles.popupMessage}>Pelanggan: {orderPreviewSnapshot.customerName}</Text>
-            <Text style={styles.popupMessage}>Tanggal: {orderPreviewSnapshot.transactionDate}</Text>
-            <Text style={styles.popupMessage}>Catatan: {orderPreviewSnapshot.notes || '-'}</Text>
-            {cartHasProofingEligibleItems ? (
+            <ScrollView
+              style={styles.processOrderDetailScroll}
+              contentContainerStyle={styles.processOrderDetailScrollContent}
+              nestedScrollEnabled
+            >
+              <Text style={[styles.processOrderHint, styles.processOrderWarningHint]}>
+                Menu ini hanya digunakan untuk pelanggan yang serius membeli dan sudah lunas membayar.
+              </Text>
+              <Text style={styles.popupMessage}>Pelanggan: {orderPreviewSnapshot.customerName}</Text>
+              <Text style={styles.popupMessage}>Tanggal: {orderPreviewSnapshot.transactionDate}</Text>
+              <Text style={styles.popupMessage}>Catatan: {orderPreviewSnapshot.notes || '-'}</Text>
               <View style={styles.processOrderSelectionCard}>
-                <Text style={styles.processOrderSelectionTitle}>Flow Proofing Design</Text>
+              {cartHasProofingEligibleItems ? (
+                <>
+                <Text style={styles.processOrderSelectionTitle}>Flow Proofing</Text>
                 <View style={styles.methodQuickRowWrap}>
                   {[
+                    { key: PROOFING_FLOW_PROOFING_FIRST, label: 'Proofing' },
                     { key: PROOFING_FLOW_NONE, label: 'Tanpa Proofing' },
-                    { key: PROOFING_FLOW_PROOFING_FIRST, label: 'Proofing Dulu' },
-                    { key: PROOFING_FLOW_PAY_FIRST, label: 'Bayar Dulu' },
                   ].map((option) => {
-                    const active = selectedProofingFlow === option.key;
+                    const active = effectiveSelectedProofingFlow === option.key;
                     return (
                       <Pressable
                         key={`proofing-flow-${option.key}`}
@@ -18384,7 +20717,8 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                           active ? styles.receivableMethodChipActive : null,
                         ]}
                         disabled={isSubmitting}
-                        onPress={() => setSelectedProofingFlow(option.key)}
+                        onPressIn={() => handleSelectProofingFlow(option.key)}
+                        onPress={() => handleSelectProofingFlow(option.key)}
                       >
                         <Text
                           style={[
@@ -18399,12 +20733,175 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                   })}
                 </View>
                 <Text style={styles.receivableHelperText}>
-                  Aktifkan proofing hanya untuk order yang memang perlu review desain customer. Opsi tanpa proofing menjaga flow lama tetap jalan.
+                  Pilih Proofing jika desain perlu dicek customer. Pilih Tanpa Proofing jika order bisa langsung menunggu pembayaran.
                 </Text>
+                {proofingChoiceRequiresType ? (
+                  <View style={styles.processOrderNestedSection}>
+                    <Text style={styles.processOrderSelectionTitle}>PIC / Tujuan Task Proofing</Text>
+                    <View style={styles.methodQuickRowWrap}>
+                      {[
+                        { key: PROOFING_TYPE_DESIGN, label: 'Design' },
+                        { key: PROOFING_TYPE_CASHIER, label: 'Kasir' },
+                      ].map((option) => {
+                        const active = selectedProofingType === option.key;
+                        return (
+                          <Pressable
+                            key={`proofing-type-${option.key}`}
+                            style={[
+                              styles.receivableMethodChip,
+                              active ? styles.receivableMethodChipActive : null,
+                            ]}
+                            disabled={isSubmitting}
+                            onPress={() => handleSelectProcessProofingRole(option.key)}
+                          >
+                            <Text
+                              style={[
+                                styles.receivableMethodChipText,
+                                active ? styles.receivableMethodChipTextActive : null,
+                              ]}
+                            >
+                              {option.label}
+                            </Text>
+                          </Pressable>
+                        );
+                      })}
+                    </View>
+                    <View style={styles.proofingSendHeaderRow}>
+                      <Text style={styles.reportInputLabel}>
+                        {`Pilih User ${proofingTargetRoleLabel(selectedProofingType || PROOFING_TYPE_DESIGN)}`}
+                      </Text>
+                      {processProofingSelectedUser ? (
+                        <Text style={styles.proofingSendSelectedText}>
+                          {`Dipilih: ${processProofingSelectedUser.name}`}
+                        </Text>
+                      ) : null}
+                    </View>
+                    <ScrollView style={styles.proofingSendUserList} nestedScrollEnabled>
+                      {isProcessProofingUsersLoading ? (
+                        <Text style={styles.proofingSendEmptyText}>Memuat daftar user...</Text>
+                      ) : processProofingTargetUsers.length === 0 ? (
+                        <Text style={styles.proofingSendEmptyText}>
+                          {processProofingUsersError || `Belum ada user role ${proofingTargetRoleLabel(selectedProofingType || PROOFING_TYPE_DESIGN)} di directory.`}
+                        </Text>
+                      ) : (
+                        processProofingTargetUsers.map((user) => {
+                          const userId = Number(user?.id || 0);
+                          const active = userId === Number(selectedProofingTargetUserId || 0);
+                          return (
+                            <Pressable
+                              key={`process-proofing-user-${String(userId)}`}
+                              style={[
+                                styles.proofingSendUserRow,
+                                active ? styles.proofingSendUserRowActive : null,
+                              ]}
+                              disabled={isSubmitting}
+                              onPress={() => {
+                                setSelectedProofingTargetUserId(userId);
+                                setProcessProofingUsersError('');
+                              }}
+                            >
+                              <View>
+                                <Text style={styles.proofingSendUserName}>{String(user?.name || '-')}</Text>
+                                <Text style={styles.proofingSendUserMeta}>
+                                  {[user?.role_name, user?.outlet_name, user?.email].filter(Boolean).join(' | ') || '-'}
+                                </Text>
+                              </View>
+                              <Text style={styles.proofingSendCheck}>{active ? 'Dipilih' : 'Pilih'}</Text>
+                            </Pressable>
+                          );
+                        })
+                      )}
+                    </ScrollView>
+                    {processProofingUsersError ? (
+                      <View style={styles.reportWarningBox}>
+                        <Text style={styles.receivableHelperText}>{processProofingUsersError}</Text>
+                      </View>
+                    ) : null}
+                    <View style={styles.processOrderReferenceBox}>
+                      <View style={styles.proofingSendHeaderRow}>
+                        <Text style={styles.reportInputLabel}>File Referensi Customer</Text>
+                        {currentProofingReferenceFile ? (
+                          <Text style={styles.proofingSendSelectedText}>Tersimpan lokal</Text>
+                        ) : null}
+                      </View>
+                      <Text style={styles.receivableHelperText}>
+                        Upload desain/referensi yang dikirim customer. File disimpan di storage lokal kasir, backend hanya menerima metadata untuk dibaca PIC proofing.
+                      </Text>
+                      {currentProofingReferenceFile ? (
+                        <View style={styles.processOrderReferenceMeta}>
+                          <Text style={styles.processOrderSelectionValue} numberOfLines={2}>
+                            {currentProofingReferenceFile.original_name || currentProofingReferenceFile.file_name || 'File referensi customer'}
+                          </Text>
+                          <Text style={styles.processOrderSelectionHint} numberOfLines={2}>
+                            {currentProofingReferenceFile.relative_path || currentProofingReferenceFile.path || currentProofingReferenceFile.open_url || '-'}
+                          </Text>
+                        </View>
+                      ) : (
+                        <Text style={styles.processOrderSelectionHint}>
+                          Belum ada file referensi customer untuk task proofing ini.
+                        </Text>
+                      )}
+                      <View style={styles.methodQuickRowWrap}>
+                        <Pressable
+                          style={[
+                            styles.receivableMethodChip,
+                            styles.receivableMethodChipActive,
+                          ]}
+                          disabled={isSubmitting}
+                          onPress={handleUploadCustomerProofingReference}
+                        >
+                          <Text style={[styles.receivableMethodChipText, styles.receivableMethodChipTextActive]}>
+                            {currentProofingReferenceFile ? 'Ganti File Referensi' : 'Upload File Referensi'}
+                          </Text>
+                        </Pressable>
+                      </View>
+                    </View>
+                  </View>
+                ) : null}
+                </>
+              ) : (
+                <Text style={styles.receivableHelperText}>
+                  Item di keranjang ini tidak membutuhkan proofing. Aksi berikutnya akan membuat tagihan menunggu pembayaran atau menyimpan sebagai draft.
+                </Text>
+              )}
+                <View style={styles.processOrderNestedSection}>
+                  <Text style={styles.processOrderSelectionTitle}>Aksi Setelah Proofing</Text>
+                  <View style={styles.methodQuickRowWrap}>
+                    {[
+                      { key: FOLLOW_UP_SHARE_BILL, label: 'Share Tagihan' },
+                      { key: FOLLOW_UP_SHARE_AND_PRINT, label: 'Share & Print Tagihan' },
+                      { key: FOLLOW_UP_SAVE_AS_DRAFT, label: 'Simpan Sebagai Draft' },
+                    ].map((option) => {
+                      const active = selectedFollowUpMethod === option.key;
+                      return (
+                        <Pressable
+                          key={`follow-up-${option.key}`}
+                          style={[
+                            styles.receivableMethodChip,
+                            active ? styles.receivableMethodChipActive : null,
+                          ]}
+                          disabled={isSubmitting}
+                          onPress={() => setSelectedFollowUpMethod(option.key)}
+                        >
+                          <Text
+                            style={[
+                              styles.receivableMethodChipText,
+                              active ? styles.receivableMethodChipTextActive : null,
+                            ]}
+                          >
+                            {option.label}
+                          </Text>
+                        </Pressable>
+                      );
+                    })}
+                  </View>
+                  <Text style={styles.receivableHelperText}>
+                    Share Tagihan menjadi default agar kasir tidak perlu cetak kertas kecuali customer meminta hardcopy.
+                  </Text>
+                </View>
               </View>
-            ) : null}
 
-            <ScrollView style={styles.processOrderItemList} contentContainerStyle={styles.processOrderItemListContent}>
+              <ScrollView style={styles.processOrderItemList} contentContainerStyle={styles.processOrderItemListContent} nestedScrollEnabled>
               {Array.isArray(orderPreviewSnapshot.items) && orderPreviewSnapshot.items.length > 0 ? (
                 orderPreviewSnapshot.items.map((item, index) => (
                   <View key={`process-detail-${item.no}-${index}`} style={[styles.previewItemCard, styles.processOrderItemCard]}>
@@ -18426,9 +20923,9 @@ const SalesScreen = ({ currentUser, onLogout }) => {
               ) : (
                 <Text style={styles.invoiceDetailEmpty}>Keranjang belum memiliki item.</Text>
               )}
-            </ScrollView>
+              </ScrollView>
 
-            <View style={styles.processOrderSummaryCard}>
+              <View style={styles.processOrderSummaryCard}>
               <View style={styles.processOrderSummaryRow}>
                 <Text style={styles.processOrderSummaryLabel}>Subtotal</Text>
                 <Text style={styles.processOrderSummaryValue}>{formatRupiah(orderPreviewSnapshot.subtotal)}</Text>
@@ -18459,7 +20956,22 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                   <Text style={styles.processOrderSummaryValue}>{orderPreviewSnapshot.proofingFlowLabel}</Text>
                 </View>
               ) : null}
-            </View>
+              {cartHasProofingEligibleItems && proofingChoiceRequiresType ? (
+                <View style={styles.processOrderSummaryRow}>
+                  <Text style={styles.processOrderSummaryLabel}>PIC Proofing</Text>
+                  <Text style={styles.processOrderSummaryValue}>
+                    {processProofingSelectedUser
+                      ? `${proofingTargetRoleLabel(selectedProofingType)}: ${processProofingSelectedUser.name}`
+                      : proofingTypeToLabel(selectedProofingType)}
+                  </Text>
+                </View>
+              ) : null}
+              <View style={styles.processOrderSummaryRow}>
+                <Text style={styles.processOrderSummaryLabel}>Aksi Setelah Proofing</Text>
+                <Text style={styles.processOrderSummaryValue}>{followUpMethodToLabel(selectedFollowUpMethod)}</Text>
+              </View>
+              </View>
+            </ScrollView>
 
             <View style={[styles.popupActions, styles.processOrderActionsCompact]}>
               <Pressable
@@ -18470,32 +20982,24 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                 <Text style={[styles.popupButtonText, styles.popupButtonTextSecondary]}>Batal</Text>
               </Pressable>
               <Pressable
-                style={[styles.popupButton, styles.popupButtonSecondary, styles.processOrderActionButtonCompact]}
-                disabled={isSubmitting}
-                onPress={handlePrintProductionWorkOrder}
-              >
-                <Text style={[styles.popupButtonText, styles.popupButtonTextSecondary]}>Cetak Nota SPK</Text>
-              </Pressable>
-              {cartHasProofingEligibleItems ? (
-                <Pressable
-                  style={[
-                    styles.popupButton,
-                    styles.processOrderProofingButton,
-                    styles.processOrderActionButtonCompact,
-                    isSubmitting ? styles.draftActionDisabled : null,
-                  ]}
-                  disabled={isSubmitting}
-                  onPress={handleContinueProofingWithoutPayment}
-                >
-                  <Text style={styles.popupButtonText}>Lanjut Proofing</Text>
-                </Pressable>
-              ) : null}
-              <Pressable
                 style={[styles.popupButton, styles.processOrderActionButtonCompact]}
                 disabled={isSubmitting}
                 onPress={handleOpenPaymentMethodModalFromDetail}
               >
-                <Text style={styles.popupButtonText}>Proses Orderan</Text>
+                <Text style={styles.popupButtonText}>Proses Order</Text>
+              </Pressable>
+              <Pressable
+                style={[styles.popupButton, styles.processOrderProofingButton, styles.processOrderActionButtonCompact]}
+                disabled={isSubmitting}
+                onPress={() => {
+                  if (selectedFollowUpMethod === FOLLOW_UP_SAVE_AS_DRAFT) {
+                    handleSaveTransactionFromProcessModal();
+                    return;
+                  }
+                  handleContinueProofingWithoutPayment(selectedFollowUpMethod);
+                }}
+              >
+                <Text style={styles.popupButtonText}>{followUpMethodToLabel(selectedFollowUpMethod)}</Text>
               </Pressable>
             </View>
           </View>
@@ -18608,11 +21112,21 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                 <Text style={styles.processOrderSelectionLabel}>Nominal</Text>
                 <Text style={styles.processOrderSelectionValue}>{formatRupiah(orderPreviewSnapshot.grandTotal)}</Text>
               </View>
+              {showReceivableDueDateInput ? (
+                <View style={styles.processOrderSelectionRow}>
+                  <Text style={styles.processOrderSelectionLabel}>Tempo Piutang</Text>
+                  <Text style={styles.processOrderSelectionValue}>
+                    {receivableDueDate ? formatDateText(receivableDueDate) : 'Belum diisi'}
+                  </Text>
+                </View>
+              ) : null}
               <Text style={styles.processOrderSelectionHint}>
                 {!String(paymentMethod || '').trim()
                   ? 'Kasir wajib memilih metode pembayaran sebelum tombol proses dan cetak nota aktif.'
                   : processOrderNeedsAccountSelection
                     ? 'Metode sudah dipilih, tetapi backend belum menyediakan akun tujuan aktif untuk metode ini.'
+                    : processOrderNeedsReceivableDueDate
+                      ? 'Transaksi piutang/DP wajib punya tanggal janji bayar customer untuk reminder jatuh tempo.'
                     : paymentMethodHelperText}
               </Text>
             </View>
@@ -18627,6 +21141,13 @@ const SalesScreen = ({ currentUser, onLogout }) => {
               <View style={styles.reportWarningBox}>
                 <Text style={styles.reportWarningText}>
                   Metode ini belum punya akun pembayaran aktif di backend. Pilih metode lain atau lengkapi mapping payment account dulu.
+                </Text>
+              </View>
+            ) : null}
+            {processOrderNeedsReceivableDueDate ? (
+              <View style={styles.reportWarningBox}>
+                <Text style={styles.reportWarningText}>
+                  Isi Tempo Piutang di area pembayaran sebelum memproses transaksi piutang/DP.
                 </Text>
               </View>
             ) : null}
@@ -18659,6 +21180,8 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                       ? 'Pilih Metode Dulu'
                       : processOrderNeedsAccountSelection
                         ? 'Lengkapi Akun Dulu'
+                        : processOrderNeedsReceivableDueDate
+                          ? 'Isi Tempo Piutang'
                         : isDanaQrisPaymentMethod
                           ? 'Buat QRIS DANA'
                           : isDanaGatewayPaymentMethod
@@ -19002,6 +21525,8 @@ const SalesScreen = ({ currentUser, onLogout }) => {
               },
             ]}
           >
+            <Text style={styles.orderPreviewModalTitle}>Preview Internal Kasir</Text>
+            <Text style={styles.orderPreviewModalSubtitle}>Bukan dokumen final pelanggan</Text>
             <View style={styles.orderPreviewContent}>
               <View
                 style={[
@@ -19026,7 +21551,20 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                         maxWidth: thermalPreviewWidth,
                       },
                     ]}
+                    onContextMenu={(event) => event?.preventDefault?.()}
+                    onCopy={(event) => event?.preventDefault?.()}
+                    onCut={(event) => event?.preventDefault?.()}
                   >
+                    <View pointerEvents="none" style={styles.internalPreviewWatermarkLayer}>
+                      <Text style={styles.internalPreviewWatermarkText}>
+                        {[
+                          internalPreviewWatermark.label || 'PREVIEW INTERNAL',
+                          internalPreviewWatermark.userName || userDisplayName || 'User Login',
+                          internalPreviewWatermark.accessedAt || '',
+                          internalPreviewWatermark.invoiceNo || orderPreviewReceiptData?.transaction?.invoiceNo || 'PREVIEW',
+                        ].filter(Boolean).join('\n')}
+                      </Text>
+                    </View>
                     {String(orderPreviewReceiptData?.store?.logoUrl || '').trim() ? (
                       <Image
                         source={{ uri: orderPreviewReceiptData.store.logoUrl }}
@@ -19034,7 +21572,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                         resizeMode="contain"
                       />
                     ) : null}
-                    <Text selectable style={styles.receiptPreviewText}>{orderPreviewReceiptText}</Text>
+                    <Text selectable={false} style={styles.receiptPreviewText}>{orderPreviewReceiptText}</Text>
                   </View>
                 </ScrollView>
               </View>
@@ -19457,59 +21995,66 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                 : `Request: ${manualApprovalModal.requestLabel || '-'}`}
             </Text>
 
-            <View style={styles.manualApprovalSummaryCard}>
-              <Text style={styles.manualApprovalSummaryTitle}>Ringkasan Approval</Text>
-              {manualApprovalMode !== 'create' ? (
-                <>
+            <ScrollView
+              style={styles.manualApprovalScroll}
+              contentContainerStyle={styles.manualApprovalScrollContent}
+              nestedScrollEnabled
+              keyboardShouldPersistTaps="handled"
+              showsVerticalScrollIndicator
+            >
+              <View style={styles.manualApprovalSummaryCard}>
+                <Text style={styles.manualApprovalSummaryTitle}>Ringkasan Approval</Text>
+                {manualApprovalMode !== 'create' ? (
+                  <>
+                    <Text style={styles.manualApprovalSummaryText}>
+                      {manualApprovalTypeKey === 'receivable_limit'
+                        ? `Request plafon: ${manualApprovalModal.requestLabel || '-'}`
+                        : `Invoice terkait: ${manualApprovalModal.invoiceNo || '-'}`}
+                    </Text>
+                    <Text style={styles.manualApprovalSummaryText}>Status saat ini: {manualApprovalStatusLabel}</Text>
+                  </>
+                ) : null}
+                <Text style={styles.manualApprovalSummaryText}>Jenis: {manualApprovalTypeLabel}</Text>
+                {manualApprovalAmountValue > 0 ? (
+                  <Text style={styles.manualApprovalSummaryText}>Nominal: {formatRupiah(manualApprovalAmountValue)}</Text>
+                ) : null}
+                {manualApprovalTypeKey === 'receivable_limit' && manualApprovalModal.applicantName ? (
+                  <Text style={styles.manualApprovalSummaryText}>Pemohon: {manualApprovalModal.applicantName}</Text>
+                ) : null}
+                {manualApprovalTypeKey === 'receivable_limit' && manualApprovalModal.businessName ? (
+                  <Text style={styles.manualApprovalSummaryText}>Usaha: {manualApprovalModal.businessName}</Text>
+                ) : null}
+                {manualApprovalTypeKey === 'receivable_limit' && manualApprovalModal.contactPhone ? (
+                  <Text style={styles.manualApprovalSummaryText}>No. HP: {manualApprovalModal.contactPhone}</Text>
+                ) : null}
+                {manualApprovalTypeKey === 'receivable_limit' && manualApprovalModal.activeEmail ? (
+                  <Text style={styles.manualApprovalSummaryText}>Email aktif: {manualApprovalModal.activeEmail}</Text>
+                ) : null}
+                {manualApprovalTypeKey === 'receivable_limit' && manualApprovalModal.address ? (
+                  <Text style={styles.manualApprovalSummaryText}>Alamat: {manualApprovalModal.address}</Text>
+                ) : null}
+                {manualApprovalTypeKey === 'receivable_limit' && manualApprovalModal.nikKtp ? (
+                  <Text style={styles.manualApprovalSummaryText}>NIK / KTP: {manualApprovalModal.nikKtp}</Text>
+                ) : null}
+                {manualApprovalTypeKey === 'receivable_limit' && manualApprovalModal.npwp ? (
+                  <Text style={styles.manualApprovalSummaryText}>NPWP: {manualApprovalModal.npwp}</Text>
+                ) : null}
+                {manualApprovalTypeKey === 'receivable_limit' && manualApprovalModal.emergencyContactPhone ? (
+                  <Text style={styles.manualApprovalSummaryText}>Kontak darurat: {manualApprovalModal.emergencyContactPhone}</Text>
+                ) : null}
+                {manualApprovalTypeKey === 'receivable_limit' && manualApprovalModal.currentApprovedLimitAmount > 0 ? (
                   <Text style={styles.manualApprovalSummaryText}>
-                    {manualApprovalTypeKey === 'receivable_limit'
-                      ? `Request plafon: ${manualApprovalModal.requestLabel || '-'}`
-                      : `Invoice terkait: ${manualApprovalModal.invoiceNo || '-'}`}
+                    Plafon aktif saat ini: {formatRupiah(manualApprovalModal.currentApprovedLimitAmount)}
                   </Text>
-                  <Text style={styles.manualApprovalSummaryText}>Status saat ini: {manualApprovalStatusLabel}</Text>
-                </>
-              ) : null}
-              <Text style={styles.manualApprovalSummaryText}>Jenis: {manualApprovalTypeLabel}</Text>
-              {manualApprovalAmountValue > 0 ? (
-                <Text style={styles.manualApprovalSummaryText}>Nominal: {formatRupiah(manualApprovalAmountValue)}</Text>
-              ) : null}
-              {manualApprovalTypeKey === 'receivable_limit' && manualApprovalModal.applicantName ? (
-                <Text style={styles.manualApprovalSummaryText}>Pemohon: {manualApprovalModal.applicantName}</Text>
-              ) : null}
-              {manualApprovalTypeKey === 'receivable_limit' && manualApprovalModal.businessName ? (
-                <Text style={styles.manualApprovalSummaryText}>Usaha: {manualApprovalModal.businessName}</Text>
-              ) : null}
-              {manualApprovalTypeKey === 'receivable_limit' && manualApprovalModal.contactPhone ? (
-                <Text style={styles.manualApprovalSummaryText}>No. HP: {manualApprovalModal.contactPhone}</Text>
-              ) : null}
-              {manualApprovalTypeKey === 'receivable_limit' && manualApprovalModal.activeEmail ? (
-                <Text style={styles.manualApprovalSummaryText}>Email aktif: {manualApprovalModal.activeEmail}</Text>
-              ) : null}
-              {manualApprovalTypeKey === 'receivable_limit' && manualApprovalModal.address ? (
-                <Text style={styles.manualApprovalSummaryText}>Alamat: {manualApprovalModal.address}</Text>
-              ) : null}
-              {manualApprovalTypeKey === 'receivable_limit' && manualApprovalModal.nikKtp ? (
-                <Text style={styles.manualApprovalSummaryText}>NIK / KTP: {manualApprovalModal.nikKtp}</Text>
-              ) : null}
-              {manualApprovalTypeKey === 'receivable_limit' && manualApprovalModal.npwp ? (
-                <Text style={styles.manualApprovalSummaryText}>NPWP: {manualApprovalModal.npwp}</Text>
-              ) : null}
-              {manualApprovalTypeKey === 'receivable_limit' && manualApprovalModal.emergencyContactPhone ? (
-                <Text style={styles.manualApprovalSummaryText}>Kontak darurat: {manualApprovalModal.emergencyContactPhone}</Text>
-              ) : null}
-              {manualApprovalTypeKey === 'receivable_limit' && manualApprovalModal.currentApprovedLimitAmount > 0 ? (
-                <Text style={styles.manualApprovalSummaryText}>
-                  Plafon aktif saat ini: {formatRupiah(manualApprovalModal.currentApprovedLimitAmount)}
-                </Text>
-              ) : null}
-              {manualApprovalTypeKey === 'receivable_limit' && manualApprovalModal.currentRemainingLimitAmount >= 0 && manualApprovalModal.currentApprovedLimitAmount > 0 ? (
-                <Text style={styles.manualApprovalSummaryText}>
-                  Sisa plafon saat ini: {formatRupiah(manualApprovalModal.currentRemainingLimitAmount)}
-                </Text>
-              ) : null}
-            </View>
+                ) : null}
+                {manualApprovalTypeKey === 'receivable_limit' && manualApprovalModal.currentRemainingLimitAmount >= 0 && manualApprovalModal.currentApprovedLimitAmount > 0 ? (
+                  <Text style={styles.manualApprovalSummaryText}>
+                    Sisa plafon saat ini: {formatRupiah(manualApprovalModal.currentRemainingLimitAmount)}
+                  </Text>
+                ) : null}
+              </View>
 
-            <View style={styles.pickupForm}>
+              <View style={styles.pickupForm}>
               {manualApprovalMode === 'create' ? (
                 <>
                   {manualApprovalModal.context === 'customer_receivable_limit' || manualApprovalTypeKey === 'receivable_limit' ? null : (
@@ -19700,7 +22245,8 @@ const SalesScreen = ({ currentUser, onLogout }) => {
               {manualApprovalMode === 'reject' ? (
                 <Text style={styles.manualApprovalWarningText}>Catatan penolakan wajib diisi sebelum approval ditolak.</Text>
               ) : null}
-            </View>
+              </View>
+            </ScrollView>
 
             <View style={styles.popupActions}>
               <Pressable
@@ -19781,6 +22327,30 @@ const SalesScreen = ({ currentUser, onLogout }) => {
               ) : null}
               <Text style={styles.popupMessage}>Pengambilan: {invoiceDetailModal.pickedUpText}</Text>
               <Text style={styles.popupMessage}>Tanggal: {invoiceDetailModal.createdAt}</Text>
+              {Array.isArray(invoiceDetailModal.auditLines) && invoiceDetailModal.auditLines.length > 0 ? (
+                <View style={styles.invoiceAuditBox}>
+                  <Text style={styles.invoiceAuditTitle}>Histori Tanggung Jawab</Text>
+                  {invoiceDetailModal.auditLines.map((line, index) => (
+                    <Text key={`invoice-audit-${index}`} style={styles.popupMessage}>{line}</Text>
+                  ))}
+                </View>
+              ) : null}
+              {Array.isArray(invoiceDetailModal.activityHistory) && invoiceDetailModal.activityHistory.length > 0 ? (
+                <View style={styles.invoiceAuditBox}>
+                  <Text style={styles.invoiceAuditTitle}>Timeline Aktivitas</Text>
+                  {invoiceDetailModal.activityHistory.map((activity, index) => (
+                    <View key={`invoice-activity-${activity?.id || index}`} style={styles.invoiceActivityRow}>
+                      <Text style={styles.invoiceActivityTime}>{String(activity?.occurred_at || '-')}</Text>
+                      <Text style={styles.invoiceActivityText}>
+                        {String(activity?.user_name || 'User')} - {String(activity?.activity || activity?.action || '-')}
+                      </Text>
+                      {String(activity?.note || '').trim() ? (
+                        <Text style={styles.invoiceActivityNote}>{String(activity.note).trim()}</Text>
+                      ) : null}
+                    </View>
+                  ))}
+                </View>
+              ) : null}
               {String(invoiceDetailModal.cancellationText || '').trim() ? (
                 <Text style={styles.popupMessage}>Pembatalan: {invoiceDetailModal.cancellationText}</Text>
               ) : null}
@@ -20121,6 +22691,25 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     gap: 8,
   },
+  fixedTabsShell: {
+    paddingHorizontal: 8,
+    paddingTop: 8,
+    paddingBottom: 0,
+    backgroundColor: '#edf4ff',
+    zIndex: 30,
+    elevation: 3,
+  },
+  fixedTabsFrame: {
+    borderWidth: 1,
+    borderColor: '#c8d8f2',
+    backgroundColor: '#f8fbff',
+    borderRadius: 14,
+    padding: 8,
+    shadowColor: '#0f2c5c',
+    shadowOpacity: 0.07,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 2 },
+  },
   topBlueBrandWrap: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -20157,7 +22746,6 @@ const styles = StyleSheet.create({
   tabsRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    marginBottom: 8,
     gap: 6,
     flexWrap: 'wrap',
   },
@@ -20390,6 +22978,33 @@ const styles = StyleSheet.create({
     borderRadius: 14,
     padding: 8,
   },
+  settingsMenuBar: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+    marginTop: 8,
+    marginBottom: 8,
+  },
+  settingsMenuButton: {
+    borderWidth: 1,
+    borderColor: '#c1cadf',
+    backgroundColor: '#ffffff',
+    borderRadius: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 9,
+  },
+  settingsMenuButtonActive: {
+    borderColor: '#0755b8',
+    backgroundColor: '#0755b8',
+  },
+  settingsMenuButtonText: {
+    fontSize: 12,
+    fontWeight: '900',
+    color: '#31415f',
+  },
+  settingsMenuButtonTextActive: {
+    color: '#ffffff',
+  },
   printerToolsCard: {
     marginBottom: 10,
   },
@@ -20450,6 +23065,88 @@ const styles = StyleSheet.create({
     marginTop: 2,
     fontSize: 10,
     color: '#44506a',
+  },
+  localNetworkFormGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+    marginTop: 8,
+    marginBottom: 10,
+  },
+  localNetworkTargetRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+    marginBottom: 10,
+  },
+  localNetworkTargetChip: {
+    borderWidth: 1,
+    borderColor: '#c1cadf',
+    backgroundColor: '#ffffff',
+    borderRadius: 999,
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+  },
+  localNetworkTargetChipActive: {
+    borderColor: '#0755b8',
+    backgroundColor: '#0755b8',
+  },
+  localNetworkTargetChipText: {
+    fontSize: 11,
+    fontWeight: '800',
+    color: '#32415f',
+  },
+  localNetworkTargetChipTextActive: {
+    color: '#ffffff',
+  },
+  localNetworkTargetAddButton: {
+    borderWidth: 1,
+    borderColor: '#1f7a42',
+    backgroundColor: '#eefaf2',
+    borderRadius: 999,
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+  },
+  localNetworkTargetAddText: {
+    fontSize: 11,
+    fontWeight: '900',
+    color: '#1f7a42',
+  },
+  localNetworkTestBox: {
+    borderWidth: 1,
+    borderRadius: 10,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    marginTop: 8,
+    gap: 4,
+  },
+  localNetworkTestBoxOk: {
+    borderColor: '#8bd2a5',
+    backgroundColor: '#f0fff5',
+  },
+  localNetworkTestBoxError: {
+    borderColor: '#e0b35d',
+    backgroundColor: '#fff7e7',
+  },
+  localNetworkTestTitle: {
+    fontSize: 12,
+    fontWeight: '900',
+    color: '#1d3557',
+  },
+  localNetworkTestText: {
+    fontSize: 11,
+    color: '#394252',
+    lineHeight: 16,
+  },
+  localNetworkFormColumn: {
+    flexGrow: 1,
+    flexBasis: 260,
+    gap: 5,
+  },
+  localNetworkFormColumnWide: {
+    flexGrow: 1,
+    flexBasis: 520,
+    gap: 5,
   },
   printerToolActions: {
     flexDirection: 'row',
@@ -20575,6 +23272,9 @@ const styles = StyleSheet.create({
     fontSize: 11,
     fontWeight: '700',
     color: '#8a6b00',
+  },
+  receivableOverdueText: {
+    color: '#c53333',
   },
   receivablePayButton: {
     borderWidth: 1,
@@ -20729,6 +23429,118 @@ const styles = StyleSheet.create({
     fontWeight: '900',
     fontSize: 11,
   },
+  reportWorkspace: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 12,
+  },
+  reportAddonPanel: {
+    width: 260,
+    maxHeight: 720,
+    borderWidth: 1,
+    borderColor: '#d2dbe9',
+    backgroundColor: '#ffffff',
+    borderRadius: 8,
+    padding: 8,
+  },
+  reportAddonList: {
+    gap: 4,
+  },
+  reportAddonItem: {
+    minHeight: 42,
+    borderRadius: 7,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  reportAddonItemActive: {
+    backgroundColor: '#e93572',
+  },
+  reportAddonIcon: {
+    width: 28,
+    height: 28,
+    borderWidth: 1,
+    borderColor: '#cfd8e6',
+    borderRadius: 6,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#f8fbff',
+  },
+  reportAddonIconActive: {
+    borderColor: 'rgba(255,255,255,0.78)',
+    backgroundColor: 'rgba(255,255,255,0.16)',
+  },
+  reportAddonIconImage: {
+    width: 18,
+    height: 18,
+    tintColor: '#435674',
+  },
+  reportAddonIconImageActive: {
+    tintColor: '#ffffff',
+  },
+  reportAddonIconText: {
+    color: '#435674',
+    fontSize: 9,
+    fontWeight: '900',
+  },
+  reportAddonIconTextActive: {
+    color: '#ffffff',
+  },
+  reportAddonLabel: {
+    flex: 1,
+    color: '#24364f',
+    fontSize: 13,
+    fontWeight: '700',
+  },
+  reportAddonLabelActive: {
+    color: '#ffffff',
+    fontWeight: '900',
+  },
+  reportMainContent: {
+    flex: 1,
+    minWidth: 0,
+    gap: 12,
+  },
+  reportAddonHeader: {
+    borderWidth: 1,
+    borderColor: '#d4dcea',
+    backgroundColor: '#ffffff',
+    borderRadius: 12,
+    padding: 12,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 10,
+  },
+  reportAddonHeaderTitle: {
+    color: '#173c87',
+    fontSize: 15,
+    fontWeight: '900',
+  },
+  reportAddonHeaderText: {
+    marginTop: 3,
+    color: '#667897',
+    fontSize: 11,
+    lineHeight: 16,
+    fontWeight: '700',
+  },
+  reportAddonHeaderBadge: {
+    minWidth: 38,
+    height: 34,
+    borderRadius: 8,
+    backgroundColor: '#eff6ff',
+    borderWidth: 1,
+    borderColor: '#bfd5ff',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  reportAddonHeaderBadgeText: {
+    color: '#0755b8',
+    fontSize: 11,
+    fontWeight: '900',
+  },
   reportToolbar: {
     borderWidth: 1,
     borderColor: '#d4dcea',
@@ -20820,10 +23632,130 @@ const styles = StyleSheet.create({
     paddingVertical: 5,
     overflow: 'hidden',
   },
+  reportReceivableBadge: {
+    borderColor: '#fed7aa',
+    backgroundColor: '#fff7ed',
+    color: '#b45309',
+  },
   reportDateInput: {
     minWidth: 160,
     marginBottom: 0,
     flexGrow: 0,
+  },
+  reportDatePickerButton: {
+    justifyContent: 'center',
+    minHeight: 44,
+    paddingVertical: 7,
+  },
+  reportDatePickerText: {
+    color: '#13294b',
+    fontSize: 12,
+    fontWeight: '900',
+    textTransform: 'capitalize',
+  },
+  reportDatePickerMeta: {
+    marginTop: 2,
+    color: '#667897',
+    fontSize: 10,
+    fontWeight: '800',
+  },
+  reportCalendarModalCard: {
+    width: '100%',
+    maxWidth: 430,
+    borderWidth: 1,
+    borderColor: '#c8d8f2',
+    backgroundColor: '#ffffff',
+    borderRadius: 16,
+    padding: 14,
+  },
+  reportCalendarTitle: {
+    color: '#11469f',
+    fontSize: 15,
+    fontWeight: '900',
+    marginBottom: 7,
+  },
+  reportCalendarSelectedText: {
+    color: '#435674',
+    fontSize: 11,
+    fontWeight: '800',
+    marginBottom: 10,
+  },
+  reportCalendarNavRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 10,
+  },
+  reportCalendarNavButton: {
+    borderWidth: 1,
+    borderColor: '#b9c8e1',
+    backgroundColor: '#f5f9ff',
+    borderRadius: 8,
+    width: 36,
+    height: 32,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  reportCalendarNavButtonText: {
+    color: '#174a8c',
+    fontSize: 16,
+    fontWeight: '900',
+  },
+  reportCalendarMonthLabel: {
+    color: '#13294b',
+    fontSize: 13,
+    fontWeight: '900',
+    textTransform: 'capitalize',
+  },
+  reportCalendarDayHeaderRow: {
+    flexDirection: 'row',
+    marginBottom: 5,
+  },
+  reportCalendarDayHeaderText: {
+    flex: 1,
+    textAlign: 'center',
+    color: '#5c6b83',
+    fontSize: 10,
+    fontWeight: '900',
+  },
+  reportCalendarGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    borderWidth: 1,
+    borderColor: '#dce5f4',
+    borderRadius: 10,
+    overflow: 'hidden',
+  },
+  reportCalendarDayCell: {
+    width: `${100 / 7}%`,
+    minHeight: 38,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#ffffff',
+    borderRightWidth: 1,
+    borderBottomWidth: 1,
+    borderColor: '#edf1f7',
+  },
+  reportCalendarDayCellMuted: {
+    backgroundColor: '#f6f8fc',
+  },
+  reportCalendarDayCellSelected: {
+    backgroundColor: '#0755b8',
+  },
+  reportCalendarDayCellText: {
+    color: '#1f2d46',
+    fontSize: 12,
+    fontWeight: '800',
+  },
+  reportCalendarDayCellTextMuted: {
+    color: '#9aa5b5',
+  },
+  reportCalendarDayCellTextSelected: {
+    color: '#ffffff',
+  },
+  reportCalendarCloseButton: {
+    marginTop: 12,
+    alignSelf: 'stretch',
   },
   reportSummaryGrid: {
     flexDirection: 'row',
@@ -21131,6 +24063,13 @@ const styles = StyleSheet.create({
     fontSize: 10,
     fontWeight: '800',
   },
+  draftStockEmptyBadge: {
+    backgroundColor: '#fef3f2',
+    borderColor: '#b42318',
+  },
+  draftStockEmptyBadgeText: {
+    color: '#b42318',
+  },
   draftExpiryMeta: {
     marginTop: 3,
     fontSize: 10,
@@ -21350,8 +24289,16 @@ const styles = StyleSheet.create({
   },
   processOrderCard: {
     maxWidth: 760,
-    maxHeight: '86%',
+    maxHeight: '90%',
     alignItems: 'stretch',
+  },
+  processOrderDetailScroll: {
+    width: '100%',
+    flexShrink: 1,
+  },
+  processOrderDetailScrollContent: {
+    width: '100%',
+    paddingBottom: 4,
   },
   processOrderPaymentCard: {
     maxWidth: 620,
@@ -21367,7 +24314,16 @@ const styles = StyleSheet.create({
   },
   manualApprovalCard: {
     maxWidth: 620,
+    maxHeight: '92%',
     alignItems: 'stretch',
+  },
+  manualApprovalScroll: {
+    width: '100%',
+    flexShrink: 1,
+    marginTop: 6,
+  },
+  manualApprovalScrollContent: {
+    paddingBottom: 8,
   },
   pickupCard: {
     maxWidth: 520,
@@ -21447,6 +24403,41 @@ const styles = StyleSheet.create({
   invoiceDetailListContent: {
     paddingVertical: 8,
     gap: 4,
+  },
+  invoiceAuditBox: {
+    width: '100%',
+    marginTop: 8,
+    padding: 9,
+    borderWidth: 1,
+    borderColor: '#d7e2f3',
+    backgroundColor: '#f8fbff',
+    borderRadius: 10,
+    gap: 3,
+  },
+  invoiceAuditTitle: {
+    fontSize: 12,
+    fontWeight: '900',
+    color: '#123d82',
+    marginBottom: 2,
+  },
+  invoiceActivityRow: {
+    paddingVertical: 4,
+    borderTopWidth: 1,
+    borderTopColor: '#e5ecf8',
+  },
+  invoiceActivityTime: {
+    fontSize: 10,
+    fontWeight: '800',
+    color: '#667085',
+  },
+  invoiceActivityText: {
+    fontSize: 11,
+    fontWeight: '800',
+    color: '#1f2937',
+  },
+  invoiceActivityNote: {
+    fontSize: 11,
+    color: '#475467',
   },
   invoiceItemCard: {
     borderWidth: 1,
@@ -21732,6 +24723,20 @@ const styles = StyleSheet.create({
     width: '100%',
     alignSelf: 'stretch',
   },
+  orderPreviewModalTitle: {
+    color: '#123d82',
+    fontSize: 14,
+    fontWeight: '900',
+    textAlign: 'center',
+  },
+  orderPreviewModalSubtitle: {
+    color: '#7a3d18',
+    fontSize: 11,
+    fontWeight: '800',
+    marginTop: 3,
+    marginBottom: 8,
+    textAlign: 'center',
+  },
   previewListContent: {
     flexGrow: 1,
     alignItems: 'center',
@@ -21749,6 +24754,29 @@ const styles = StyleSheet.create({
     paddingVertical: 12,
     alignItems: 'center',
     alignSelf: 'center',
+    position: 'relative',
+    overflow: 'hidden',
+    userSelect: 'none',
+  },
+  internalPreviewWatermarkLayer: {
+    position: 'absolute',
+    top: 0,
+    right: 0,
+    bottom: 0,
+    left: 0,
+    zIndex: 5,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 10,
+  },
+  internalPreviewWatermarkText: {
+    color: 'rgba(180, 20, 20, 0.28)',
+    fontSize: 30,
+    fontWeight: '900',
+    lineHeight: 36,
+    textAlign: 'center',
+    textTransform: 'uppercase',
+    transform: [{ rotate: '-18deg' }],
   },
   receiptPreviewLogo: {
     width: 160,
@@ -21761,6 +24789,7 @@ const styles = StyleSheet.create({
     fontSize: 11,
     lineHeight: 16,
     fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
+    userSelect: 'none',
   },
   previewItemCard: {
     borderWidth: 1,
@@ -21847,8 +24876,33 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
     paddingVertical: 10,
     borderWidth: 1,
+    borderColor: '#cdddf7',
+    backgroundColor: '#f4f8ff',
     borderRadius: 12,
     gap: 6,
+  },
+  processOrderNestedSection: {
+    marginTop: 7,
+    gap: 6,
+  },
+  processOrderReferenceBox: {
+    marginTop: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 9,
+    borderWidth: 1,
+    borderColor: '#b9d3ff',
+    backgroundColor: '#ffffff',
+    borderRadius: 10,
+    gap: 6,
+  },
+  processOrderReferenceMeta: {
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    borderWidth: 1,
+    borderColor: '#d8e4f5',
+    backgroundColor: '#f7faff',
+    borderRadius: 8,
+    gap: 4,
   },
   processOrderSelectionCardReady: {
     borderColor: '#cdddf7',
@@ -21904,6 +24958,12 @@ const styles = StyleSheet.create({
     lineHeight: 17,
     color: '#35507a',
   },
+  processOrderWarningHint: {
+    borderColor: '#f1b7b7',
+    backgroundColor: '#fff1f1',
+    color: '#c62828',
+    fontWeight: '900',
+  },
   popupTitle: {
     fontSize: 14,
     fontWeight: '800',
@@ -21940,7 +25000,7 @@ const styles = StyleSheet.create({
   },
   processOrderActionsCompact: {
     width: '100%',
-    flexWrap: 'nowrap',
+    flexWrap: 'wrap',
     justifyContent: 'flex-end',
     alignItems: 'stretch',
     gap: 8,
@@ -21954,7 +25014,9 @@ const styles = StyleSheet.create({
     paddingHorizontal: 8,
   },
   processOrderActionButtonCompact: {
-    minWidth: 180,
+    minWidth: 132,
+    flexGrow: 1,
+    flexBasis: 132,
     alignItems: 'center',
     justifyContent: 'center',
     paddingHorizontal: 10,

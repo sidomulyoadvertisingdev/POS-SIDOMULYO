@@ -26,6 +26,18 @@ const toNumber = (value) => {
   return Number.isFinite(parsed) ? parsed : 0;
 };
 
+const parseJsonObject = (value) => {
+  if (!value) return null;
+  if (typeof value === 'object' && !Array.isArray(value)) return value;
+  if (typeof value !== 'string') return null;
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
+  } catch (_error) {
+    return null;
+  }
+};
+
 const resolveProofingStatusKey = (value) => {
   const key = String(value || '').trim().toLowerCase();
   if (!key) return '';
@@ -49,9 +61,9 @@ const toStatusLabel = (value) => {
 
 const toFlowLabel = (value) => {
   const key = String(value || '').trim().toLowerCase();
-  if (key === 'proofing_first') return 'Proofing dulu';
-  if (key === 'pay_first') return 'Bayar dulu';
-  if (key === 'none') return 'Tanpa proofing';
+  if (key === 'proofing_first') return 'Proofing';
+  if (key === 'pay_first') return 'Proofing';
+  if (key === 'none') return 'Tanpa Proofing';
   return toText(key.replace(/_/g, ' '), '-');
 };
 
@@ -131,6 +143,80 @@ const resolveUploadedProofingFile = (row) => (
   || normalizeProofingFile(row, 'final')
 );
 
+const resolveBuyerOriginalFile = (row) => {
+  const snapshot = parseJsonObject(row?.item?.spec_snapshot) || parseJsonObject(row?.spec_snapshot) || {};
+  const draftForm = parseJsonObject(snapshot?.draft_form) || {};
+  const cartRestore = parseJsonObject(snapshot?.cart_restore) || {};
+  const originalFile = row?.original_file && typeof row.original_file === 'object'
+    ? row.original_file
+    : row?.buyer_file && typeof row.buyer_file === 'object'
+      ? row.buyer_file
+      : row?.customer_file && typeof row.customer_file === 'object'
+        ? row.customer_file
+        : row?.customer_reference_file && typeof row.customer_reference_file === 'object'
+          ? row.customer_reference_file
+          : row?.item?.customer_reference_file && typeof row.item.customer_reference_file === 'object'
+            ? row.item.customer_reference_file
+            : snapshot?.customer_reference_file && typeof snapshot.customer_reference_file === 'object'
+              ? snapshot.customer_reference_file
+              : draftForm?.customer_reference_file && typeof draftForm.customer_reference_file === 'object'
+                ? draftForm.customer_reference_file
+                : cartRestore?.customer_reference_file && typeof cartRestore.customer_reference_file === 'object'
+                  ? cartRestore.customer_reference_file
+                  : null;
+  const url = String(
+    originalFile?.url
+    || originalFile?.open_url
+    || originalFile?.path
+    || originalFile?.relative_path
+    || row?.original_url
+    || row?.buyer_file_url
+    || row?.customer_file_url
+    || row?.customer_reference_file_url
+    || row?.source_file_url
+    || row?.artwork_url
+    || row?.item?.original_url
+    || row?.item?.buyer_file_url
+    || row?.item?.customer_file_url
+    || row?.item?.customer_reference_file_url
+    || snapshot?.original_file_url
+    || snapshot?.customer_file_url
+    || snapshot?.buyer_file_url
+    || draftForm?.original_file_url
+    || draftForm?.customer_file_url
+    || cartRestore?.original_file_url
+    || cartRestore?.customer_file_url
+    || ''
+  ).trim();
+  if (!url) {
+    return null;
+  }
+  return {
+    source: 'original',
+    url,
+    label: 'File Asli Pembeli',
+    originalName: String(
+      originalFile?.original_name
+      || originalFile?.file_name
+      || row?.original_name
+      || row?.buyer_file_name
+      || row?.customer_file_name
+      || row?.customer_reference_file_name
+      || row?.item?.original_name
+      || row?.item?.customer_file_name
+      || row?.item?.customer_reference_file_name
+      || snapshot?.original_file_name
+      || snapshot?.customer_file_name
+      || draftForm?.original_file_name
+      || draftForm?.customer_file_name
+      || cartRestore?.original_file_name
+      || cartRestore?.customer_file_name
+      || ''
+    ).trim(),
+    mimeType: String(originalFile?.mime_type || row?.original_mime_type || row?.customer_file_mime_type || '').trim(),
+  };
+};
+
 const isImageProofingFile = (file) => {
   const mimeType = String(file?.mimeType || '').trim().toLowerCase();
   if (mimeType.startsWith('image/')) {
@@ -183,6 +269,40 @@ const paymentBadgeStyle = (value) => {
   return styles.paymentWarn;
 };
 
+const resolveRevisionSummary = (row) => (
+  row?.revision_summary && typeof row.revision_summary === 'object'
+    ? row.revision_summary
+    : {}
+);
+
+const sanitizePathSegment = (value, fallback = 'lainnya') => {
+  const text = String(value || '').trim()
+    .replace(/[\\/:*?"<>|]+/g, '-')
+    .replace(/\s+/g, ' ');
+  return text || fallback;
+};
+
+const buildDefaultLayoutFilePath = (row) => {
+  const material = sanitizePathSegment(
+    row?.item?.material_text
+    || row?.item?.material
+    || row?.item?.name
+    || 'bahan-lain',
+  );
+  const priority = sanitizePathSegment(
+    row?.item?.express_label
+    || row?.item?.production_priority
+    || row?.order?.production_priority
+    || 'regular',
+  );
+  const invoiceNo = sanitizePathSegment(
+    row?.order?.invoice?.invoice_no
+    || row?.proofing_code
+    || `proofing-${row?.id || 'baru'}`,
+  );
+  return `D:\\file siap layout\\${material}\\${priority}\\${invoiceNo}`;
+};
+
 const DetailRow = ({ label, value, strong }) => (
   <View style={styles.detailRow}>
     <Text style={styles.detailLabel}>{label}</Text>
@@ -219,16 +339,21 @@ const ProofingPanel = ({
   onUploadPreview,
   onUploadFinal,
   onOpenPublicLink,
+  onOpenCustomerWhatsapp,
   onOpenPreviewFile,
   onViewHistory,
   onSendWhatsapp,
   onReleaseToProduction,
+  onUploadLocalProductionFile,
+  onReturnToCashier,
+  onReturnToCashierReminder,
   onPrintBillingNote,
   onShareBillingNote,
   processingProofingId,
 }) => {
   const [selectedProofingId, setSelectedProofingId] = useState(null);
   const [previewZoom, setPreviewZoom] = useState(1);
+  const [layoutFilePathById, setLayoutFilePathById] = useState({});
   const items = Array.isArray(rows) ? rows : [];
   const selectedRow = items.find((row) => Number(row?.id || 0) === Number(selectedProofingId || 0))
     || items[0]
@@ -237,13 +362,22 @@ const ProofingPanel = ({
   const selectedProofingIdNumber = Number(selectedRow?.id || 0);
   const selectedBusy = Number(processingProofingId || 0) === selectedProofingIdNumber;
   const selectedStatus = resolveProofingStatusKey(selectedRow?.status);
-  const canSendSelectedToDesign = Boolean(
-    selectedRow
-    && ['draft', 'revision'].includes(selectedStatus)
-    && !selectedReleaseState.releasedToProduction
+  const selectedRevisionSummary = resolveRevisionSummary(selectedRow);
+  const selectedRevisionHistory = Array.isArray(selectedRow?.revision_history) ? selectedRow.revision_history : [];
+  const selectedRevisionLabel = toText(
+    selectedRevisionSummary?.status_label,
+    selectedStatus === 'revision'
+      ? 'Ditolak Pembeli / Revisi Customer'
+      : selectedStatus === 'sent'
+        ? 'Waiting Respon Customer'
+        : toStatusLabel(selectedStatus),
   );
+  const selectedRevisionCount = Math.max(Number(selectedRevisionSummary?.revision_count || 0) || 0, 0);
+  const selectedCurrentRound = Math.max(Number(selectedRevisionSummary?.current_round || 1) || 1, 1);
   const uploadedFile = resolveUploadedProofingFile(selectedRow);
+  const buyerOriginalFile = resolveBuyerOriginalFile(selectedRow);
   const previewUrl = String(uploadedFile?.url || '').trim();
+  const buyerOriginalUrl = String(buyerOriginalFile?.url || '').trim();
   const previewIsImage = isImageProofingFile(uploadedFile);
   const canZoomPreview = Boolean(previewUrl && previewIsImage);
   const zoomPercent = Math.round(previewZoom * 100);
@@ -253,6 +387,19 @@ const ProofingPanel = ({
     ? selectedRow.latest_log
     : null;
   const paymentLabel = toText(selectedReleaseState.paymentStatusLabel, selectedRow?.payment_gate?.label || '-');
+  const layoutFilePath = selectedRow
+    ? toText(layoutFilePathById[selectedProofingIdNumber], buildDefaultLayoutFilePath(selectedRow))
+    : '';
+  const showPostApprovalActions = selectedStatus === 'approved';
+  const canSendProduction = showPostApprovalActions
+    && selectedReleaseState.paymentReady
+    && !selectedReleaseState.releasedToProduction;
+  const shouldReturnCashierWithReminder = showPostApprovalActions
+    && !selectedReleaseState.paymentReady
+    && selectedReleaseState.paymentReceivable;
+  const shouldReturnCashier = showPostApprovalActions
+    && !selectedReleaseState.paymentReady
+    && !selectedReleaseState.paymentReceivable;
   const lastUpdated = items
     .map((row) => row?.updated_at)
     .filter(Boolean)
@@ -468,6 +615,19 @@ const ProofingPanel = ({
           <DetailRow label="Dikirim" value={formatDateTime(selectedRow?.whatsapp_sent_at)} />
           <DetailRow label="Flow" value={toFlowLabel(selectedRow?.item?.proofing_flow)} />
           <DetailRow label="Catatan Customer" value={selectedRow?.revision_note_from_customer || selectedRow?.notes_from_designer} />
+          {selectedRevisionHistory.length > 0 ? (
+            <View style={styles.revisionHistoryBox}>
+              <Text style={styles.revisionHistoryTitle}>Riwayat Revisi Customer</Text>
+              {selectedRevisionHistory.map((revision) => (
+                <View key={`revision-${revision?.log_id || revision?.revision_no}`} style={styles.revisionHistoryRow}>
+                  <Text style={styles.revisionHistoryMeta}>
+                    Revisi {Number(revision?.revision_no || 0) || '-'} | {formatDateTime(revision?.created_at)}
+                  </Text>
+                  <Text style={styles.revisionHistoryNote}>{toText(revision?.note, 'Tidak ada catatan.')}</Text>
+                </View>
+              ))}
+            </View>
+          ) : null}
         </View>
 
         <View style={[styles.panelCard, styles.previewCard]}>
@@ -536,54 +696,128 @@ const ProofingPanel = ({
           <Text style={styles.sectionTitle}>Aksi Proofing</Text>
           <View style={styles.actionGrid}>
             <ActionButton
-              label="Kirim Design/Kasir"
-              variant="blue"
-              disabled={!canSendSelectedToDesign || selectedBusy}
-              onPress={() => onSendToDesign?.(selectedRow)}
+              label="Download File Asli Pembeli"
+              variant="ghost"
+              disabled={!selectedRow || selectedBusy || !buyerOriginalUrl}
+              onPress={() => onOpenPreviewFile?.(selectedRow, 'original')}
             />
             <ActionButton
-              label="Upload / Buat Proofing"
+              label="Upload Gambar Proofing"
               variant="blue"
               disabled={!selectedRow || selectedBusy}
               onPress={() => onUploadPreview?.(selectedRow)}
             />
             <ActionButton
-              label="Kirim Proofing WA"
+              label="Kirim Gambar Proofing WA"
               variant="green"
               disabled={!selectedRow || selectedBusy || !String(selectedRow?.preview_url || '').trim()}
               onPress={() => onSendWhatsapp?.(selectedRow)}
             />
+          </View>
+          <Text style={styles.sectionTitle}>Status Customer</Text>
+          <View style={styles.actionGrid}>
             <ActionButton
-              label="Upload File Final"
-              variant="green"
-              disabled={!selectedRow || selectedBusy}
-              onPress={() => onUploadFinal?.(selectedRow)}
+              label={selectedRevisionLabel}
+              variant="ghost"
+              disabled
             />
+            {selectedStatus === 'revision' ? (
+              <ActionButton
+                label="Masuk WA Pembeli"
+                variant="green"
+                disabled={!selectedRow || selectedBusy}
+                onPress={() => onOpenCustomerWhatsapp?.(selectedRow)}
+              />
+            ) : null}
             <ActionButton
-              label="Masih Ada Revisi"
+              label={selectedStatus === 'revision'
+                ? `Upload Revisi ${Math.max(1, selectedRevisionCount + 1)}`
+                : `Upload Revisi ${selectedCurrentRound}`}
               variant="orange"
-              disabled={!selectedRow || selectedBusy || !String(selectedRow?.proofing_url || '').trim()}
-              onPress={() => onOpenPublicLink?.(selectedRow)}
-            />
-            <ActionButton
-              label="Masuk Produksi"
-              variant="purple"
-              disabled={!selectedRow || selectedBusy || selectedReleaseState.releasedToProduction}
-              onPress={() => onReleaseToProduction?.(selectedRow)}
-            />
-            <ActionButton
-              label="Print Tagihan"
-              variant="ghost"
-              disabled={!selectedRow || selectedBusy}
-              onPress={() => onPrintBillingNote?.(selectedRow)}
-            />
-            <ActionButton
-              label="Share Tagihan"
-              variant="ghost"
-              disabled={!selectedRow || selectedBusy}
-              onPress={() => onShareBillingNote?.(selectedRow)}
+              disabled={!selectedRow || selectedBusy || selectedStatus !== 'revision'}
+              onPress={() => onUploadPreview?.(selectedRow)}
             />
           </View>
+          {selectedStatus === 'revision' && String(selectedRevisionSummary?.latest_revision_note || '').trim() ? (
+            <Text style={styles.revisionNoteText}>
+              Catatan revisi {Math.max(1, selectedRevisionCount)}: {String(selectedRevisionSummary.latest_revision_note).trim()}
+            </Text>
+          ) : null}
+          {selectedStatus === 'sent' ? (
+            <Text style={styles.gateHint}>
+              {selectedRevisionCount > 0
+                ? `Menunggu respon pembeli untuk revisi ${selectedCurrentRound}. Jika sudah lebih dari 1 jam, gunakan daftar push ulang untuk reminder WhatsApp.`
+                : 'Menunggu respon pembeli. Jika sudah lebih dari 1 jam, gunakan daftar push ulang untuk mengirim reminder WhatsApp.'}
+            </Text>
+          ) : null}
+          {showPostApprovalActions ? (
+            <View style={styles.postApprovalBox}>
+              <Text style={styles.sectionTitle}>Setelah Customer Approve</Text>
+              <Text style={styles.postApprovalHint}>
+                Status pembayaran: {paymentLabel}. Produksi hanya bisa dikirim saat invoice sudah lunas.
+              </Text>
+              {canSendProduction ? (
+                <>
+                  <Text style={styles.layoutPathLabel}>Link / path file asli siap layout</Text>
+                  <TextInput
+                    value={layoutFilePath}
+                    onChangeText={(text) => setLayoutFilePathById((prev) => ({
+                      ...prev,
+                      [selectedProofingIdNumber]: text,
+                    }))}
+                    placeholder="D:\\file siap layout\\bahan\\kategori\\nama-file.cdr"
+                    placeholderTextColor="#8a9ab3"
+                    style={styles.layoutPathInput}
+                  />
+                  <ActionButton
+                    label="Pilih / Upload File Produksi Lokal"
+                    variant="blue"
+                    disabled={!selectedRow || selectedBusy}
+                    onPress={async () => {
+                      const metadata = await onUploadLocalProductionFile?.(selectedRow);
+                      const nextPath = String(metadata?.layout_file_path || metadata?.design_open_url || metadata?.design_relative_path || '').trim();
+                      if (nextPath) {
+                        setLayoutFilePathById((prev) => ({
+                          ...prev,
+                          [selectedProofingIdNumber]: nextPath,
+                          [`${selectedProofingIdNumber}:meta`]: metadata,
+                        }));
+                      }
+                    }}
+                  />
+                  <ActionButton
+                    label="Kirim Produksi"
+                    variant="purple"
+                    disabled={!selectedRow || selectedBusy || !String(layoutFilePath || '').trim()}
+                    onPress={() => onReleaseToProduction?.(selectedRow, {
+                      layout_file_path: layoutFilePath,
+                      layout_file_category: 'file siap layout',
+                      ...(layoutFilePathById[`${selectedProofingIdNumber}:meta`] || {}),
+                    })}
+                  />
+                </>
+              ) : null}
+              {shouldReturnCashier ? (
+                <ActionButton
+                  label="Kirim Kembali ke Kasir"
+                  variant="orange"
+                  disabled={!selectedRow || selectedBusy}
+                  onPress={() => onReturnToCashier?.(selectedRow)}
+                />
+              ) : null}
+              {shouldReturnCashierWithReminder ? (
+                <ActionButton
+                  label="Kirim Kembali ke Kasir + Reminder Kepala Ops/Kepala Toko"
+                  variant="orange"
+                  disabled={!selectedRow || selectedBusy}
+                  onPress={() => onReturnToCashierReminder?.(selectedRow)}
+                />
+              ) : null}
+              {selectedReleaseState.releasedToProduction ? (
+                <Text style={styles.postApprovalHint}>{selectedReleaseState.releasedLabel}</Text>
+              ) : null}
+            </View>
+          ) : null}
           {!selectedReleaseState.precheckReady && !selectedReleaseState.releasedToProduction ? (
             <Text style={styles.gateHint}>{toText(selectedReleaseState.blockingHint, 'Backend gate akan memutuskan apakah item boleh masuk produksi.')}</Text>
           ) : null}
@@ -626,43 +860,6 @@ const ProofingPanel = ({
             <Text style={styles.connectorLine}>-- linked --</Text>
             <Text style={styles.connectorNode}>POS</Text>
           </View>
-        </View>
-
-        <View style={[styles.panelCard, styles.whatsappCard]}>
-          <Text style={styles.panelTitle}>Contoh Tampilan WhatsApp Untuk Customer</Text>
-          <View style={styles.whatsappBubble}>
-            <Text style={styles.whatsappText}>
-              Halo {toText(selectedRow?.customer?.name || selectedRow?.order?.customer?.name, 'Customer')},
-            </Text>
-            <Text style={styles.whatsappText}>
-              Berikut adalah proofing desain {toText(selectedRow?.item?.name, 'pesanan')} ({sizeLabel(selectedRow)}).
-            </Text>
-            <Text style={styles.whatsappLink}>{toText(selectedRow?.proofing_url, 'https://sidomulyo/proofing')}</Text>
-            <Text style={styles.whatsappTime}>{formatDateTime(selectedRow?.whatsapp_sent_at, '14:20')}</Text>
-          </View>
-          <View style={styles.whatsappActions}>
-            <ActionButton label="Setuju & Lanjut Produksi" variant="green" disabled />
-            <ActionButton label="Masih Ada Revisi" variant="orange" disabled />
-          </View>
-        </View>
-      </View>
-
-      <View style={styles.bottomGrid}>
-        <View style={styles.infoBox}>
-          <Text style={styles.infoBoxTitle}>CHANNEL / FRONTEND</Text>
-          <Text style={styles.infoBoxText}>Web App | Mobile | WhatsApp Link | Kasir POS</Text>
-        </View>
-        <View style={styles.infoBox}>
-          <Text style={styles.infoBoxTitle}>BACKEND RULE</Text>
-          <Text style={styles.infoBoxText}>Proofing, approval, invoice, payment, file final, dan gate produksi diputuskan backend.</Text>
-        </View>
-        <View style={styles.infoBox}>
-          <Text style={styles.infoBoxTitle}>DATABASE / LOG</Text>
-          <Text style={styles.infoBoxText}>order, item, proofing, design_task, invoice, payment, log_activity.</Text>
-        </View>
-        <View style={styles.infoBox}>
-          <Text style={styles.infoBoxTitle}>INTEGRATION</Text>
-          <Text style={styles.infoBoxText}>WhatsApp -> POS / Kasir -> Produksi</Text>
         </View>
       </View>
     </View>
@@ -713,11 +910,6 @@ const styles = StyleSheet.create({
     flexWrap: 'wrap',
     gap: 10,
   },
-  bottomGrid: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 10,
-  },
   panelCard: {
     borderWidth: 1,
     borderColor: '#d4dcea',
@@ -748,11 +940,6 @@ const styles = StyleSheet.create({
     flexGrow: 1,
     flexShrink: 1,
     flexBasis: 330,
-  },
-  whatsappCard: {
-    flexGrow: 2,
-    flexShrink: 1,
-    flexBasis: 460,
   },
   panelHeader: {
     flexDirection: 'row',
@@ -1229,6 +1416,76 @@ const styles = StyleSheet.create({
     lineHeight: 16,
     fontWeight: '800',
   },
+  postApprovalBox: {
+    marginTop: 10,
+    borderWidth: 1,
+    borderColor: '#bfdbfe',
+    backgroundColor: '#eff6ff',
+    borderRadius: 10,
+    padding: 9,
+    gap: 8,
+  },
+  postApprovalHint: {
+    color: '#1e3a8a',
+    fontSize: 11,
+    lineHeight: 16,
+    fontWeight: '800',
+  },
+  layoutPathLabel: {
+    color: '#1f365e',
+    fontSize: 11,
+    fontWeight: '900',
+  },
+  layoutPathInput: {
+    minHeight: 38,
+    borderWidth: 1,
+    borderColor: '#bdd0ec',
+    borderRadius: 8,
+    backgroundColor: '#ffffff',
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    color: '#12243f',
+    fontSize: 11,
+    fontWeight: '800',
+  },
+  revisionNoteText: {
+    marginTop: 8,
+    color: '#9a3412',
+    fontSize: 11,
+    lineHeight: 16,
+    fontWeight: '800',
+  },
+  revisionHistoryBox: {
+    marginTop: 10,
+    borderWidth: 1,
+    borderColor: '#fed7aa',
+    backgroundColor: '#fff7ed',
+    borderRadius: 10,
+    padding: 9,
+    gap: 6,
+  },
+  revisionHistoryTitle: {
+    color: '#9a3412',
+    fontSize: 11,
+    fontWeight: '900',
+  },
+  revisionHistoryRow: {
+    borderTopWidth: 1,
+    borderTopColor: '#fed7aa',
+    paddingTop: 6,
+    gap: 2,
+  },
+  revisionHistoryMeta: {
+    color: '#9a3412',
+    fontSize: 10,
+    fontWeight: '900',
+  },
+  revisionHistoryNote: {
+    color: '#431407',
+    fontSize: 11,
+    lineHeight: 15,
+    fontWeight: '700',
+  },
   timelineRow: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -1277,64 +1534,6 @@ const styles = StyleSheet.create({
     color: '#6980a3',
     fontSize: 10,
     fontWeight: '900',
-  },
-  whatsappBubble: {
-    marginTop: 10,
-    backgroundColor: '#f7faf6',
-    borderWidth: 1,
-    borderColor: '#dfe8dc',
-    borderRadius: 12,
-    padding: 14,
-    minHeight: 95,
-  },
-  whatsappText: {
-    color: '#1f2d3d',
-    fontSize: 12,
-    lineHeight: 17,
-    fontWeight: '700',
-  },
-  whatsappLink: {
-    marginTop: 4,
-    color: SIDOMULYO_BLUE,
-    fontSize: 12,
-    fontWeight: '900',
-  },
-  whatsappTime: {
-    alignSelf: 'flex-end',
-    color: '#8390a3',
-    fontSize: 10,
-    fontWeight: '700',
-  },
-  whatsappActions: {
-    marginTop: 8,
-    flexDirection: 'row',
-    gap: 8,
-  },
-  infoBox: {
-    flexGrow: 1,
-    flexShrink: 1,
-    flexBasis: 250,
-    borderWidth: 1,
-    borderColor: '#d4dcea',
-    borderRadius: 10,
-    backgroundColor: '#ffffff',
-    overflow: 'hidden',
-  },
-  infoBoxTitle: {
-    backgroundColor: SIDOMULYO_BLUE,
-    color: '#ffffff',
-    textAlign: 'center',
-    paddingVertical: 7,
-    fontSize: 11,
-    fontWeight: '900',
-  },
-  infoBoxText: {
-    color: '#293953',
-    padding: 12,
-    fontSize: 11,
-    lineHeight: 16,
-    fontWeight: '700',
-    textAlign: 'center',
   },
 });
 

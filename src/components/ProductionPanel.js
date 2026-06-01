@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import { Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 import { formatRupiah } from '../utils/currency';
 
@@ -45,6 +46,209 @@ const toStatusLabel = (value) => {
   return humanizeStatusLabel(key);
 };
 
+const normalizeTextKey = (value) => String(value || '')
+  .trim()
+  .toLowerCase()
+  .replace(/[^a-z0-9]+/g, ' ')
+  .trim();
+
+const sanitizeCodeSegment = (value, fallback = 'ITEM') => {
+  const text = String(value || '').trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9]+/g, '')
+    .slice(0, 10);
+  return text || fallback;
+};
+
+const parseDateValue = (value) => {
+  if (!value) return null;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date;
+};
+
+const addHours = (date, hours) => {
+  if (!(date instanceof Date) || Number.isNaN(date.getTime())) return null;
+  return new Date(date.getTime() + Number(hours || 0) * 60 * 60 * 1000);
+};
+
+const formatDateTime = (value) => {
+  const date = value instanceof Date ? value : parseDateValue(value);
+  if (!date) return '-';
+  return new Intl.DateTimeFormat('id-ID', {
+    day: '2-digit',
+    month: '2-digit',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  }).format(date);
+};
+
+const toLocalInputDateTime = (date) => {
+  if (!(date instanceof Date) || Number.isNaN(date.getTime())) return '';
+  const pad = (value) => String(value).padStart(2, '0');
+  return [
+    date.getFullYear(),
+    pad(date.getMonth() + 1),
+    pad(date.getDate()),
+  ].join('-') + ` ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+};
+
+const buildDelayPresetValue = (preset) => {
+  const date = new Date();
+  if (preset === 'plus_2h') {
+    date.setHours(date.getHours() + 2);
+  } else if (preset === 'plus_4h') {
+    date.setHours(date.getHours() + 4);
+  } else if (preset === 'tomorrow_morning') {
+    date.setDate(date.getDate() + 1);
+    date.setHours(9, 0, 0, 0);
+  } else if (preset === 'tomorrow_afternoon') {
+    date.setDate(date.getDate() + 1);
+    date.setHours(15, 0, 0, 0);
+  }
+  return toLocalInputDateTime(date);
+};
+
+const normalizeDelayDateInput = (value) => {
+  const text = String(value || '').trim();
+  if (!text) return '';
+  const normalized = text.replace('T', ' ');
+  const match = normalized.match(/^(\d{4})-(\d{2})-(\d{2})\s+(\d{2}):(\d{2})$/);
+  if (!match) return '';
+  const [, year, month, day, hour, minute] = match;
+  const date = new Date(Number(year), Number(month) - 1, Number(day), Number(hour), Number(minute), 0, 0);
+  if (Number.isNaN(date.getTime())) return '';
+  if (
+    date.getFullYear() !== Number(year)
+    || date.getMonth() !== Number(month) - 1
+    || date.getDate() !== Number(day)
+    || date.getHours() !== Number(hour)
+    || date.getMinutes() !== Number(minute)
+  ) {
+    return '';
+  }
+  return toLocalInputDateTime(date);
+};
+
+const resolveMaterialName = (row) => toText(
+  row?.material?.name
+  || row?.material_text
+  || row?.spec_snapshot?.cart_restore?.material_text
+  || row?.spec_snapshot?.specs?.material
+  || row?.product?.name
+  || row?.product_name,
+  'Bahan belum dipilih',
+);
+
+const resolveServiceLabel = (row) => toText(
+  row?.service_label
+  || row?.express_label
+  || row?.order?.express_level
+  || row?.spec_snapshot?.cart_restore?.express_label
+  || row?.spec_snapshot?.express_label
+  || row?.spec_snapshot?.service_label,
+  'Reguler',
+);
+
+const resolveSlaHours = (row) => {
+  const serviceText = normalizeTextKey(resolveServiceLabel(row));
+  const directHour = Number(
+    row?.sla_hours
+    || row?.spec_snapshot?.sla_hours
+    || row?.spec_snapshot?.cart_restore?.sla_hours
+    || 0,
+  );
+  if (directHour > 0) return directHour;
+  const hourMatch = serviceText.match(/(\d+)\s*jam/);
+  if (hourMatch) return Number(hourMatch[1]);
+  if (serviceText.includes('express') || serviceText.includes('expres')) return 2;
+  if (serviceText.includes('24')) return 24;
+  return 24;
+};
+
+const resolveDueAt = (row) => {
+  const explicitDue = parseDateValue(
+    row?.due_at
+    || row?.deadline_at
+    || row?.pickup_due_at
+    || row?.spec_snapshot?.due_at
+    || row?.spec_snapshot?.deadline_at,
+  );
+  if (explicitDue) return explicitDue;
+  return addHours(parseDateValue(row?.order?.created_at || row?.created_at), resolveSlaHours(row));
+};
+
+const resolveLayoutMode = (row) => {
+  const status = resolveProductionStatusKey(row?.production_status);
+  const snapshotMode = normalizeTextKey(
+    row?.layout_status
+    || row?.layout_mode
+    || row?.spec_snapshot?.layout_mode
+    || row?.spec_snapshot?.cart_restore?.layout_mode,
+  );
+  if (snapshotMode.includes('langsung') || snapshotMode.includes('tidak perlu')) {
+    return {
+      key: 'direct_print',
+      label: 'Langsung Cetak',
+      tone: 'green',
+    };
+  }
+  if (snapshotMode.includes('layout')) {
+    return {
+      key: 'layout',
+      label: 'Proses Layout',
+      tone: 'blue',
+    };
+  }
+  if (status === 'waiting_design') {
+    return {
+      key: 'layout',
+      label: 'Proses Layout',
+      tone: 'blue',
+    };
+  }
+  return {
+    key: 'direct_print',
+    label: 'Langsung Cetak',
+    tone: 'green',
+  };
+};
+
+const buildLayoutCode = (row, index) => {
+  if (String(row?.layout_code || '').trim()) {
+    return String(row.layout_code).trim();
+  }
+  const date = parseDateValue(row?.order?.created_at || row?.created_at) || new Date();
+  const dateCode = [
+    date.getFullYear(),
+    String(date.getMonth() + 1).padStart(2, '0'),
+    String(date.getDate()).padStart(2, '0'),
+  ].join('');
+  const materialCode = sanitizeCodeSegment(resolveMaterialName(row));
+  const sequence = String(index + 1).padStart(3, '0');
+  return `LAY-${dateCode}-${materialCode}-${sequence}`;
+};
+
+const buildLayoutRows = (items) => items
+  .map((row, index) => {
+    const dueAt = parseDateValue(row?.layout_due_at) || resolveDueAt(row);
+    return {
+      row,
+      index,
+      dueAt,
+      materialName: resolveMaterialName(row),
+      serviceLabel: resolveServiceLabel(row),
+      layoutMode: resolveLayoutMode(row),
+      code: buildLayoutCode(row, index),
+    };
+  })
+  .sort((left, right) => {
+    const leftTime = left.dueAt?.getTime?.() || Number.MAX_SAFE_INTEGER;
+    const rightTime = right.dueAt?.getTime?.() || Number.MAX_SAFE_INTEGER;
+    if (leftTime !== rightTime) return leftTime - rightTime;
+    return Number(left.row?.id || 0) - Number(right.row?.id || 0);
+  });
+
 const statusBadgeStyle = (status) => {
   const key = resolveProductionStatusKey(status);
   if (key === 'printed') return styles.badgePrinted;
@@ -64,8 +268,13 @@ const ProductionPanel = ({
   onRefresh,
   onUpdateStatus,
   onReleaseToProduction,
+  onUpdateLayoutPlan,
+  onBuildDelayWhatsapp,
   updatingItemId,
 }) => {
+  const [delayItemId, setDelayItemId] = useState(null);
+  const [delayExpectedAt, setDelayExpectedAt] = useState('');
+  const [delayReason, setDelayReason] = useState('');
   const items = Array.isArray(rows) ? rows : [];
   const counts = {
     waiting_design: 0,
@@ -80,6 +289,10 @@ const ProductionPanel = ({
       counts[key] += 1;
     }
   });
+
+  const layoutRows = buildLayoutRows(items)
+    .filter(({ row }) => ['waiting_design', 'waiting_production'].includes(resolveProductionStatusKey(row?.production_status)))
+    .slice(0, 8);
 
   return (
     <View style={styles.panel}>
@@ -127,6 +340,39 @@ const ProductionPanel = ({
         ))}
       </View>
 
+      {layoutRows.length > 0 ? (
+        <View style={styles.layoutBoard}>
+          <View style={styles.layoutBoardHeader}>
+            <View>
+              <Text style={styles.layoutBoardTitle}>Antrian Layout & Siap Cetak</Text>
+              <Text style={styles.layoutBoardHint}>Urut otomatis dari deadline terdekat agar operator tahu mana yang harus didahulukan.</Text>
+            </View>
+          </View>
+          <View style={styles.layoutTableHeader}>
+            <Text style={[styles.layoutColumnText, styles.layoutColumnWide]}>Jenis Order</Text>
+            <Text style={styles.layoutColumnText}>Status</Text>
+            <Text style={styles.layoutColumnText}>Deadline</Text>
+            <Text style={styles.layoutColumnText}>Kode</Text>
+          </View>
+          {layoutRows.map(({ row, materialName, serviceLabel, layoutMode, dueAt, code }, visibleIndex) => {
+            const productName = toText(row?.product?.name || row?.product_name, `Produk #${Number(row?.pos_product_id || 0)}`);
+            return (
+              <View key={`layout-${row?.id || visibleIndex}`} style={styles.layoutTableRow}>
+                <View style={styles.layoutColumnWide}>
+                  <Text style={styles.layoutItemTitle}>{visibleIndex + 1}. {materialName}</Text>
+                  <Text style={styles.layoutItemMeta}>{productName} | {serviceLabel}</Text>
+                </View>
+                <View style={[styles.layoutModeBadge, layoutMode.tone === 'green' ? styles.layoutModeGreen : styles.layoutModeBlue]}>
+                  <Text style={styles.layoutModeText}>{layoutMode.label}</Text>
+                </View>
+                <Text style={styles.layoutCellText}>{formatDateTime(dueAt)}</Text>
+                <Text style={styles.layoutCodeText}>{code}</Text>
+              </View>
+            );
+          })}
+        </View>
+      ) : null}
+
       {items.length === 0 ? (
         <Text style={styles.emptyText}>
           {isLoading ? 'Memuat data produksi...' : 'Belum ada item produksi.'}
@@ -145,53 +391,140 @@ const ProductionPanel = ({
             const canMoveToBatch = status === 'waiting_production';
             const canMoveToPrinted = status === 'in_batch';
             const usesProofing = row?.proofing_required === true || Boolean(row?.proofing);
+            const canPlanLayout = ['waiting_design', 'waiting_production'].includes(status);
 
             return (
               <View key={String(rowId || `prod-${index}`)} style={styles.card}>
-                <View style={styles.infoWrap}>
-                  <Text style={styles.cardTitle}>Item #{rowId} | Order #{orderId} | {invoiceNo}</Text>
-                  <Text style={styles.cardMeta}>Customer: {customerName}</Text>
-                  <Text style={styles.cardMeta}>Produk: {productName}</Text>
-                  <Text style={styles.cardMeta}>Qty: {Number(row?.qty || 0)} | Total: {formatRupiah(itemTotal)}</Text>
-                  <View style={[styles.badge, statusBadgeStyle(status)]}>
-                    <Text style={styles.badgeText}>{toStatusLabel(status)}</Text>
+                <View style={styles.cardMain}>
+                  <View style={styles.infoWrap}>
+                    <Text style={styles.cardTitle}>Item #{rowId} | Order #{orderId} | {invoiceNo}</Text>
+                    <Text style={styles.cardMeta}>Customer: {customerName}</Text>
+                    <Text style={styles.cardMeta}>Produk: {productName}</Text>
+                    <Text style={styles.cardMeta}>Qty: {Number(row?.qty || 0)} | Total: {formatRupiah(itemTotal)}</Text>
+                    <View style={[styles.badge, statusBadgeStyle(status)]}>
+                      <Text style={styles.badgeText}>{toStatusLabel(status)}</Text>
+                    </View>
                   </View>
-                </View>
-                <View style={styles.actionWrap}>
-                  {canMoveToBatch ? (
-                    <Pressable
-                      style={[styles.actionButton, isUpdating ? styles.actionDisabled : null]}
-                      disabled={isUpdating}
-                      onPress={() => onUpdateStatus?.(row, 'in_batch')}
-                    >
-                      <Text style={styles.actionButtonText}>{isUpdating ? 'Memproses...' : 'Masuk Batch'}</Text>
-                    </Pressable>
-                  ) : null}
-                  {canMoveToPrinted ? (
-                    <Pressable
-                      style={[styles.actionButton, isUpdating ? styles.actionDisabled : null]}
-                      disabled={isUpdating}
-                      onPress={() => onUpdateStatus?.(row, 'printed')}
-                    >
-                      <Text style={styles.actionButtonText}>{isUpdating ? 'Memproses...' : 'Tandai Printed'}</Text>
-                    </Pressable>
-                  ) : null}
-                  {status === 'waiting_design' && !usesProofing ? (
-                    <>
+                  <View style={styles.actionWrap}>
+                    {canMoveToBatch ? (
                       <Pressable
                         style={[styles.actionButton, isUpdating ? styles.actionDisabled : null]}
                         disabled={isUpdating}
-                        onPress={() => onReleaseToProduction?.(row)}
+                        onPress={() => onUpdateStatus?.(row, 'in_batch')}
                       >
-                        <Text style={styles.actionButtonText}>{isUpdating ? 'Memproses...' : 'Masuk Produksi'}</Text>
+                        <Text style={styles.actionButtonText}>{isUpdating ? 'Memproses...' : 'Masuk Batch'}</Text>
                       </Pressable>
-                      <Text style={styles.hintText}>Backend akan memeriksa seluruh syarat gate.</Text>
-                    </>
-                  ) : null}
-                  {status === 'waiting_design' && usesProofing ? (
-                    <Text style={styles.hintText}>Release item ini melalui menu Proofing.</Text>
-                  ) : null}
+                    ) : null}
+                    {canMoveToPrinted ? (
+                      <Pressable
+                        style={[styles.actionButton, isUpdating ? styles.actionDisabled : null]}
+                        disabled={isUpdating}
+                        onPress={() => onUpdateStatus?.(row, 'printed')}
+                      >
+                        <Text style={styles.actionButtonText}>{isUpdating ? 'Memproses...' : 'Tandai Printed'}</Text>
+                      </Pressable>
+                    ) : null}
+                    {status === 'waiting_design' && !usesProofing ? (
+                      <>
+                        <Pressable
+                          style={[styles.actionButton, isUpdating ? styles.actionDisabled : null]}
+                          disabled={isUpdating}
+                          onPress={() => onReleaseToProduction?.(row)}
+                        >
+                          <Text style={styles.actionButtonText}>{isUpdating ? 'Memproses...' : 'Masuk Produksi'}</Text>
+                        </Pressable>
+                        <Text style={styles.hintText}>Backend akan memeriksa seluruh syarat gate.</Text>
+                      </>
+                    ) : null}
+                    {status === 'waiting_design' && usesProofing ? (
+                      <Text style={styles.hintText}>Release item ini melalui menu Proofing.</Text>
+                    ) : null}
+                    {canPlanLayout ? (
+                      <>
+                        <Pressable
+                          style={[styles.actionButton, styles.actionSoftButton, isUpdating ? styles.actionDisabled : null]}
+                          disabled={isUpdating}
+                          onPress={() => onUpdateLayoutPlan?.(row, 'proses_layout')}
+                        >
+                          <Text style={styles.actionSoftButtonText}>{isUpdating ? 'Memproses...' : 'Proses Layout'}</Text>
+                        </Pressable>
+                        <Pressable
+                          style={[styles.actionButton, styles.actionSoftGreen, isUpdating ? styles.actionDisabled : null]}
+                          disabled={isUpdating}
+                          onPress={() => onUpdateLayoutPlan?.(row, 'langsung_cetak')}
+                        >
+                          <Text style={styles.actionSoftButtonText}>{isUpdating ? 'Memproses...' : 'Langsung Cetak'}</Text>
+                        </Pressable>
+                        <Pressable
+                          style={[styles.actionButton, styles.actionSoftOrange, isUpdating ? styles.actionDisabled : null]}
+                          disabled={isUpdating}
+                          onPress={() => {
+                            setDelayItemId(delayItemId === rowId ? null : rowId);
+                            setDelayExpectedAt('');
+                            setDelayReason('');
+                          }}
+                        >
+                          <Text style={styles.actionSoftButtonText}>Info Delay WA</Text>
+                        </Pressable>
+                      </>
+                    ) : null}
+                  </View>
                 </View>
+                {delayItemId === rowId ? (
+                  <View style={styles.delayBox}>
+                    <Text style={styles.delayTitle}>Info keterlambatan ke customer</Text>
+                    <TextInput
+                      value={delayExpectedAt}
+                      onChangeText={setDelayExpectedAt}
+                      placeholder="Estimasi baru, contoh: 2026-05-31 21:00"
+                      placeholderTextColor="#8a9ab3"
+                      style={styles.delayInput}
+                    />
+                    <View style={styles.delayPresetRow}>
+                      <Pressable style={styles.delayPresetButton} onPress={() => setDelayExpectedAt(buildDelayPresetValue('plus_2h'))}>
+                        <Text style={styles.delayPresetText}>+2 jam</Text>
+                      </Pressable>
+                      <Pressable style={styles.delayPresetButton} onPress={() => setDelayExpectedAt(buildDelayPresetValue('plus_4h'))}>
+                        <Text style={styles.delayPresetText}>+4 jam</Text>
+                      </Pressable>
+                      <Pressable style={styles.delayPresetButton} onPress={() => setDelayExpectedAt(buildDelayPresetValue('tomorrow_morning'))}>
+                        <Text style={styles.delayPresetText}>Besok pagi</Text>
+                      </Pressable>
+                      <Pressable style={styles.delayPresetButton} onPress={() => setDelayExpectedAt(buildDelayPresetValue('tomorrow_afternoon'))}>
+                        <Text style={styles.delayPresetText}>Besok sore</Text>
+                      </Pressable>
+                    </View>
+                    <TextInput
+                      value={delayReason}
+                      onChangeText={setDelayReason}
+                      placeholder="Alasan singkat, contoh: antrian layout penuh"
+                      placeholderTextColor="#8a9ab3"
+                      style={styles.delayInput}
+                    />
+                    <View style={styles.delayActionRow}>
+                      <Pressable
+                        style={[styles.actionButton, styles.actionSoftButton]}
+                        onPress={() => {
+                          setDelayItemId(null);
+                          setDelayExpectedAt('');
+                          setDelayReason('');
+                        }}
+                      >
+                        <Text style={styles.actionSoftButtonText}>Tutup</Text>
+                      </Pressable>
+                      <Pressable
+                        style={[styles.actionButton, isUpdating || !normalizeDelayDateInput(delayExpectedAt) ? styles.actionDisabled : null]}
+                        disabled={isUpdating || !normalizeDelayDateInput(delayExpectedAt)}
+                        onPress={() => onBuildDelayWhatsapp?.(row, {
+                          expected_at: normalizeDelayDateInput(delayExpectedAt),
+                          reason: delayReason.trim(),
+                        })}
+                      >
+                        <Text style={styles.actionButtonText}>{isUpdating ? 'Memproses...' : 'Buat Link WA'}</Text>
+                      </Pressable>
+                    </View>
+                  </View>
+                ) : null}
               </View>
             );
           })}
@@ -286,6 +619,98 @@ const styles = StyleSheet.create({
     fontSize: 12,
     color: '#505050',
   },
+  layoutBoard: {
+    borderWidth: 1,
+    borderColor: '#d7e2f4',
+    backgroundColor: '#f8fbff',
+    borderRadius: 12,
+    padding: 10,
+    marginBottom: 10,
+    gap: 7,
+  },
+  layoutBoardHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'flex-start',
+    gap: 8,
+  },
+  layoutBoardTitle: {
+    fontSize: 12,
+    fontWeight: '900',
+    color: '#173c87',
+  },
+  layoutBoardHint: {
+    fontSize: 10,
+    color: '#53647d',
+    fontWeight: '700',
+    marginTop: 2,
+  },
+  layoutTableHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    borderBottomWidth: 1,
+    borderBottomColor: '#d7e2f4',
+    paddingBottom: 5,
+    gap: 8,
+  },
+  layoutTableRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    borderBottomWidth: 1,
+    borderBottomColor: '#edf2fb',
+    paddingVertical: 7,
+    gap: 8,
+  },
+  layoutColumnWide: {
+    flex: 1.3,
+  },
+  layoutColumnText: {
+    flex: 1,
+    fontSize: 10,
+    fontWeight: '900',
+    color: '#243957',
+  },
+  layoutItemTitle: {
+    fontSize: 11,
+    fontWeight: '900',
+    color: '#14233d',
+  },
+  layoutItemMeta: {
+    fontSize: 10,
+    color: '#53647d',
+    fontWeight: '700',
+    marginTop: 2,
+  },
+  layoutModeBadge: {
+    flex: 1,
+    borderRadius: 999,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    alignItems: 'center',
+  },
+  layoutModeBlue: {
+    backgroundColor: '#dce7ff',
+  },
+  layoutModeGreen: {
+    backgroundColor: '#daf4df',
+  },
+  layoutModeText: {
+    fontSize: 10,
+    fontWeight: '900',
+    color: '#17324f',
+  },
+  layoutCellText: {
+    flex: 1,
+    fontSize: 10,
+    color: '#243957',
+    fontWeight: '800',
+  },
+  layoutCodeText: {
+    flex: 1,
+    fontSize: 10,
+    color: '#0755b8',
+    fontWeight: '900',
+  },
   listWrap: {
     gap: 8,
   },
@@ -295,6 +720,9 @@ const styles = StyleSheet.create({
     backgroundColor: '#ffffff',
     borderRadius: 12,
     padding: 10,
+    gap: 8,
+  },
+  cardMain: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     gap: 8,
@@ -359,6 +787,23 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     fontSize: 11,
   },
+  actionSoftButton: {
+    borderColor: '#9fb6d8',
+    backgroundColor: '#edf4ff',
+  },
+  actionSoftGreen: {
+    borderColor: '#a5d6ae',
+    backgroundColor: '#eaf8ec',
+  },
+  actionSoftOrange: {
+    borderColor: '#f2c178',
+    backgroundColor: '#fff4df',
+  },
+  actionSoftButtonText: {
+    color: '#17324f',
+    fontWeight: '800',
+    fontSize: 11,
+  },
   actionDisabled: {
     opacity: 0.6,
   },
@@ -366,6 +811,53 @@ const styles = StyleSheet.create({
     fontSize: 10,
     color: '#7a2d2d',
     fontWeight: '700',
+  },
+  delayBox: {
+    borderWidth: 1,
+    borderColor: '#f0d4a5',
+    backgroundColor: '#fffaf0',
+    borderRadius: 10,
+    padding: 9,
+    gap: 7,
+  },
+  delayTitle: {
+    fontSize: 11,
+    color: '#7a4b12',
+    fontWeight: '900',
+  },
+  delayInput: {
+    borderWidth: 1,
+    borderColor: '#e5cfaa',
+    backgroundColor: '#ffffff',
+    borderRadius: 8,
+    color: '#14233d',
+    fontSize: 11,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+  },
+  delayPresetRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 6,
+  },
+  delayPresetButton: {
+    borderWidth: 1,
+    borderColor: '#e7c88d',
+    backgroundColor: '#fff7e8',
+    borderRadius: 999,
+    paddingHorizontal: 9,
+    paddingVertical: 5,
+  },
+  delayPresetText: {
+    fontSize: 10,
+    color: '#754812',
+    fontWeight: '900',
+  },
+  delayActionRow: {
+    flexDirection: 'row',
+    justifyContent: 'flex-end',
+    gap: 8,
+    flexWrap: 'wrap',
   },
 });
 

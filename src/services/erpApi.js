@@ -156,6 +156,14 @@ const DEFAULT_PURCHASE_CATEGORIES = [
     journal_trigger: 'material_purchase',
   },
   {
+    type: 'material',
+    code: 'store_stock_purchase',
+    name: 'Pembelian di Toko Lain',
+    description: 'Beli stok dari toko lain. Stok langsung masuk inventory toko dan tercatat sebagai pembelian POS.',
+    flow: 'store_stock_purchase',
+    journal_trigger: 'material_purchase',
+  },
+  {
     type: 'consumable',
     code: 'consumable',
     name: 'Pembelian Consumable',
@@ -451,6 +459,8 @@ const normalizeExpenseStatusLabel = (value) => {
 
 const normalizePembelianBahanStatusLabel = (value) => {
   const status = toSafeText(value).toLowerCase();
+  if (status === 'pending_receipt') return 'Menunggu Upload Nota';
+  if (status === 'pending_approval') return 'Menunggu Approval';
   if (status === 'pending') return 'Menunggu';
   if (status === 'approved') return 'Disetujui';
   if (status === 'rejected') return 'Ditolak';
@@ -602,6 +612,23 @@ const buildPembelianBahanLocalRecord = (payload = {}) => {
     created_at: createdAt,
     tanggal: createdAt,
     note: toSafeText(payload?.note),
+    receipt_attachment_path: toSafeText(payload?.receipt_attachment_path),
+    receipt_attachment_url: toSafeText(payload?.receipt_attachment_url),
+    approved_at: toSafeText(payload?.approved_at),
+    rejected_at: toSafeText(payload?.rejected_at),
+    rejection_reason: toSafeText(payload?.rejection_reason),
+    approver: payload?.approver && typeof payload.approver === 'object'
+      ? {
+        id: Number(payload.approver?.id || 0) || null,
+        name: toSafeText(payload.approver?.name),
+      }
+      : null,
+    rejector: payload?.rejector && typeof payload.rejector === 'object'
+      ? {
+        id: Number(payload.rejector?.id || 0) || null,
+        name: toSafeText(payload.rejector?.name),
+      }
+      : null,
     requester: payload?.requester && typeof payload.requester === 'object'
       ? {
         id: Number(payload.requester?.id || 0) || null,
@@ -1003,7 +1030,15 @@ export const fetchPosMaterials = async () => {
 export const getPembelianCategoryOptions = async () => {
   await ensureAuthenticated();
   const payload = await request('/pos/purchase-categories');
-  return toDataList(payload).map((row) => normalizePurchaseCategoryRow(row));
+  const backendRows = toDataList(payload).map((row) => normalizePurchaseCategoryRow(row));
+  const rowsByCode = new Map();
+  DEFAULT_PURCHASE_CATEGORIES
+    .map((row) => normalizePurchaseCategoryRow(row))
+    .forEach((row) => rowsByCode.set(row.code, row));
+  backendRows.forEach((row) => rowsByCode.set(row.code, row));
+  return Array.from(rowsByCode.values())
+    .filter((row) => row.is_active !== false)
+    .sort((a, b) => (Number(a.sort_order || 0) - Number(b.sort_order || 0)) || String(a.name || '').localeCompare(String(b.name || '')));
 };
 
 export const getPengeluaranCategoryOptions = async () => {
@@ -1139,6 +1174,63 @@ export const createPembelianBahanRequest = async (payload = {}) => {
   if (normalized?.purchase_category_flow !== 'stock_request' && !normalized?.linked_expense_transaction_id) {
     syncPengeluaranFromPembelian(normalized);
   }
+  return normalized;
+};
+
+export const uploadPembelianBahanEvidence = async (purchaseId, file) => {
+  await ensureAuthenticated();
+  const key = encodeURIComponent(String(purchaseId || '').trim());
+  if (!key) {
+    throw new Error('ID pembelian tidak valid untuk upload nota.');
+  }
+  if (!file) {
+    throw new Error('File nota pembelian belum dipilih.');
+  }
+  const formData = new FormData();
+  formData.append('evidence', file);
+  const body = await request(`/pos/purchases/${key}/evidence`, {
+    method: 'POST',
+    body: formData,
+    isFormData: true,
+  });
+  const normalized = normalizeBackendPembelianRow(toDataItem(body));
+  saveStoredPembelianBahanRow(normalized);
+  return normalized;
+};
+
+export const approvePembelianBahanRequest = async (purchaseId, payload = {}) => {
+  await ensureAuthenticated();
+  const key = encodeURIComponent(String(purchaseId || '').trim());
+  if (!key) {
+    throw new Error('ID pembelian tidak valid untuk approval.');
+  }
+  const body = await request(`/pos/purchases/${key}/approve`, {
+    method: 'POST',
+    body: JSON.stringify({
+      approval_note: toSafeText(payload?.approval_note),
+    }),
+  });
+  const normalized = normalizeBackendPembelianRow(toDataItem(body));
+  saveStoredPembelianBahanRow(normalized);
+  return normalized;
+};
+
+export const rejectPembelianBahanRequest = async (purchaseId, payload = {}) => {
+  await ensureAuthenticated();
+  const key = encodeURIComponent(String(purchaseId || '').trim());
+  if (!key) {
+    throw new Error('ID pembelian tidak valid untuk reject.');
+  }
+  const reason = toSafeText(payload?.reason);
+  if (!reason) {
+    throw new Error('Alasan penolakan wajib diisi.');
+  }
+  const body = await request(`/pos/purchases/${key}/reject`, {
+    method: 'POST',
+    body: JSON.stringify({ reason }),
+  });
+  const normalized = normalizeBackendPembelianRow(toDataItem(body));
+  saveStoredPembelianBahanRow(normalized);
   return normalized;
 };
 
@@ -1604,6 +1696,22 @@ export const updatePosProductionItemStatus = async (itemId, productionStatus) =>
   });
 };
 
+export const updatePosProductionLayoutPlan = async (itemId, payload = {}) => {
+  await ensureAuthenticated();
+  return request(`/pos/production/items/${itemId}/layout-plan`, {
+    method: 'PUT',
+    body: JSON.stringify(payload),
+  });
+};
+
+export const buildPosProductionDelayWhatsapp = async (itemId, payload = {}) => {
+  await ensureAuthenticated();
+  return request(`/pos/production/items/${itemId}/delay-whatsapp`, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+};
+
 export const releasePosProductionItem = async (itemId) => {
   await ensureAuthenticated();
   return request(`/pos/production/items/${itemId}/release`, {
@@ -1695,11 +1803,27 @@ export const sendPosProofingWhatsapp = async (proofingId, payload = {}) => {
   });
 };
 
-export const releasePosProofingToProduction = async (proofingId) => {
+export const releasePosProofingToProduction = async (proofingId, payload = {}) => {
   await ensureAuthenticated();
   return request(`/pos/proofings/${proofingId}/release-production`, {
     method: 'POST',
-    body: JSON.stringify({}),
+    body: JSON.stringify(payload || {}),
+  });
+};
+
+export const returnPosProofingToCashier = async (proofingId, payload = {}) => {
+  await ensureAuthenticated();
+  return request(`/pos/proofings/${proofingId}/return-cashier`, {
+    method: 'POST',
+    body: JSON.stringify(payload || {}),
+  });
+};
+
+export const returnPosProofingToCashierReminder = async (proofingId, payload = {}) => {
+  await ensureAuthenticated();
+  return request(`/pos/proofings/${proofingId}/return-cashier-reminder`, {
+    method: 'POST',
+    body: JSON.stringify(payload || {}),
   });
 };
 
@@ -1714,6 +1838,14 @@ export const previewPosPricing = async (productId, payload) => {
 export const createPosOrder = async (payload) => {
   await ensureAuthenticated();
   return request('/pos/orders', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+};
+
+export const logPosOrderPreviewReceipt = async (payload = {}) => {
+  await ensureAuthenticated();
+  return request('/pos/orders/preview-receipt-log', {
     method: 'POST',
     body: JSON.stringify(payload),
   });
@@ -1960,9 +2092,11 @@ export const resolvePosManualApproval = async (approvalId, payload = {}) => {
 export const fetchPosClosingSummary = async (params = {}) => {
   await ensureAuthenticated();
   const query = new URLSearchParams();
-  if (params?.date) {
-    query.set('date', String(params.date));
-  }
+  ['date', 'date_from', 'date_to', 'period', 'scope', 'user_id'].forEach((key) => {
+    if (params?.[key] !== undefined && params?.[key] !== null && String(params[key]).trim() !== '') {
+      query.set(key, String(params[key]));
+    }
+  });
   const suffix = query.toString() ? `?${query.toString()}` : '';
   return request(`/pos/reports/closing-summary${suffix}`);
 };
@@ -2162,6 +2296,7 @@ export const saveStoreClosingCashValidation = async (closingId, payload = {}) =>
   if (payload?.evidence) {
     const formData = new FormData();
     formData.append('physical_cash', String(payload.physical_cash || 0));
+    if (Array.isArray(payload.cash_breakdown)) formData.append('cash_breakdown', JSON.stringify(payload.cash_breakdown));
     if (payload.reason) formData.append('reason', String(payload.reason));
     if (payload.responsible_user_id) formData.append('responsible_user_id', String(payload.responsible_user_id));
     formData.append('evidence', payload.evidence);

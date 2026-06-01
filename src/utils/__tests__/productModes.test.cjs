@@ -176,10 +176,52 @@ test('money amount normalization supports Indonesian decimal input examples', ()
     const normalizedInteger = integerDigits || '0';
     return `${normalizedInteger}.${fractionalDigits}`;
   };
+  const sanitizeMoneyAmountTextInput = (value) => String(value || '').replace(/[^0-9.,]/g, '').trim();
+  const formatIntegerWithDotSeparator = (value) => {
+    const digits = String(value || '').replace(/[^0-9]/g, '').replace(/^0+(?=\d)/, '') || '0';
+    return digits.replace(/\B(?=(\d{3})+(?!\d))/g, '.');
+  };
+  const formatRupiahMoneyInputDisplay = (value) => {
+    const text = sanitizeMoneyAmountTextInput(value);
+    if (!text) {
+      return 'Rp 0,00';
+    }
+
+    const lastCommaIndex = text.lastIndexOf(',');
+    const lastDotIndex = text.lastIndexOf('.');
+    const separatorIndex = Math.max(lastCommaIndex, lastDotIndex);
+    if (separatorIndex < 0) {
+      return `Rp ${formatIntegerWithDotSeparator(text)},00`;
+    }
+
+    const integerDigits = text.slice(0, separatorIndex).replace(/[^0-9]/g, '') || '0';
+    const fractionalDigits = text.slice(separatorIndex + 1).replace(/[^0-9]/g, '');
+    if (fractionalDigits.length > 2) {
+      return `Rp ${formatIntegerWithDotSeparator(`${integerDigits}${fractionalDigits}`)},00`;
+    }
+
+    return `Rp ${formatIntegerWithDotSeparator(integerDigits)},${fractionalDigits.padEnd(2, '0').slice(0, 2)}`;
+  };
 
   assert.equal(normalizeMoneyAmountInput('20.000,10'), '20000.10');
   assert.equal(normalizeMoneyAmountInput('20,000.10'), '20000.10');
   assert.equal(normalizeMoneyAmountInput('20.000.10'), '20000.10');
   assert.equal(normalizeMoneyAmountInput('20000,10'), '20000.10');
   assert.equal(normalizeMoneyAmountInput('20.000'), '20000');
+  assert.equal(normalizeMoneyAmountInput('1'), '1');
+  assert.equal(normalizeMoneyAmountInput('10'), '10');
+  assert.equal(normalizeMoneyAmountInput('100'), '100');
+  assert.equal(normalizeMoneyAmountInput('1000'), '1000');
+  assert.equal(normalizeMoneyAmountInput('10.000'), '10000');
+  assert.equal(normalizeMoneyAmountInput('100.000'), '100000');
+  assert.equal(normalizeMoneyAmountInput('1.000.000'), '1000000');
+  assert.equal(normalizeMoneyAmountInput('1.000.000,00'), '1000000.00');
+  assert.equal(normalizeMoneyAmountInput('10.000,50'), '10000.50');
+  assert.equal(normalizeMoneyAmountInput('100.000,75'), '100000.75');
+  assert.equal(sanitizeMoneyAmountTextInput('10.000,23'), '10.000,23');
+  assert.equal(normalizeMoneyAmountInput(sanitizeMoneyAmountTextInput('10.000,23')), '10000.23');
+  assert.equal(formatRupiahMoneyInputDisplay('100000'), 'Rp 100.000,00');
+  assert.equal(formatRupiahMoneyInputDisplay('100000,23'), 'Rp 100.000,23');
+  assert.equal(formatRupiahMoneyInputDisplay('100000,2'), 'Rp 100.000,20');
+  assert.equal(formatRupiahMoneyInputDisplay('10.000,23'), 'Rp 10.000,23');
 });

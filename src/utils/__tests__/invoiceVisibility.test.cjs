@@ -63,7 +63,7 @@ test('kasir A bisa melihat invoice paid atau lunas yang dibuat oleh kasir B', ()
   assert.equal(canUserAccessInvoiceRow(row, cashierA), true);
 });
 
-test('kasir A tidak bisa mengakses aksi draft yang dibuat oleh kasir B', () => {
+test('kasir A bisa membuka dan memproses draft yang dibuat oleh kasir B', () => {
   const row = {
     id: 1003,
     status: 'draft',
@@ -78,7 +78,7 @@ test('kasir A tidak bisa mengakses aksi draft yang dibuat oleh kasir B', () => {
     },
   };
 
-  assert.equal(canUserAccessInvoiceRow(row, cashierA), false);
+  assert.equal(canUserAccessInvoiceRow(row, cashierA), true);
   assert.equal(canUserViewInvoiceRow(row, cashierA), true);
 });
 

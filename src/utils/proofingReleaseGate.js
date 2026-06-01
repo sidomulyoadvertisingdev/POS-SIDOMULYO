@@ -214,6 +214,12 @@ const resolveProofingReleaseState = (row = {}) => {
   const proofingApproved = resolveProofingStatusKey(row?.status) === 'approved';
   const releasedProductionStatus = resolveReleasedProductionStatus(row);
   const releasedToProduction = isReleasedToProduction(row);
+  const paymentReceivable = paymentState.statusKey === 'receivable'
+    || normalizeText(paymentState.statusSource).includes('piutang')
+    || (
+      getOrderRow(row)?.receivable_override_required === true
+      || getOrderRow(row)?.receivable_override_approved_at
+    );
   const precheckReady = row?.can_release_to_production === true || (proofingApproved && paymentState.paymentReady);
   const canRelease = !releasedToProduction;
   let blockingHint = '';
@@ -230,6 +236,11 @@ const resolveProofingReleaseState = (row = {}) => {
     precheckReady,
     proofingApproved,
     paymentReady: paymentState.paymentReady,
+    paymentReceivable,
+    paymentStatusKey: paymentState.statusKey,
+    paymentTotal: paymentState.total,
+    paymentPaid: paymentState.paid,
+    paymentDue: paymentState.due,
     paymentStatusLabel: formatProofingPaymentStatusLabel(paymentState),
     releasedToProduction,
     releasedProductionStatus,
