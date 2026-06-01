@@ -189,6 +189,8 @@ const resolveInvoiceStatusKey = (status) => {
   if (!text) return '';
   if (['queued_offline'].includes(text)) return 'queued_offline';
   if (['draft', 'draft_order', 'draft_local', 'saved_draft', 'simpan_draft', 'rancangan'].includes(text)) return 'draft';
+  if (['pending_approval', 'pending_limit_approval', 'waiting_approval', 'menunggu_approval', 'menunggu approval'].includes(text)) return 'pending_approval';
+  if (['approval_rejected', 'rejected', 'ditolak', 'approval ditolak', 'ditolak approval'].includes(text)) return 'approval_rejected';
   if (['paid', 'lunas', 'full'].includes(text)) return 'paid';
   if (['partially_paid', 'partial_paid', 'dp'].includes(text)) return 'partially_paid';
   if (['pending_payment', 'awaiting_payment', 'unpaid'].includes(text)) return 'pending_payment';
@@ -257,7 +259,38 @@ const normalizeInvoiceStatusText = (row) => (
   )
 );
 
+const isApprovalLikeRow = (row) => {
+  if (normalizeText(row?.__source) === 'receivable_approval') {
+    return true;
+  }
+
+  const approvalStatus = normalizeText(row?.approval?.status || row?.approval_status);
+  if (row?.approval && ['pending', 'approved', 'rejected', 'cancelled', 'canceled', 'resolved'].includes(approvalStatus)) {
+    return true;
+  }
+
+  const statusCandidates = [
+    row?.status,
+    row?.approval?.status,
+    row?.approval_status,
+    row?.order_status,
+    row?.order?.status,
+    row?.order?.order_status,
+    row?.invoice?.status,
+    row?.invoice?.order_status,
+  ];
+
+  return statusCandidates.some((status) => {
+    const key = resolveInvoiceStatusKey(status);
+    return key === 'pending_approval' || key === 'approval_rejected';
+  });
+};
+
 const isDraftCandidate = (row) => {
+  if (isApprovalLikeRow(row)) {
+    return false;
+  }
+
   const statusCandidates = [
     row?.status,
     row?.order_status,
@@ -292,6 +325,9 @@ const isDraftCandidate = (row) => {
 };
 
 const isDraftInvoiceRow = (row) => {
+  if (isApprovalLikeRow(row)) {
+    return false;
+  }
   if (normalizeText(row?.__source) === 'queue') {
     return true;
   }
@@ -300,7 +336,7 @@ const isDraftInvoiceRow = (row) => {
   }
   return isDraftCandidate(row) || resolveInvoiceStatusKey(normalizeInvoiceStatusText(row)) === 'draft';
 };
-const isApprovalInvoiceRow = (row) => normalizeText(row?.__source) === 'receivable_approval';
+const isApprovalInvoiceRow = (row) => isApprovalLikeRow(row);
 const hasInvoiceTransactionReference = (row) => {
   return [
     row?.id,

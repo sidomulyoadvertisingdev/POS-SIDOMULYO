@@ -3255,7 +3255,7 @@ const resolveInvoiceStatusKey = (status) => {
   if (!text) return '';
   if (['queued_offline'].includes(text)) return 'queued_offline';
   if (['draft', 'draft_order', 'draft_local', 'saved_draft', 'simpan_draft', 'rancangan'].includes(text)) return 'draft';
-  if (['pending_approval', 'waiting_approval', 'menunggu_approval', 'menunggu approval'].includes(text)) return 'pending_approval';
+  if (['pending_approval', 'pending_limit_approval', 'waiting_approval', 'menunggu_approval', 'menunggu approval'].includes(text)) return 'pending_approval';
   if (['pending', 'new', 'open'].includes(text)) return 'pending';
   if (['pending_payment', 'awaiting_payment', 'unpaid'].includes(text)) return 'pending_payment';
   if (['partially_paid', 'partial_paid', 'dp'].includes(text)) return 'partially_paid';
@@ -3270,7 +3270,7 @@ const resolveInvoiceStatusKey = (status) => {
   if (['resolved', 'selesai_ditangani', 'selesai ditangani'].includes(text)) return 'resolved';
   if (['completed', 'done', 'finished'].includes(text)) return 'completed';
   if (['paid', 'lunas', 'full'].includes(text)) return 'paid';
-  if (['approval_rejected', 'rejected', 'approval ditolak', 'ditolak approval'].includes(text)) return 'approval_rejected';
+  if (['approval_rejected', 'rejected', 'ditolak', 'approval ditolak', 'ditolak approval'].includes(text)) return 'approval_rejected';
   if (['cancelled', 'canceled', 'void', 'rejected_online'].includes(text)) return 'cancelled';
   return text;
 };
@@ -5990,6 +5990,10 @@ const resolveAccountingSelectionId = (row) => Number(
   || 0
 );
 const isDraftCandidate = (row) => {
+  if (isReceivableApprovalInvoiceRow(row)) {
+    return false;
+  }
+
   const statusCandidates = [
     row?.status,
     row?.order_status,
@@ -6772,7 +6776,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
   });
   const [draftTimeTick, setDraftTimeTick] = useState(() => Date.now());
   const [invoiceFilter, setInvoiceFilter] = useState('success');
-  const [approvalStatusFilter, setApprovalStatusFilter] = useState('pending');
+  const [approvalStatusFilter, setApprovalStatusFilter] = useState('all');
   const [invoiceSearch, setInvoiceSearch] = useState('');
   const [invoiceDateFrom, setInvoiceDateFrom] = useState(() => String(DEFAULT_INVOICE_DATE_FILTER?.from || '').trim());
   const [invoiceDateTo, setInvoiceDateTo] = useState(() => String(DEFAULT_INVOICE_DATE_FILTER?.to || '').trim());
@@ -6869,7 +6873,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
 
     setActiveMenu(nextMenu);
     setInvoiceFilter(nextFilter);
-    setApprovalStatusFilter(nextFilter === 'approval' ? 'pending' : 'all');
+    setApprovalStatusFilter('all');
   };
   const openInvoiceAreaFilter = (filter) => {
     openInvoiceAreaMenu(resolveInvoiceMenuForFilter(filter));
@@ -13145,7 +13149,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       const approvalRows = approvalRowsInput || await fetchReceivableApprovalRows().catch(() => []);
       setReceivableApprovalRows(approvalRows);
       syncReceivableApprovalSnapshot(approvalRows);
-      const approvalListRows = approvalRows.filter((row) => {
+      const approvalListRows = invoiceRequestOptions.area === 'draft' ? [] : approvalRows.filter((row) => {
         const approvalStatus = normalizeReceivableApprovalStatus(row?.approval?.status || row?.status);
         const orderId = Number(row?.approval?.orderId || row?.order?.id || 0) || 0;
         const approvalType = normalizeApprovalType(row?.approval?.type || row?.approval_type);
@@ -13155,7 +13159,8 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         || (invoiceLoadError && INVOICE_ACTIVE_WORK_AREAS.has(invoiceRequestOptions.area))
         ? (Array.isArray(draftInvoices) ? draftInvoices : [])
         : [];
-      const mergedRows = mergeInvoiceRows(baseRows, [...queueRows, ...approvalListRows, ...rows]);
+      const mergedRows = mergeInvoiceRows(baseRows, [...queueRows, ...approvalListRows, ...rows])
+        .filter((row) => invoiceRequestOptions.area !== 'draft' || !isReceivableApprovalInvoiceRow(row));
       const nextSuccessCache = syncInvoiceSuccessCacheFromRows(mergedRows);
       setDraftInvoices(mergedRows);
       updateInvoiceWorkspaceAreaSnapshot(mergedRows, { area: invoiceRequestOptions.area });

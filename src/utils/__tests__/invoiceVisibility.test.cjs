@@ -272,6 +272,46 @@ test('row approval manual dikenali sebagai area butuh approval dan bukan invoice
   assert.equal(isReceivableInvoiceRow(row), false);
 });
 
+test('row menunggu dan ditolak approval tidak ikut dianggap draft', () => {
+  const rows = [
+    {
+      id: 1020,
+      status: 'pending_approval',
+      notes: 'Mode: Simpan Draft\nStatus: Menunggu Approval',
+      items: [
+        {
+          spec_snapshot: JSON.stringify({
+            draft_form: {
+              product_name: 'Approval pending',
+            },
+          }),
+        },
+      ],
+    },
+    {
+      id: 1021,
+      status: 'approval_rejected',
+      notes: 'Mode: Simpan Draft\nApproval Ditolak',
+      items: [
+        {
+          spec_snapshot: JSON.stringify({
+            draft_form: {
+              product_name: 'Approval ditolak',
+            },
+          }),
+        },
+      ],
+    },
+  ];
+
+  rows.forEach((row) => {
+    assert.equal(isDraftCandidate(row), false);
+    assert.equal(isApprovalInvoiceRow(row), true);
+    assert.equal(isSuccessfulInvoiceRow(row), false);
+    assert.equal(isReceivableInvoiceRow(row), false);
+  });
+});
+
 test('invoice belum lunas tetap masuk invoice sukses dan piutang', () => {
   const row = {
     id: 1007,
