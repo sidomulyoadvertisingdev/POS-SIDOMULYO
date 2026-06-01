@@ -312,6 +312,25 @@ test('row menunggu dan ditolak approval tidak ikut dianggap draft', () => {
   });
 });
 
+test('draft tetap tampil walau payload punya metadata approval pending', () => {
+  const row = {
+    id: 1022,
+    status: 'draft',
+    notes: 'Mode: Simpan Draft',
+    approval: {
+      status: 'pending',
+      requester: { id: cashierA.id, name: cashierA.name },
+    },
+    invoice: {
+      id: 522,
+      status: 'draft',
+    },
+  };
+
+  assert.equal(isApprovalInvoiceRow(row), false);
+  assert.equal(isDraftCandidate(row), true);
+});
+
 test('invoice belum lunas tetap masuk invoice sukses dan piutang', () => {
   const row = {
     id: 1007,

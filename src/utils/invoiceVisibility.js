@@ -264,14 +264,8 @@ const isApprovalLikeRow = (row) => {
     return true;
   }
 
-  const approvalStatus = normalizeText(row?.approval?.status || row?.approval_status);
-  if (row?.approval && ['pending', 'approved', 'rejected', 'cancelled', 'canceled', 'resolved'].includes(approvalStatus)) {
-    return true;
-  }
-
   const statusCandidates = [
     row?.status,
-    row?.approval?.status,
     row?.approval_status,
     row?.order_status,
     row?.order?.status,
