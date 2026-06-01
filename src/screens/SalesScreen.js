@@ -6013,7 +6013,42 @@ const isDraftCandidate = (row) => {
   if (notes.includes('sales_draft')) {
     return true;
   }
-  return notes.includes('mode: simpan draft') && !notes.includes('mode: proses orderan');
+  if (notes.includes('mode: simpan draft') && !notes.includes('mode: proses orderan')) {
+    return true;
+  }
+
+  const isDraftCompatibleStatus = (status) => {
+    const key = resolveInvoiceStatusKey(status);
+    return key === '' || key === 'pending' || key === 'draft';
+  };
+  const snapshotCandidates = [
+    row?.draft_form,
+    row?.draft_snapshot,
+    row?.spec_snapshot,
+    row?.order?.draft_form,
+    row?.order?.draft_snapshot,
+    row?.order?.spec_snapshot,
+  ];
+  const sourceRows = []
+    .concat(Array.isArray(row?.items) ? row.items : [])
+    .concat(Array.isArray(row?.order_items) ? row.order_items : [])
+    .concat(Array.isArray(row?.order?.items) ? row.order.items : []);
+  sourceRows.forEach((item) => {
+    snapshotCandidates.push(item?.draft_form, item?.draft_snapshot, item?.spec_snapshot);
+  });
+  const hasLegacyDraftSnapshot = snapshotCandidates.some((value) => {
+    const snapshot = parseJsonObject(value) || {};
+    return Boolean(
+      snapshot?.draft_form
+      || snapshot?.draft_restore
+      || snapshot?.is_draft
+    );
+  });
+
+  return !notes.includes('mode: proses orderan')
+    && isDraftCompatibleStatus(row?.status || row?.order_status || row?.order?.status)
+    && isDraftCompatibleStatus(row?.invoice?.status)
+    && hasLegacyDraftSnapshot;
 };
 const hasSnapshotObjectShape = (value) => Boolean(
   value

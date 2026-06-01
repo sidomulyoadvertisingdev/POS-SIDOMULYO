@@ -121,6 +121,23 @@ test('semua bentuk draft lama dan baru tetap dikenali sebagai draft', () => {
       status: 'pending',
       notes: '{"_type":"sales_draft","note_text":"draft lama"}',
     },
+    {
+      id: 1016,
+      status: 'pending',
+      invoice: {
+        id: 516,
+        status: 'pending',
+      },
+      items: [
+        {
+          spec_snapshot: JSON.stringify({
+            draft_form: {
+              product_name: 'Draft snapshot lama',
+            },
+          }),
+        },
+      ],
+    },
   ];
 
   rows.forEach((row) => {
@@ -145,6 +162,32 @@ test('snapshot non-draft tidak otomatis membuat invoice sukses menjadi draft', (
         spec_snapshot: JSON.stringify({
           cart_restore: {
             pricing_locked: true,
+          },
+        }),
+      },
+    ],
+  };
+
+  assert.equal(isDraftCandidate(row), false);
+  assert.equal(isSuccessfulInvoiceRow(row), true);
+});
+
+test('snapshot draft lama tidak menarik invoice final ke area draft', () => {
+  const row = {
+    id: 1017,
+    status: 'completed',
+    invoice: {
+      id: 517,
+      status: 'paid',
+      total: 120000,
+      paid_total: 120000,
+      due_total: 0,
+    },
+    items: [
+      {
+        spec_snapshot: JSON.stringify({
+          draft_form: {
+            product_name: 'Bekas draft yang sudah final',
           },
         }),
       },
