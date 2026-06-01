@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Image, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
+import { Image, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 const { resolveProofingReleaseState } = require('../utils/proofingReleaseGate');
 
 const SIDOMULYO_BLUE = '#0755b8';
@@ -341,7 +341,6 @@ const ProofingPanel = ({
   onOpenPublicLink,
   onOpenCustomerWhatsapp,
   onOpenPreviewFile,
-  onViewHistory,
   onSendWhatsapp,
   onReleaseToProduction,
   onUploadLocalProductionFile,
@@ -432,29 +431,76 @@ const ProofingPanel = ({
   };
 
   const renderTimeline = () => {
-    const logs = [];
-    if (selectedRow?.created_at) {
-      logs.push(['Dibuat', selectedRow.created_at, 'Task proofing dibuat di sistem.']);
-    }
-    if (selectedRow?.whatsapp_sent_at) {
-      logs.push(['Dikirim', selectedRow.whatsapp_sent_at, 'Proofing dikirim ke customer via WhatsApp link.']);
-    }
-    if (selectedRow?.approved_at) {
-      logs.push(['Approved', selectedRow.approved_at, 'Customer approve dan lanjut validasi produksi.']);
-    }
-    if (selectedRow?.revised_at) {
-      logs.push(['Revisi', selectedRow.revised_at, toText(selectedRow?.revision_note_from_customer, 'Customer meminta revisi.')]);
-    }
-    if (latestLog) {
-      logs.push([
-        toText(latestLog?.event_label, latestLog?.event_type),
-        latestLog?.created_at,
-        latestLog?.event_note || `Oleh ${toActorName(latestLog)}`,
-      ]);
+    const historyLogs = Array.isArray(selectedRow?.history) ? selectedRow.history : [];
+    if (historyLogs.length > 0) {
+      return historyLogs
+        .map((log) => {
+          const label = toText(log?.event_label, log?.event_type || 'Aktivitas');
+          const actorName = toActorName(log);
+          const note = String(log?.event_note || '').trim();
+          const detail = note || (actorName !== '-' ? `Oleh ${actorName}` : 'Aktivitas proofing dicatat.');
+          return {
+            key: `history-${log?.id || log?.created_at || label}`,
+            label,
+            time: log?.created_at,
+            text: `${label}: ${detail}`,
+            sortId: Number(log?.id || 0) || 0,
+          };
+        })
+        .sort((a, b) => {
+          if (a.sortId !== b.sortId) {
+            return b.sortId - a.sortId;
+          }
+          return String(b.time || '').localeCompare(String(a.time || ''));
+        });
     }
 
-    return logs.slice(-5).reverse();
+    const logs = [];
+    if (selectedRow?.created_at) {
+      logs.push({
+        key: `created-${selectedRow.created_at}`,
+        label: 'Dibuat',
+        time: selectedRow.created_at,
+        text: 'Dibuat: Task proofing dibuat di sistem.',
+      });
+    }
+    if (selectedRow?.whatsapp_sent_at) {
+      logs.push({
+        key: `sent-${selectedRow.whatsapp_sent_at}`,
+        label: 'Dikirim',
+        time: selectedRow.whatsapp_sent_at,
+        text: 'Dikirim: Proofing dikirim ke customer via WhatsApp link.',
+      });
+    }
+    if (selectedRow?.approved_at) {
+      logs.push({
+        key: `approved-${selectedRow.approved_at}`,
+        label: 'Approved',
+        time: selectedRow.approved_at,
+        text: 'Approved: Customer approve dan lanjut validasi produksi.',
+      });
+    }
+    if (selectedRow?.revised_at) {
+      logs.push({
+        key: `revision-${selectedRow.revised_at}`,
+        label: 'Revisi',
+        time: selectedRow.revised_at,
+        text: `Revisi: ${toText(selectedRow?.revision_note_from_customer, 'Customer meminta revisi.')}`,
+      });
+    }
+    if (latestLog) {
+      const latestLabel = toText(latestLog?.event_label, latestLog?.event_type);
+      logs.push({
+        key: `latest-${latestLog?.id || latestLog?.created_at || latestLabel}`,
+        label: latestLabel,
+        time: latestLog?.created_at,
+        text: `${latestLabel}: ${latestLog?.event_note || `Oleh ${toActorName(latestLog)}`}`,
+      });
+    }
+
+    return logs.sort((a, b) => String(b.time || '').localeCompare(String(a.time || '')));
   };
+  const timelineRows = renderTimeline();
 
   return (
     <View style={styles.page}>
@@ -828,23 +874,24 @@ const ProofingPanel = ({
         <View style={[styles.panelCard, styles.smallCard]}>
           <View style={styles.panelHeaderCompact}>
             <Text style={styles.panelTitle}>Log Aktivitas</Text>
-            <ActionButton
-              label="Lihat Semua Log"
-              variant="ghost"
-              disabled={!selectedRow}
-              onPress={() => onViewHistory?.(selectedRow)}
-            />
           </View>
-          {renderTimeline().length === 0 ? (
+          {timelineRows.length === 0 ? (
             <Text style={styles.emptyText}>Belum ada log aktivitas untuk task ini.</Text>
           ) : (
-            renderTimeline().map((log, index) => (
-              <View key={`${log[0]}-${index}`} style={styles.timelineRow}>
-                <View style={styles.timelineDot} />
-                <Text style={styles.timelineTime}>{formatDateTime(log[1])}</Text>
-                <Text style={styles.timelineText}>{log[2]}</Text>
-              </View>
-            ))
+            <ScrollView
+              style={styles.timelineScroll}
+              contentContainerStyle={styles.timelineScrollContent}
+              nestedScrollEnabled
+              showsVerticalScrollIndicator
+            >
+              {timelineRows.map((log, index) => (
+                <View key={`${log.key || log.label}-${index}`} style={styles.timelineRow}>
+                  <View style={styles.timelineDot} />
+                  <Text style={styles.timelineTime}>{formatDateTime(log.time)}</Text>
+                  <Text style={styles.timelineText}>{log.text}</Text>
+                </View>
+              ))}
+            </ScrollView>
           )}
         </View>
 
@@ -1491,6 +1538,13 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: 8,
     paddingVertical: 5,
+  },
+  timelineScroll: {
+    maxHeight: 230,
+    width: '100%',
+  },
+  timelineScrollContent: {
+    paddingBottom: 4,
   },
   timelineDot: {
     width: 9,

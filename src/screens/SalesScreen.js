@@ -12920,9 +12920,11 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       && !appendRows
       && !options?.forceServer
       && !invoiceSuccessDateFilterActive;
+    let showedInvoiceSuccessCachePreview = false;
     if (canUseSuccessCache) {
       const cachedRows = invoiceSuccessCacheRows.length > 0 ? invoiceSuccessCacheRows : loadInvoiceSuccessCache();
       if (cachedRows.length > 0) {
+        showedInvoiceSuccessCachePreview = true;
         setDraftInvoices(cachedRows);
         updateInvoiceWorkspaceAreaSnapshot(cachedRows, { area: 'success' });
         setInvoiceListMeta({
@@ -12935,18 +12937,16 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         });
         markInvoiceRealtimeUpdatesApplied();
         hydrateDanaInvoiceMonitorsFromRows(cachedRows);
-        return;
       }
     }
 
-    let showedInvoiceSuccessDateCachePreview = false;
     if (invoiceSuccessDateFilterActive && !appendRows && !options?.forceServer) {
       const cachedRows = invoiceSuccessCacheRows.length > 0 ? invoiceSuccessCacheRows : loadInvoiceSuccessCache();
       const dateFilteredCacheRows = cachedRows.filter((row) => (
         isInvoiceRowInDateRange(row, invoiceRequestOptions.date_from, invoiceRequestOptions.date_to)
       ));
       if (dateFilteredCacheRows.length > 0) {
-        showedInvoiceSuccessDateCachePreview = true;
+        showedInvoiceSuccessCachePreview = true;
         setDraftInvoices(dateFilteredCacheRows);
         updateInvoiceWorkspaceAreaSnapshot(dateFilteredCacheRows, {
           area: 'success',
@@ -12973,7 +12973,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
 
       if (invoiceRequestOptions.area !== 'approval') {
         try {
-          if (invoiceSuccessDateFilterActive) {
+          if (invoiceSuccessDateFilterActive || INVOICE_ACTIVE_WORK_AREAS.has(invoiceRequestOptions.area)) {
             rows = await fetchAllPosOrderTransactions({
               ...invoiceRequestOptions,
               perPage: 200,
@@ -12993,7 +12993,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         } catch (error) {
           invoiceLoadError = error;
           try {
-            if (invoiceSuccessDateFilterActive) {
+            if (invoiceSuccessDateFilterActive || INVOICE_ACTIVE_WORK_AREAS.has(invoiceRequestOptions.area)) {
               rows = await fetchAllPosOrders({
                 ...invoiceRequestOptions,
                 perPage: 200,
@@ -13017,7 +13017,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         }
       }
 
-      if (invoiceLoadError && invoiceSuccessDateFilterActive && showedInvoiceSuccessDateCachePreview) {
+      if (invoiceLoadError && invoiceRequestOptions.area === 'success' && showedInvoiceSuccessCachePreview) {
         openNotice('Invoice', `Data cache lokal ditampilkan dulu. Sinkron server gagal: ${invoiceLoadError.message}`);
         return;
       }
@@ -13053,12 +13053,12 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         openNotice('Invoice', `Gagal memuat invoice: ${invoiceLoadError.message}`);
       }
     } catch (error) {
-      if (showedInvoiceSuccessDateCachePreview) {
+      if (invoiceRequestOptions.area === 'success' && showedInvoiceSuccessCachePreview) {
         setInvoiceListMeta((prev) => ({
           ...prev,
           hasMore: false,
           searchMode: false,
-          source: 'local_success_cache_date_filter',
+          source: invoiceSuccessDateFilterActive ? 'local_success_cache_date_filter' : 'local_success_cache',
         }));
         openNotice('Invoice', `Data cache lokal ditampilkan dulu. Sinkron server gagal: ${error.message}`);
         return;
@@ -13114,11 +13114,26 @@ const SalesScreen = ({ currentUser, onLogout }) => {
           area,
           page: 1,
         });
+        const shouldLoadAllActiveRows = INVOICE_ACTIVE_WORK_AREAS.has(String(area || '').trim());
 
         try {
+          if (shouldLoadAllActiveRows) {
+            return await fetchAllPosOrderTransactions({
+              ...requestOptions,
+              perPage: 200,
+              maxPages: 200,
+            });
+          }
           const response = await fetchPosOrderTransactionsPage(requestOptions);
           return Array.isArray(response?.data) ? response.data : [];
         } catch (_error) {
+          if (shouldLoadAllActiveRows) {
+            return await fetchAllPosOrders({
+              ...requestOptions,
+              perPage: 200,
+              maxPages: 200,
+            });
+          }
           const fallbackResponse = await fetchPosOrdersPage(requestOptions);
           return Array.isArray(fallbackResponse?.data) ? fallbackResponse.data : [];
         }
@@ -16459,7 +16474,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
           if (String(updated?.status || '').toLowerCase() !== 'draft') {
             throw new Error('Status order belum berubah menjadi draft.');
           }
-          await loadDraftInvoices();
+          await loadDraftInvoices({ area: 'draft', page: 1, forceServer: true });
         } catch (statusError) {
           draftStatusWarning = `\nCatatan: status draft belum terkonfirmasi otomatis (${statusError.message}).`;
         }
@@ -16545,7 +16560,11 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       if (mode !== 'draft') {
         resetTransaction();
       }
-      loadDraftInvoices();
+      loadDraftInvoices({
+        area: mode === 'draft' ? 'draft' : undefined,
+        page: 1,
+        forceServer: mode === 'draft',
+      });
       return {
         ok: true,
         backendOrderId,
@@ -17264,7 +17283,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         resetTransaction();
       }
       openInvoiceAreaMenu('draft_orders');
-      await loadDraftInvoices();
+      await loadDraftInvoices({ area: 'draft', page: 1, forceServer: true });
     }
   };
 
@@ -17551,7 +17570,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         await handleShareBillingNote(createdRow);
       }
       openInvoiceAreaMenu('draft_orders');
-      await loadDraftInvoices({ page: 1, forceServer: true });
+      await loadDraftInvoices({ area: 'draft', page: 1, forceServer: true });
     }
   };
 
