@@ -229,6 +229,26 @@ const buildLayoutCode = (row, index) => {
   return `LAY-${dateCode}-${materialCode}-${sequence}`;
 };
 
+const resolveDesignFileInfo = (row) => {
+  const openUrl = String(row?.design_open_url || '').trim();
+  const filePath = String(row?.design_file_path || '').trim();
+  const relativePath = String(row?.design_relative_path || '').trim();
+  const fileName = toText(
+    row?.design_original_name
+    || row?.design_file_name
+    || (relativePath ? relativePath.split(/[\\/]+/).filter(Boolean).pop() : '')
+    || (filePath ? filePath.split(/[\\/]+/).filter(Boolean).pop() : ''),
+    '',
+  );
+  const location = openUrl || relativePath || filePath;
+  return {
+    hasFile: Boolean(openUrl || relativePath || filePath),
+    fileName: fileName || 'File layout produksi',
+    location,
+    storage: String(row?.design_storage || '').trim(),
+  };
+};
+
 const buildLayoutRows = (items) => items
   .map((row, index) => {
     const dueAt = parseDateValue(row?.layout_due_at) || resolveDueAt(row);
@@ -269,6 +289,7 @@ const ProductionPanel = ({
   onUpdateStatus,
   onReleaseToProduction,
   onUpdateLayoutPlan,
+  onDownloadLayoutFile,
   onBuildDelayWhatsapp,
   updatingItemId,
 }) => {
@@ -392,6 +413,7 @@ const ProductionPanel = ({
             const canMoveToPrinted = status === 'in_batch';
             const usesProofing = row?.proofing_required === true || Boolean(row?.proofing);
             const canPlanLayout = ['waiting_design', 'waiting_production'].includes(status);
+            const designFile = resolveDesignFileInfo(row);
 
             return (
               <View key={String(rowId || `prod-${index}`)} style={styles.card}>
@@ -401,11 +423,26 @@ const ProductionPanel = ({
                     <Text style={styles.cardMeta}>Customer: {customerName}</Text>
                     <Text style={styles.cardMeta}>Produk: {productName}</Text>
                     <Text style={styles.cardMeta}>Qty: {Number(row?.qty || 0)} | Total: {formatRupiah(itemTotal)}</Text>
+                    {designFile.hasFile ? (
+                      <View style={styles.fileInfoBox}>
+                        <Text style={styles.fileInfoTitle}>File Layout: {designFile.fileName}</Text>
+                        <Text style={styles.fileInfoMeta}>{designFile.location}</Text>
+                      </View>
+                    ) : null}
                     <View style={[styles.badge, statusBadgeStyle(status)]}>
                       <Text style={styles.badgeText}>{toStatusLabel(status)}</Text>
                     </View>
                   </View>
                   <View style={styles.actionWrap}>
+                    {designFile.hasFile ? (
+                      <Pressable
+                        style={[styles.actionButton, styles.actionDownloadButton, isUpdating ? styles.actionDisabled : null]}
+                        disabled={isUpdating}
+                        onPress={() => onDownloadLayoutFile?.(row)}
+                      >
+                        <Text style={styles.actionDownloadButtonText}>Download File Layout</Text>
+                      </Pressable>
+                    ) : null}
                     {canMoveToBatch ? (
                       <Pressable
                         style={[styles.actionButton, isUpdating ? styles.actionDisabled : null]}
@@ -740,6 +777,28 @@ const styles = StyleSheet.create({
     fontSize: 11,
     color: '#435674',
   },
+  fileInfoBox: {
+    alignSelf: 'flex-start',
+    maxWidth: '100%',
+    borderWidth: 1,
+    borderColor: '#c8d8f2',
+    backgroundColor: '#f7fbff',
+    borderRadius: 8,
+    paddingHorizontal: 8,
+    paddingVertical: 6,
+    marginTop: 4,
+    gap: 2,
+  },
+  fileInfoTitle: {
+    fontSize: 10,
+    color: '#173c87',
+    fontWeight: '900',
+  },
+  fileInfoMeta: {
+    fontSize: 10,
+    color: '#53647d',
+    fontWeight: '700',
+  },
   badge: {
     alignSelf: 'flex-start',
     paddingHorizontal: 8,
@@ -798,6 +857,15 @@ const styles = StyleSheet.create({
   actionSoftOrange: {
     borderColor: '#f2c178',
     backgroundColor: '#fff4df',
+  },
+  actionDownloadButton: {
+    borderColor: '#1d7a45',
+    backgroundColor: '#eaf8ec',
+  },
+  actionDownloadButtonText: {
+    color: '#146238',
+    fontWeight: '900',
+    fontSize: 11,
   },
   actionSoftButtonText: {
     color: '#17324f',

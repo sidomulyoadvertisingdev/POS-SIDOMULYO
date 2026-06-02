@@ -1,4 +1,4 @@
-const { app, BrowserWindow, dialog, nativeImage } = require('electron');
+const { app, BrowserWindow, dialog, nativeImage, shell } = require('electron');
 const fs = require('fs');
 const http = require('http');
 const os = require('os');
@@ -76,9 +76,40 @@ const MIME_TYPES = {
 let localServer = null;
 let updateCheckStarted = false;
 
+const localDesignSettingsPath = () => path.join(app.getPath('userData'), 'local-design-network-settings.json');
+
 const sendJson = (response, statusCode, payload) => {
   response.writeHead(statusCode, { 'Content-Type': 'application/json; charset=utf-8' });
   response.end(JSON.stringify(payload));
+};
+
+const readLocalDesignNetworkSettings = () => {
+  try {
+    const filePath = localDesignSettingsPath();
+    if (!fs.existsSync(filePath)) {
+      return null;
+    }
+    const parsed = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
+  } catch (_error) {
+    return null;
+  }
+};
+
+const writeLocalDesignNetworkSettings = (settings) => {
+  const filePath = localDesignSettingsPath();
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.writeFileSync(filePath, JSON.stringify(settings || {}, null, 2), 'utf8');
+};
+
+const removeLocalDesignNetworkSettings = () => {
+  try {
+    fs.unlinkSync(localDesignSettingsPath());
+  } catch (error) {
+    if (error?.code !== 'ENOENT') {
+      throw error;
+    }
+  }
 };
 
 const sanitizePathSegment = (value, fallback = 'lainnya') => {
@@ -299,6 +330,124 @@ const handleLocalDesignTest = async (request, response) => {
   });
 };
 
+const handleLocalDesignSettings = async (request, response) => {
+  if (request.method === 'GET') {
+    sendJson(response, 200, {
+      ok: true,
+      settings: readLocalDesignNetworkSettings(),
+      settings_path: localDesignSettingsPath(),
+    });
+    return;
+  }
+
+  if (request.method === 'DELETE') {
+    try {
+      removeLocalDesignNetworkSettings();
+      sendJson(response, 200, {
+        ok: true,
+        message: 'Setting jaringan lokal berhasil dihapus.',
+        settings_path: localDesignSettingsPath(),
+      });
+    } catch (error) {
+      sendJson(response, 500, {
+        ok: false,
+        message: `Gagal menghapus setting jaringan lokal: ${error.message}`,
+      });
+    }
+    return;
+  }
+
+  if (request.method !== 'POST') {
+    sendJson(response, 405, { message: 'Method tidak didukung.' });
+    return;
+  }
+
+  const payload = await readJsonRequestBody(request);
+  const settings = payload?.settings && typeof payload.settings === 'object' ? payload.settings : null;
+  if (!settings) {
+    sendJson(response, 422, {
+      ok: false,
+      message: 'Payload setting jaringan lokal tidak valid.',
+    });
+    return;
+  }
+
+  try {
+    writeLocalDesignNetworkSettings(settings);
+    sendJson(response, 200, {
+      ok: true,
+      message: 'Setting jaringan lokal berhasil disimpan.',
+      settings,
+      settings_path: localDesignSettingsPath(),
+    });
+  } catch (error) {
+    sendJson(response, 500, {
+      ok: false,
+      message: `Gagal menyimpan setting jaringan lokal: ${error.message}`,
+    });
+  }
+};
+
+const fileUrlToSystemPath = (target) => {
+  const text = String(target || '').trim();
+  if (!/^file:\/\//i.test(text)) {
+    return text;
+  }
+
+  try {
+    const parsed = new URL(text);
+    const decodedPath = decodeURIComponent(parsed.pathname || '');
+    if (process.platform === 'win32') {
+      if (parsed.hostname) {
+        return `\\\\${parsed.hostname}${decodedPath.replace(/\//g, '\\')}`;
+      }
+      return decodedPath.replace(/^\/([A-Za-z]:)/, '$1').replace(/\//g, '\\');
+    }
+    return decodedPath;
+  } catch (_error) {
+    return text;
+  }
+};
+
+const handleLocalDesignOpen = async (request, response) => {
+  if (request.method !== 'POST') {
+    sendJson(response, 405, { message: 'Method tidak didukung.' });
+    return;
+  }
+
+  const payload = await readJsonRequestBody(request);
+  const target = String(payload?.target || '').trim();
+  if (!target) {
+    sendJson(response, 422, {
+      ok: false,
+      message: 'Target file layout belum tersedia.',
+    });
+    return;
+  }
+
+  try {
+    if (/^https?:\/\//i.test(target)) {
+      await shell.openExternal(target);
+    } else {
+      const filePath = fileUrlToSystemPath(target);
+      const errorMessage = await shell.openPath(filePath);
+      if (errorMessage) {
+        throw new Error(errorMessage);
+      }
+    }
+
+    sendJson(response, 200, {
+      ok: true,
+      message: 'File layout berhasil dibuka.',
+    });
+  } catch (error) {
+    sendJson(response, 500, {
+      ok: false,
+      message: `Gagal membuka file layout: ${error.message}`,
+    });
+  }
+};
+
 const toSafeAssetPath = (requestUrl) => {
   const pathname = decodeURIComponent(new URL(requestUrl, 'http://127.0.0.1').pathname);
   const normalized = path.normalize(pathname).replace(/^(\.\.[\\/])+/, '');
@@ -314,6 +463,14 @@ const createLocalServer = () => new Promise((resolve, reject) => {
     }
     if ((request.url || '').startsWith('/__local-design/test')) {
       handleLocalDesignTest(request, response);
+      return;
+    }
+    if ((request.url || '').startsWith('/__local-design/settings')) {
+      handleLocalDesignSettings(request, response);
+      return;
+    }
+    if ((request.url || '').startsWith('/__local-design/open')) {
+      handleLocalDesignOpen(request, response);
       return;
     }
 

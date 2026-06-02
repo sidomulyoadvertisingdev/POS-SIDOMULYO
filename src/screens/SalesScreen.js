@@ -2819,6 +2819,65 @@ const persistLocalDesignNetworkSettings = (settings) => {
     memoryLocalDesignNetworkSettings = next;
   }
 };
+const loadDesktopLocalDesignNetworkSettings = async () => {
+  if (Platform.OS !== 'web' || typeof fetch !== 'function' || typeof window === 'undefined') {
+    return null;
+  }
+  const response = await fetch('/__local-design/settings', { method: 'GET' });
+  if (!response.ok) {
+    return null;
+  }
+  const payload = await response.json().catch(() => null);
+  const settings = payload?.settings && typeof payload.settings === 'object' && !Array.isArray(payload.settings)
+    ? payload.settings
+    : null;
+  return settings ? normalizeLocalDesignNetworkSettings(settings) : null;
+};
+const saveDesktopLocalDesignNetworkSettings = async (settings) => {
+  if (Platform.OS !== 'web' || typeof fetch !== 'function' || typeof window === 'undefined') {
+    return null;
+  }
+  const response = await fetch('/__local-design/settings', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ settings: normalizeLocalDesignNetworkSettings(settings) }),
+  });
+  const payload = await response.json().catch(() => null);
+  if (!response.ok) {
+    throw new Error(String(payload?.message || `Gagal menyimpan setting desktop: ${response.status}`));
+  }
+  return payload;
+};
+const removeDesktopLocalDesignNetworkSettings = async () => {
+  if (Platform.OS !== 'web' || typeof fetch !== 'function' || typeof window === 'undefined') {
+    return null;
+  }
+  const response = await fetch('/__local-design/settings', { method: 'DELETE' });
+  const payload = await response.json().catch(() => null);
+  if (!response.ok) {
+    throw new Error(String(payload?.message || `Gagal menghapus setting desktop: ${response.status}`));
+  }
+  return payload;
+};
+const openDesktopLocalDesignFile = async (target) => {
+  if (Platform.OS !== 'web' || typeof fetch !== 'function' || typeof window === 'undefined') {
+    return false;
+  }
+  const response = await fetch('/__local-design/open', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ target: String(target || '').trim() }),
+  });
+  const payload = await response.json().catch(() => null);
+  if (!response.ok) {
+    throw new Error(String(payload?.message || `Gagal membuka file desktop: ${response.status}`));
+  }
+  return true;
+};
 const uploadFileToLocalDesignStorage = async (file, row, settings = {}) => {
   if (Platform.OS !== 'web' || typeof fetch !== 'function' || typeof window === 'undefined') {
     throw new Error('Storage lokal file produksi hanya tersedia di aplikasi desktop/web.');
@@ -6900,6 +6959,60 @@ const openExternalUrl = async (targetUrl) => {
   }
 };
 
+const toFileOpenUrl = (value) => {
+  const text = String(value || '').trim();
+  if (!text) return '';
+  if (/^https?:\/\//i.test(text) || /^file:\/\//i.test(text)) {
+    return text;
+  }
+  if (/^\\\\[^\\]+\\[^\\]+/.test(text)) {
+    const normalized = text.replace(/^\\\\/, '').replace(/\\/g, '/');
+    return `file://${normalized}`;
+  }
+  if (/^[A-Za-z]:[\\/]/.test(text)) {
+    return `file:///${text.replace(/\\/g, '/')}`;
+  }
+  return text;
+};
+
+const buildBackendStorageUrl = (pathValue) => {
+  const relativePath = String(pathValue || '').trim().replace(/^\/+/, '');
+  if (!relativePath) {
+    return '';
+  }
+  const appBaseUrl = String(getApiBaseUrl() || '').replace(/\/api\/?$/i, '').replace(/\/+$/, '');
+  if (!appBaseUrl) {
+    return '';
+  }
+  const safePath = relativePath
+    .split(/[\\/]+/)
+    .filter(Boolean)
+    .map((part) => encodeURIComponent(part))
+    .join('/');
+  return `${appBaseUrl}/storage/${safePath}`;
+};
+
+const resolveProductionLayoutDownloadUrl = (row) => {
+  const openUrl = String(row?.design_open_url || '').trim();
+  if (openUrl) {
+    return toFileOpenUrl(openUrl);
+  }
+
+  const storage = String(row?.design_storage || '').trim().toLowerCase();
+  const filePath = String(row?.design_file_path || '').trim();
+  if (storage === 'backend' && filePath) {
+    return buildBackendStorageUrl(filePath);
+  }
+
+  const rootPath = String(row?.design_root_path || '').trim();
+  const relativePath = String(row?.design_relative_path || '').trim();
+  if (rootPath && relativePath) {
+    return toFileOpenUrl(`${rootPath.replace(/[\\/]+$/, '')}\\${relativePath.replace(/[\\/]+/g, '\\')}`);
+  }
+
+  return toFileOpenUrl(filePath || relativePath);
+};
+
 const SalesScreen = ({ currentUser, onLogout }) => {
   const { width, height } = useWindowDimensions();
   const isDesktop = Platform.OS === 'web' && width >= 1200;
@@ -7139,6 +7252,25 @@ const SalesScreen = ({ currentUser, onLogout }) => {
   const [localDesignNetworkTest, setLocalDesignNetworkTest] = useState(null);
   const [isTestingLocalDesignNetwork, setIsTestingLocalDesignNetwork] = useState(false);
   const [hasUnsavedLocalDesignNetwork, setHasUnsavedLocalDesignNetwork] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    loadDesktopLocalDesignNetworkSettings()
+      .then((settings) => {
+        if (cancelled || !settings) {
+          return;
+        }
+        setLocalDesignNetworkSettings(settings);
+        persistLocalDesignNetworkSettings(settings);
+        setHasSavedLocalDesignNetwork(true);
+        setHasUnsavedLocalDesignNetwork(false);
+      })
+      .catch(() => {
+        // Browser/web biasa tidak memiliki service desktop ini.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
   const [bankAccounts, setBankAccounts] = useState([]);
   const [selectedBankAccountId, setSelectedBankAccountId] = useState(null);
   const [depositModalVisible, setDepositModalVisible] = useState(false);
@@ -8123,12 +8255,17 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     setHasUnsavedLocalDesignNetwork(true);
     setLocalDesignNetworkTest(null);
   };
-  const handleResetLocalDesignNetworkSettings = () => {
+  const handleResetLocalDesignNetworkSettings = async () => {
     setLocalDesignNetworkSettings(null);
     setHasSavedLocalDesignNetwork(false);
     setHasUnsavedLocalDesignNetwork(false);
     setLocalDesignNetworkTest(null);
     persistLocalDesignNetworkSettings(null);
+    try {
+      await removeDesktopLocalDesignNetworkSettings();
+    } catch (_error) {
+      // Tetap reset setting lokal browser walaupun service desktop tidak tersedia.
+    }
     openNotice('Sambungan Jaringan Lokal', 'Setting jaringan lokal komputer ini dikembalikan ke default aplikasi.', null, {
       autoCloseMs: 2200,
     });
@@ -8172,7 +8309,9 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       }
       setLocalDesignNetworkTest(payload);
       persistLocalDesignNetworkSettings(activeLocalDesignNetworkSettings);
-      setLocalDesignNetworkSettings(normalizeLocalDesignNetworkSettings(activeLocalDesignNetworkSettings, backendLocalDesignSettings));
+      const normalizedSettings = normalizeLocalDesignNetworkSettings(activeLocalDesignNetworkSettings, backendLocalDesignSettings);
+      await saveDesktopLocalDesignNetworkSettings(normalizedSettings);
+      setLocalDesignNetworkSettings(normalizedSettings);
       setHasSavedLocalDesignNetwork(true);
       setHasUnsavedLocalDesignNetwork(false);
       const lines = [
@@ -14214,6 +14353,39 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       );
     } finally {
       setUpdatingProductionItemId(null);
+    }
+  };
+
+  const handleDownloadProductionLayoutFile = async (row) => {
+    const itemId = Number(row?.id || 0);
+    const targetUrl = resolveProductionLayoutDownloadUrl(row);
+    if (!targetUrl) {
+      openNotice('File Layout Produksi', `Item #${itemId || '-'} belum memiliki file layout yang bisa dibuka.`);
+      return;
+    }
+
+    try {
+      let opened = false;
+      try {
+        opened = await openDesktopLocalDesignFile(targetUrl);
+      } catch (_desktopError) {
+        opened = false;
+      }
+      if (!opened) {
+        opened = await openExternalUrl(targetUrl);
+      }
+      if (!opened) {
+        throw new Error('Aplikasi tidak bisa membuka link/file layout. Pastikan komputer ini punya akses ke share LAN.');
+      }
+      openNotice('File Layout Produksi', 'File layout dibuka. Jika tidak muncul, cek izin akses folder share LAN.', null, {
+        showDefaultAction: false,
+        autoCloseMs: 1800,
+      });
+    } catch (error) {
+      openNotice(
+        'File Layout Produksi',
+        `Gagal membuka file layout item #${itemId || '-'}: ${error.message}`,
+      );
     }
   };
 
@@ -20306,6 +20478,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
               onUpdateStatus={handleUpdateProductionStatus}
               onReleaseToProduction={handleReleaseProductionItem}
               onUpdateLayoutPlan={handleUpdateProductionLayoutPlan}
+              onDownloadLayoutFile={handleDownloadProductionLayoutFile}
               onBuildDelayWhatsapp={handleBuildProductionDelayWhatsapp}
               updatingItemId={updatingProductionItemId}
             />
