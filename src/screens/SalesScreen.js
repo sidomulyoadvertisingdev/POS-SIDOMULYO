@@ -2793,12 +2793,13 @@ const isBrowserImageFile = (file) => {
     || /\.(jpe?g|png|webp)$/i.test(name);
 };
 const loadImageElementFromFile = (file) => new Promise((resolve, reject) => {
-  if (typeof Image === 'undefined' || typeof URL === 'undefined') {
+  const BrowserImage = globalThis?.Image;
+  if (typeof BrowserImage !== 'function' || typeof URL === 'undefined') {
     reject(new Error('Browser belum mendukung kompres gambar otomatis.'));
     return;
   }
 
-  const image = new Image();
+  const image = new BrowserImage();
   const objectUrl = URL.createObjectURL(file);
   image.onload = () => {
     URL.revokeObjectURL(objectUrl);
@@ -20428,14 +20429,23 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                   </View>
                   <View style={styles.reportSectionCard}>
                     <Text style={styles.reportSectionTitle}>Kolom Piutang Per Invoice</Text>
-                    {reportReceivableItems.length > 0 ? reportReceivableItems.slice(0, 12).map((row) => (
-                      <View key={`report-receivable-${row.invoice_id}`} style={styles.reportNestedItem}>
-                        <Text style={styles.reportNestedTitle}>{row.invoice_no} - {row.customer_name}</Text>
-                        <Text style={styles.reportNestedMeta}>
-                          {formatRupiah(row.due_total || 0)} | {row.status_label || '-'} | Jatuh tempo {row.due_at || '-'} | PIC {row.cashier_name || '-'}
-                        </Text>
-                      </View>
-                    )) : (
+                    {reportReceivableItems.length > 0 ? (
+                      <ScrollView
+                        style={styles.reportReceivableInvoiceScroll}
+                        contentContainerStyle={styles.reportReceivableInvoiceList}
+                        nestedScrollEnabled
+                        showsVerticalScrollIndicator
+                      >
+                        {reportReceivableItems.map((row) => (
+                          <View key={`report-receivable-${row.invoice_id}`} style={styles.reportNestedItem}>
+                            <Text style={styles.reportNestedTitle}>{row.invoice_no} - {row.customer_name}</Text>
+                            <Text style={styles.reportNestedMeta}>
+                              {formatRupiah(row.due_total || 0)} | {row.status_label || '-'} | Jatuh tempo {row.due_at || '-'} | PIC {row.cashier_name || '-'}
+                            </Text>
+                          </View>
+                        ))}
+                      </ScrollView>
+                    ) : (
                       <Text style={styles.reportEmptyText}>Tidak ada piutang aktif.</Text>
                     )}
                     {reportReceivableCashiers.length > 0 ? (
@@ -24428,6 +24438,13 @@ const styles = StyleSheet.create({
   reportNestedList: {
     marginTop: 8,
     gap: 6,
+  },
+  reportReceivableInvoiceScroll: {
+    maxHeight: 240,
+  },
+  reportReceivableInvoiceList: {
+    gap: 6,
+    paddingRight: 4,
   },
   reportNestedItem: {
     borderWidth: 1,
