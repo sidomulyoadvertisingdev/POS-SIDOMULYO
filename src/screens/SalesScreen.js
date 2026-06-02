@@ -1012,6 +1012,179 @@ const firstPositiveNumber = (...values) => {
   }
   return 0;
 };
+const isBlankProductionText = (value) => {
+  const text = String(value || '').trim();
+  if (!text) return true;
+  return ['-', 'null', 'undefined', 'n/a', 'na'].includes(text.toLowerCase());
+};
+const firstProductionText = (...values) => {
+  for (const value of values) {
+    const text = String(value || '').trim();
+    if (!isBlankProductionText(text)) {
+      return text;
+    }
+  }
+  return '';
+};
+const meterToMillimeter = (value) => {
+  const num = toPositiveNumber(value);
+  return num > 0 ? Math.round(num * 1000) : 0;
+};
+const compactProductionSpec = (row = {}) => {
+  const item = row?.item && typeof row.item === 'object' ? row.item : {};
+  const orderItem = row?.order_item && typeof row.order_item === 'object'
+    ? row.order_item
+    : (item?.order_item && typeof item.order_item === 'object' ? item.order_item : {});
+  const snapshot = parseJsonObject(item?.spec_snapshot)
+    || parseJsonObject(orderItem?.spec_snapshot)
+    || parseJsonObject(row?.spec_snapshot)
+    || {};
+  const cartRestore = parseJsonObject(snapshot?.cart_restore) || {};
+  const draftForm = parseJsonObject(snapshot?.draft_form) || {};
+  const specs = parseJsonObject(snapshot?.specs) || {};
+  const bookSpecs = parseJsonObject(snapshot?.book_specs) || {};
+  const widthMm = firstPositiveNumber(
+    item?.input_width_mm,
+    orderItem?.input_width_mm,
+    row?.input_width_mm,
+    cartRestore?.input_width_mm,
+    snapshot?.input_width_mm,
+    specs?.input_width_mm,
+    specs?.width_mm,
+    meterToMillimeter(specs?.width_meter),
+    meterToMillimeter(draftForm?.width_meter),
+  );
+  const heightMm = firstPositiveNumber(
+    item?.input_height_mm,
+    orderItem?.input_height_mm,
+    row?.input_height_mm,
+    cartRestore?.input_height_mm,
+    snapshot?.input_height_mm,
+    specs?.input_height_mm,
+    specs?.height_mm,
+    meterToMillimeter(specs?.length_meter),
+    meterToMillimeter(specs?.height_meter),
+    meterToMillimeter(draftForm?.length_meter),
+    meterToMillimeter(draftForm?.height_meter),
+  );
+  const internalWidthMm = firstPositiveNumber(
+    item?.internal_width_mm,
+    orderItem?.internal_width_mm,
+    row?.internal_width_mm,
+    cartRestore?.internal_width_mm,
+    snapshot?.internal_width_mm,
+    widthMm,
+  );
+  const internalHeightMm = firstPositiveNumber(
+    item?.internal_height_mm,
+    orderItem?.internal_height_mm,
+    row?.internal_height_mm,
+    cartRestore?.internal_height_mm,
+    snapshot?.internal_height_mm,
+    heightMm,
+  );
+  const qty = firstPositiveNumber(
+    item?.qty,
+    orderItem?.qty,
+    row?.qty,
+    row?.quantity,
+    cartRestore?.qty,
+    draftForm?.qty,
+    specs?.qty,
+    snapshot?.qty,
+  );
+  const sizeText = firstProductionText(
+    item?.size_text,
+    orderItem?.size_text,
+    row?.size_text,
+    cartRestore?.size_text,
+    draftForm?.size_text,
+    specs?.size_text,
+    bookSpecs?.finished_size,
+    widthMm > 0 && heightMm > 0 ? `${widthMm} x ${heightMm} mm` : '',
+  );
+  const materialText = firstProductionText(
+    item?.material_text,
+    orderItem?.material_text,
+    row?.material_text,
+    cartRestore?.material_text,
+    draftForm?.material_text,
+    draftForm?.material,
+    specs?.material_text,
+    specs?.material,
+    bookSpecs?.material_source_text,
+    bookSpecs?.material_inside,
+    bookSpecs?.material_cover,
+    item?.name,
+    orderItem?.name,
+  );
+  const finishingText = firstProductionText(
+    item?.finishing_text,
+    orderItem?.finishing_text,
+    row?.finishing_text,
+    cartRestore?.finishing_text,
+    draftForm?.finishing_text,
+    draftForm?.finishing,
+    specs?.finishing_text,
+    specs?.finishing,
+    bookSpecs?.binding_type,
+    'Tanpa finishing',
+  );
+  const missingFields = [];
+  if (!sizeText && !(widthMm > 0 && heightMm > 0)) missingFields.push('ukuran');
+  if (!materialText) missingFields.push('bahan');
+  if (!finishingText) missingFields.push('finishing');
+  if (!(qty > 0)) missingFields.push('quantity');
+
+  return {
+    order_item_id: Number(item?.id || orderItem?.id || row?.order_item_id || 0) || null,
+    product_id: Number(item?.product_id || orderItem?.product_id || row?.product_id || 0) || null,
+    product_name: firstProductionText(item?.name, orderItem?.name, row?.product_name),
+    qty: qty > 0 ? qty : null,
+    input_width_mm: widthMm > 0 ? widthMm : null,
+    input_height_mm: heightMm > 0 ? heightMm : null,
+    internal_width_mm: internalWidthMm > 0 ? internalWidthMm : null,
+    internal_height_mm: internalHeightMm > 0 ? internalHeightMm : null,
+    size_text: sizeText,
+    material_text: materialText,
+    finishing_text: finishingText,
+    lb_max_text: firstProductionText(item?.lb_max_text, orderItem?.lb_max_text, cartRestore?.lb_max_text, draftForm?.lb_max, specs?.lb_max),
+    material_product_id: Number(item?.material_product_id || orderItem?.material_product_id || cartRestore?.material_product_id || 0) || null,
+    material_usage_qty: firstPositiveNumber(item?.material_usage_qty, orderItem?.material_usage_qty, cartRestore?.material_usage_qty, specs?.material_usage_qty) || null,
+    missing_fields: missingFields,
+    spec_snapshot: snapshot && Object.keys(snapshot).length > 0 ? snapshot : null,
+  };
+};
+const buildProofingProductionReleasePayload = (row = {}, payload = {}) => {
+  const basePayload = payload && typeof payload === 'object' && !Array.isArray(payload) ? payload : {};
+  const productionSpec = compactProductionSpec(row);
+  return {
+    ...basePayload,
+    production_spec: productionSpec,
+    production_specs: productionSpec,
+    production_spec_snapshot: productionSpec,
+    order_item_spec: productionSpec,
+    order_item_id: productionSpec.order_item_id || undefined,
+    product_id: productionSpec.product_id || undefined,
+    qty: productionSpec.qty || undefined,
+    input_width_mm: productionSpec.input_width_mm || undefined,
+    input_height_mm: productionSpec.input_height_mm || undefined,
+    internal_width_mm: productionSpec.internal_width_mm || undefined,
+    internal_height_mm: productionSpec.internal_height_mm || undefined,
+    size_text: productionSpec.size_text || undefined,
+    material_text: productionSpec.material_text || undefined,
+    finishing_text: productionSpec.finishing_text || undefined,
+  };
+};
+const formatProductionSpecDiagnostic = (row = {}) => {
+  const spec = compactProductionSpec(row);
+  const invoiceNo = firstProductionText(row?.order?.invoice?.invoice_no, row?.invoice_no, row?.proofing_code, `Proofing #${row?.id || '-'}`);
+  const productName = firstProductionText(spec.product_name, row?.item?.name, 'Item layout');
+  if (spec.missing_fields.length > 0) {
+    return `${invoiceNo} - ${productName}: data yang belum terbaca POS: ${spec.missing_fields.join(', ')}.`;
+  }
+  return `${invoiceNo} - ${productName}: data POS terbaca lengkap (${spec.size_text || `${spec.input_width_mm} x ${spec.input_height_mm} mm`}, ${spec.material_text}, ${spec.finishing_text}, qty ${spec.qty}). Jika backend masih menolak BLK-06, data order item di server kemungkinan belum tersimpan lengkap.`;
+};
 const formatMeterNumber = (value) => {
   const num = toPositiveNumber(value);
   if (num <= 0) return '';
@@ -14478,7 +14651,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
 
     try {
       setProcessingProofingId(proofingId);
-      await releasePosProofingToProduction(proofingId, payload);
+      await releasePosProofingToProduction(proofingId, buildProofingProductionReleasePayload(row, payload));
       await Promise.all([
         loadProofingItems(),
         loadProductionItems().catch(() => {}),
@@ -14494,9 +14667,10 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       );
     } catch (error) {
       const blockerMessage = formatProductionGateError(error);
+      const diagnostic = formatProductionSpecDiagnostic(row);
       openNotice(
         'Gerbang Produksi',
-        blockerMessage || `Gagal melepas proofing #${proofingId} ke produksi: ${error.message}`,
+        [blockerMessage || `Gagal melepas proofing #${proofingId} ke produksi: ${error.message}`, diagnostic].filter(Boolean).join('\n'),
       );
     } finally {
       setProcessingProofingId(null);
@@ -14512,10 +14686,15 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     }
 
     const firstProofingId = Number(selectedRows[0]?.id || 0);
+    let failedRow = null;
     try {
       setProcessingProofingId(firstProofingId);
       for (const row of selectedRows) {
-        await releasePosProofingToProduction(Number(row?.id || 0), payload);
+        failedRow = row;
+        await releasePosProofingToProduction(
+          Number(row?.id || 0),
+          buildProofingProductionReleasePayload(row, payload),
+        );
       }
       await Promise.all([
         loadLayoutItems().catch(() => {}),
@@ -14533,9 +14712,13 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       );
     } catch (error) {
       const blockerMessage = formatProductionGateError(error);
+      const diagnostic = failedRow ? formatProductionSpecDiagnostic(failedRow) : '';
       openNotice(
         'Layout',
-        blockerMessage || `Gagal menaikkan item layout ke produksi: ${formatBackendValidationError(error) || error.message}`,
+        [
+          blockerMessage || `Gagal menaikkan item layout ke produksi: ${formatBackendValidationError(error) || error.message}`,
+          diagnostic,
+        ].filter(Boolean).join('\n'),
       );
     } finally {
       setProcessingProofingId(null);
