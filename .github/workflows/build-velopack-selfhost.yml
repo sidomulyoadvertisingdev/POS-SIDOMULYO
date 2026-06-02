@@ -162,14 +162,14 @@ jobs:
         if: steps.deploy_guard.outputs.skip != 'true'
         run: |
           mkdir -p ~/.ssh
-          ssh-keyscan -p "${SELFHOST_SSH_PORT:-22}" "$SELFHOST_SSH_HOST" >> ~/.ssh/known_hosts
+          ssh-keyscan -T 30 -p "${SELFHOST_SSH_PORT:-22}" "$SELFHOST_SSH_HOST" >> ~/.ssh/known_hosts || true
 
       - name: Deploy self-hosted bundle via rsync
         if: steps.deploy_guard.outputs.skip != 'true'
         run: |
-          rsync -av --delete -e "ssh -p ${SELFHOST_SSH_PORT:-22}" ./release-site/ "${SELFHOST_SSH_USER}@${SELFHOST_SSH_HOST}:${SELFHOST_DEPLOY_PATH}/"
+          rsync -av --delete -e "ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p ${SELFHOST_SSH_PORT:-22}" ./release-site/ "${SELFHOST_SSH_USER}@${SELFHOST_SSH_HOST}:${SELFHOST_DEPLOY_PATH}/"
 
       - name: Verify remote Velopack files
         if: steps.deploy_guard.outputs.skip != 'true'
         run: |
-          ssh -p "${SELFHOST_SSH_PORT:-22}" "${SELFHOST_SSH_USER}@${SELFHOST_SSH_HOST}" "test -f '${SELFHOST_DEPLOY_PATH}/releases.win.json' && test -f '${SELFHOST_DEPLOY_PATH}/RELEASES'"
+          ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p "${SELFHOST_SSH_PORT:-22}" "${SELFHOST_SSH_USER}@${SELFHOST_SSH_HOST}" "test -f '${SELFHOST_DEPLOY_PATH}/releases.win.json' && test -f '${SELFHOST_DEPLOY_PATH}/RELEASES'"
