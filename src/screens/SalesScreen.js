@@ -7077,6 +7077,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     searchMode: false,
     source: 'server',
   });
+  const draftServerRowsRef = useRef([]);
   const [invoiceRealtimeState, setInvoiceRealtimeState] = useState({
     available: false,
     pendingCount: 0,
@@ -13229,22 +13230,54 @@ const SalesScreen = ({ currentUser, onLogout }) => {
   };
 
   const buildDraftServerRequestVariants = (baseRequest = {}) => ([
-    baseRequest,
     {
       ...baseRequest,
+      view: undefined,
+      area: 'draft',
+      status: undefined,
+    },
+    {
+      ...baseRequest,
+      view: undefined,
       area: undefined,
       status: 'draft',
     },
+    {
+      ...baseRequest,
+      view: undefined,
+      area: undefined,
+      status: undefined,
+    },
   ]);
 
-  const fetchRowsFromRequestVariants = async (requests = [], fetcher) => {
+  const fetchRowsFromRequestVariants = async (requests = [], fetcher, options = {}) => {
     let mergedRows = [];
     const errors = [];
 
     for (const requestOptions of requests) {
       try {
         const nextRows = await fetcher(requestOptions);
-        mergedRows = mergeInvoiceRows(mergedRows, Array.isArray(nextRows) ? nextRows : []);
+        const requestArea = String(requestOptions?.area || '').trim();
+        const requestStatus = resolveInvoiceStatusKey(requestOptions?.status);
+        const shouldMarkDraftRows = requestArea === 'draft' || requestStatus === 'draft';
+        const normalizedRows = (Array.isArray(nextRows) ? nextRows : []).map((row) => (
+          shouldMarkDraftRows && row && typeof row === 'object' && !isReceivableApprovalInvoiceRow(row)
+            ? { ...row, __workspace_area: 'draft' }
+            : row
+        ));
+        if (options?.source === 'orders') {
+          const draftRows = normalizedRows.filter((row) => isDraftInvoiceRow(row));
+          if (draftRows.length > 0) {
+            draftServerRowsRef.current = mergeInvoiceRows(draftServerRowsRef.current, draftRows);
+            const nextDraftRows = draftServerRowsRef.current;
+            setDraftInvoices((prev) => mergeInvoiceRows(prev, nextDraftRows));
+            updateInvoiceWorkspaceAreaSnapshot(nextDraftRows, {
+              area: 'draft',
+              replaceAreas: ['draft'],
+            });
+          }
+        }
+        mergedRows = mergeInvoiceRows(mergedRows, normalizedRows);
       } catch (error) {
         errors.push(error);
       }
@@ -13259,24 +13292,6 @@ const SalesScreen = ({ currentUser, onLogout }) => {
 
   const fetchDraftWorkspaceRows = async (baseRequest = {}) => {
     const requests = buildDraftServerRequestVariants(baseRequest);
-    let transactionResult = {
-      rows: [],
-      error: null,
-      allFailed: true,
-    };
-
-    for (const requestOptions of requests) {
-      const result = await fetchRowsFromRequestVariants(
-        [requestOptions],
-        (nextRequestOptions) => fetchAllPosOrderTransactions(nextRequestOptions),
-      );
-      transactionResult = {
-        rows: mergeInvoiceRows(transactionResult.rows, result.rows),
-        error: result.error || transactionResult.error,
-        allFailed: transactionResult.allFailed && result.allFailed,
-      };
-    }
-
     let orderResult = {
       rows: [],
       error: null,
@@ -13287,6 +13302,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       const result = await fetchRowsFromRequestVariants(
         [requestOptions],
         (nextRequestOptions) => fetchAllPosOrders(nextRequestOptions),
+        { source: 'orders' },
       );
       orderResult = {
         rows: mergeInvoiceRows(orderResult.rows, result.rows),
@@ -13295,20 +13311,50 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       };
     }
 
-    if (!transactionResult.allFailed) {
+    if (orderResult.rows.length > 0) {
       return {
-        rows: mergeInvoiceRows(transactionResult.rows, orderResult.rows),
-        error: transactionResult.error || orderResult.error,
+        rows: orderResult.rows,
+        error: null,
+        allFailed: false,
+      };
+    }
+
+    let transactionResult = {
+      rows: [],
+      error: null,
+      allFailed: true,
+    };
+
+    for (const requestOptions of requests) {
+      const result = await fetchRowsFromRequestVariants(
+        [requestOptions],
+        (nextRequestOptions) => fetchAllPosOrderTransactions(nextRequestOptions),
+        { source: 'transactions' },
+      );
+      transactionResult = {
+        rows: mergeInvoiceRows(transactionResult.rows, result.rows),
+        error: result.error || transactionResult.error,
+        allFailed: transactionResult.allFailed && result.allFailed,
+      };
+    }
+
+    const mergedRows = mergeInvoiceRows(transactionResult.rows, orderResult.rows);
+    const hasMergedRows = mergedRows.length > 0;
+
+    if (hasMergedRows) {
+      return {
+        rows: mergedRows,
+        error: null,
         allFailed: false,
       };
     }
 
     return {
-      rows: orderResult.rows,
+      rows: [],
       error: orderResult.error
         ? new Error(`${transactionResult.error?.message || 'Gagal memuat transaksi draft'}\nFallback daftar order juga gagal: ${orderResult.error.message}`)
-        : transactionResult.error,
-      allFailed: orderResult.allFailed,
+        : (transactionResult.error || orderResult.error),
+      allFailed: true,
     };
   };
 
@@ -13391,6 +13437,12 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       ...options,
       page: requestPage,
     });
+    if (invoiceRequestOptions.area === 'draft') {
+      invoiceRequestOptions.view = undefined;
+    }
+    if (invoiceRequestOptions.area === 'draft' && !appendRows) {
+      draftServerRowsRef.current = [];
+    }
     if (invoiceRequestOptions.area === 'draft' && !appendRows && !options?.forceServer) {
       const snapshotRows = Array.isArray(invoiceWorkspaceRowsByArea?.draft)
         ? invoiceWorkspaceRowsByArea.draft
@@ -13538,7 +13590,10 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         || (invoiceLoadError && INVOICE_ACTIVE_WORK_AREAS.has(invoiceRequestOptions.area))
         ? (Array.isArray(draftInvoices) ? draftInvoices : [])
         : [];
-      const mergedRows = mergeInvoiceRows(baseRows, [...queueRows, ...approvalListRows, ...rows])
+      const effectiveRows = invoiceRequestOptions.area === 'draft' && (!Array.isArray(rows) || rows.length === 0)
+        ? draftServerRowsRef.current
+        : rows;
+      const mergedRows = mergeInvoiceRows(baseRows, [...queueRows, ...approvalListRows, ...effectiveRows])
         .filter((row) => invoiceRequestOptions.area !== 'draft' || !isReceivableApprovalInvoiceRow(row));
       const nextSuccessCache = syncInvoiceSuccessCacheFromRows(mergedRows);
       if (mergedRows.length > 0 || invoiceRequestOptions.area !== 'draft' || !invoiceLoadError) {
@@ -13626,6 +13681,9 @@ const SalesScreen = ({ currentUser, onLogout }) => {
           area,
           page: 1,
         });
+        if (String(area || '').trim() === 'draft') {
+          requestOptions.view = undefined;
+        }
         const shouldLoadAllActiveRows = INVOICE_ACTIVE_WORK_AREAS.has(String(area || '').trim());
 
         try {
@@ -13839,6 +13897,17 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     }
   };
 
+  const fetchActiveProductionBatches = async () => {
+    const batchGroups = await Promise.all([
+      fetchPosProductionBatches('open').catch(() => []),
+      fetchPosProductionBatches('all').catch(() => []),
+    ]);
+    return mergeInvoiceRows([], batchGroups.flat().filter((batch) => {
+      const status = String(batch?.status || '').trim().toLowerCase();
+      return batch && !['printed', 'completed', 'done', 'finished', 'closed'].includes(status);
+    }));
+  };
+
   const loadProductionItems = async (override = {}) => {
     if (!backendReady) {
       setProductionRows([]);
@@ -13856,7 +13925,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
           scope: 'all',
         }),
         fetchPosProductionSetup().catch(() => ({ materials: [], machines: [] })),
-        fetchPosProductionBatches('open').catch(() => []),
+        fetchActiveProductionBatches(),
       ]);
       setProductionRows(
         toDataRows(payload).filter((row) => !isDraftCandidate(row?.order || row)),
@@ -14143,7 +14212,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     try {
       const [payload, openBatches] = await Promise.all([
         fetchPosProductionItems({ status: 'all', scope: 'all' }),
-        fetchPosProductionBatches('open').catch(() => []),
+        fetchActiveProductionBatches(),
       ]);
       const rows = toDataRows(payload).filter((row) => !isDraftCandidate(row?.order || row));
       setProductionBatches(Array.isArray(openBatches) ? openBatches : []);
@@ -15395,7 +15464,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
           setOpenedDraftSignature('');
         }
         setDraftInvoices((prev) => (Array.isArray(prev) ? prev : []).filter((draft) => String(draft?.id || '') !== rowId));
-        await loadDraftInvoices();
+        loadDraftInvoices({ area: 'draft', page: 1, forceServer: true }).catch(() => {});
         openNotice('Invoice', 'Draft dari antrian berhasil dihapus.');
         return;
       }
@@ -15422,7 +15491,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         setOpenedDraftSignature('');
       }
       setDraftInvoices((prev) => prev.filter((draft) => Number(draft?.id || 0) !== selectedId));
-      await loadDraftInvoices();
+      loadDraftInvoices({ area: 'draft', page: 1, forceServer: true }).catch(() => {});
       openNotice('Invoice', `Draft #${selectedId} berhasil dihapus.`);
     } catch (error) {
       openNotice('Invoice', `Gagal menghapus draft: ${error.message}`);
@@ -20314,13 +20383,13 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                 sectionMeta={invoiceSectionMeta}
                 onFlushQueue={async () => {
                   await flushQueuedOrders();
-                  await loadDraftInvoices({ page: 1, forceServer: true });
+                  await loadDraftInvoices({ area: invoiceFilter, page: 1, forceServer: true });
                 }}
-                onRefresh={() => loadDraftInvoices({ page: 1, forceServer: true })}
+                onRefresh={() => loadDraftInvoices({ area: invoiceFilter, page: 1, forceServer: true })}
                 isLoading={isDraftLoading}
                 invoiceListMeta={invoiceListMeta}
                 invoiceRealtimeState={invoiceRealtimeState}
-                onApplyRealtimeUpdates={() => loadDraftInvoices({ page: 1, forceServer: true })}
+                onApplyRealtimeUpdates={() => loadDraftInvoices({ area: invoiceFilter, page: 1, forceServer: true })}
                 invoiceFilter={invoiceFilter}
                 onSelectAreaMenu={openInvoiceAreaMenu}
                 onSelectAreaFilter={openInvoiceAreaFilter}

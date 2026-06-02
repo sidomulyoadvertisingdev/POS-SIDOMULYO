@@ -52,6 +52,113 @@ const normalizeTextKey = (value) => String(value || '')
   .replace(/[^a-z0-9]+/g, ' ')
   .trim();
 
+const toPositiveNumber = (value) => {
+  const parsed = Number(value || 0);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+};
+
+const collectProductionItemIds = (row) => {
+  const ids = new Set();
+  [
+    row?.id,
+    row?.pos_order_item_id,
+    row?.order_item_id,
+    row?.item_id,
+    row?.production_item_id,
+    row?.pos_production_item_id,
+    row?.order_item?.id,
+    row?.item?.id,
+  ].forEach((value) => {
+    const id = toPositiveNumber(value);
+    if (id > 0) ids.add(id);
+  });
+  return ids;
+};
+
+const collectProductionBatchIds = (row) => {
+  const ids = new Set();
+  [
+    row?.batch_id,
+    row?.production_batch_id,
+    row?.pos_production_batch_id,
+    row?.open_batch_id,
+    row?.batch?.id,
+    row?.production_batch?.id,
+    row?.spec_snapshot?.production_job_batch_id,
+    row?.spec_snapshot?.book_workflow?.production_job_batch_id,
+    row?.spec_snapshot?.cart_restore?.production_job_batch_id,
+  ].forEach((value) => {
+    const id = toPositiveNumber(value);
+    if (id > 0) ids.add(id);
+  });
+  return ids;
+};
+
+const collectMaterialIds = (row) => {
+  const ids = new Set();
+  [
+    row?.material_id,
+    row?.pos_material_id,
+    row?.product_material_id,
+    row?.material?.id,
+    row?.production_batch?.material?.id,
+    row?.batch?.material?.id,
+    row?.product?.id,
+    row?.pos_product_id,
+  ].forEach((value) => {
+    const id = toPositiveNumber(value);
+    if (id > 0) ids.add(id);
+  });
+  return ids;
+};
+
+const collectBatchItemIds = (entry) => {
+  const ids = new Set();
+  [
+    entry?.pos_order_item_id,
+    entry?.order_item_id,
+    entry?.item_id,
+    entry?.production_item_id,
+    entry?.pos_production_item_id,
+    entry?.id,
+    entry?.item?.id,
+    entry?.order_item?.id,
+    entry?.production_item?.id,
+  ].forEach((value) => {
+    const id = toPositiveNumber(value);
+    if (id > 0) ids.add(id);
+  });
+  return ids;
+};
+
+const collectBatchRows = (batch) => []
+  .concat(Array.isArray(batch?.items) ? batch.items : [])
+  .concat(Array.isArray(batch?.batch_items) ? batch.batch_items : [])
+  .concat(Array.isArray(batch?.production_items) ? batch.production_items : [])
+  .concat(Array.isArray(batch?.order_items) ? batch.order_items : [])
+  .concat(Array.isArray(batch?.pos_order_items) ? batch.pos_order_items : [])
+  .concat(Array.isArray(batch?.details) ? batch.details : [])
+  .concat(Array.isArray(batch?.data?.items) ? batch.data.items : []);
+
+const hasSharedId = (leftIds, rightIds) => {
+  for (const id of leftIds) {
+    if (rightIds.has(id)) return true;
+  }
+  return false;
+};
+
+const firstSetValue = (values) => {
+  for (const value of values) {
+    return value;
+  }
+  return 0;
+};
+
+const isActiveBatch = (batch) => {
+  const status = String(batch?.status || '').trim().toLowerCase();
+  return !['printed', 'completed', 'done', 'finished', 'closed'].includes(status);
+};
+
 const sanitizeCodeSegment = (value, fallback = 'ITEM') => {
   const text = String(value || '').trim()
     .toUpperCase()
@@ -392,13 +499,58 @@ const ProductionPanel = ({
     .filter(({ row }) => ['waiting_design', 'waiting_production'].includes(resolveProductionStatusKey(row?.production_status)))
     .slice(0, 8);
 
-  const findOpenBatchForItem = (itemId) => {
-    const normalizedItemId = Number(itemId || 0);
-    if (normalizedItemId <= 0) return null;
-    return batchRows.find((batch) => (
-      Array.isArray(batch?.items)
-      && batch.items.some((entry) => Number(entry?.pos_order_item_id || 0) === normalizedItemId)
-    )) || null;
+  const findOpenBatchForItem = (row) => {
+    const itemIds = collectProductionItemIds(row);
+    const rowBatchIds = collectProductionBatchIds(row);
+    const rowMaterialIds = collectMaterialIds(row);
+    const embeddedBatch = row?.batch && typeof row.batch === 'object'
+      ? row.batch
+      : (row?.production_batch && typeof row.production_batch === 'object' ? row.production_batch : null);
+    if (embeddedBatch?.id && isActiveBatch(embeddedBatch)) {
+      return embeddedBatch;
+    }
+    if (itemIds.size <= 0 && rowBatchIds.size <= 0) return null;
+    const matchedBatch = batchRows.find((batch) => {
+      if (!isActiveBatch(batch)) {
+        return false;
+      }
+
+      const batchId = toPositiveNumber(batch?.id);
+      if (batchId > 0 && rowBatchIds.has(batchId)) {
+        return true;
+      }
+
+      const batchItems = collectBatchRows(batch);
+      return batchItems.some((entry) => hasSharedId(itemIds, collectBatchItemIds(entry)));
+    }) || null;
+
+    if (matchedBatch) {
+      return matchedBatch;
+    }
+
+    if (rowMaterialIds.size > 0) {
+      const materialMatchedBatches = batchRows.filter((batch) => (
+        isActiveBatch(batch)
+        && hasSharedId(rowMaterialIds, collectMaterialIds(batch))
+      ));
+      if (materialMatchedBatches.length === 1) {
+        return materialMatchedBatches[0];
+      }
+    }
+
+    const fallbackBatchId = firstSetValue(rowBatchIds);
+    if (fallbackBatchId > 0) {
+      return {
+        id: fallbackBatchId,
+        status: 'open',
+        material: row?.material || row?.product || null,
+        machine: row?.production_batch?.machine || row?.batch?.machine || null,
+        item_count: 1,
+        items: [{ pos_order_item_id: firstSetValue(itemIds) || row?.id }],
+      };
+    }
+
+    return null;
   };
 
   const updateFinalizeDraft = (itemId, field, value) => {
@@ -514,7 +666,7 @@ const ProductionPanel = ({
             const canReleaseWaitingDesign = status === 'waiting_design' && !usesProofing && designFile.hasFile;
             const canPlanLayout = status === 'waiting_production';
             const canSendDelayInfo = ['waiting_design', 'waiting_production', 'in_batch'].includes(status);
-            const openBatch = findOpenBatchForItem(rowId);
+            const openBatch = findOpenBatchForItem(row);
             const finalizeValues = finalizeDraft[String(rowId || '')] || {};
 
             return (

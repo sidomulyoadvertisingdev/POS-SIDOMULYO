@@ -138,6 +138,32 @@ test('semua bentuk draft lama dan baru tetap dikenali sebagai draft', () => {
         },
       ],
     },
+    {
+      id: 1018,
+      status: 'pending',
+      is_draft: true,
+      invoice: {
+        id: 518,
+        status: 'pending',
+      },
+    },
+    {
+      id: 1019,
+      status: 'pending',
+      order: {
+        id: 519,
+        is_draft_order: 1,
+      },
+    },
+    {
+      id: 1023,
+      status: 'open',
+      __workspace_area: 'draft',
+      invoice: {
+        id: 523,
+        status: 'unpaid',
+      },
+    },
   ];
 
   rows.forEach((row) => {

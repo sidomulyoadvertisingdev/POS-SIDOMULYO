@@ -217,6 +217,33 @@ const isDraftCompatibleStatus = (status) => {
   return key === '' || key === 'pending' || key === 'draft';
 };
 
+const isTruthyDraftFlag = (value) => {
+  if (value === true || value === 1) {
+    return true;
+  }
+  const text = normalizeText(value);
+  return ['1', 'true', 'yes', 'y', 'draft'].includes(text);
+};
+
+const hasExplicitDraftFlag = (row) => {
+  const sourceRows = []
+    .concat(row || [])
+    .concat(row?.order || [])
+    .concat(row?.invoice || [])
+    .concat(Array.isArray(row?.items) ? row.items : [])
+    .concat(Array.isArray(row?.order_items) ? row.order_items : [])
+    .concat(Array.isArray(row?.order?.items) ? row.order.items : []);
+
+  return sourceRows.some((source) => Boolean(source && typeof source === 'object' && (
+    isTruthyDraftFlag(source?.is_draft)
+    || isTruthyDraftFlag(source?.isDraft)
+    || isTruthyDraftFlag(source?.draft)
+    || isTruthyDraftFlag(source?.draft_order)
+    || isTruthyDraftFlag(source?.is_draft_order)
+    || isTruthyDraftFlag(source?.is_sales_draft)
+  )));
+};
+
 const hasLegacyDraftSnapshot = (row) => {
   const snapshotCandidates = [
     row?.draft_form,
@@ -285,6 +312,14 @@ const isDraftCandidate = (row) => {
     return false;
   }
 
+  if (normalizeText(row?.__workspace_area) === 'draft') {
+    return true;
+  }
+
+  if (hasExplicitDraftFlag(row)) {
+    return true;
+  }
+
   const statusCandidates = [
     row?.status,
     row?.order_status,
@@ -323,6 +358,12 @@ const isDraftInvoiceRow = (row) => {
     return false;
   }
   if (normalizeText(row?.__source) === 'queue') {
+    return true;
+  }
+  if (normalizeText(row?.__workspace_area) === 'draft') {
+    return true;
+  }
+  if (hasExplicitDraftFlag(row)) {
     return true;
   }
   if (resolveInvoiceStatusKey(row?.invoice?.status) === 'draft') {

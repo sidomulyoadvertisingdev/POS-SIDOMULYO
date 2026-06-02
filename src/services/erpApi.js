@@ -404,15 +404,61 @@ const toDataList = (payload) => {
   if (Array.isArray(payload?.data)) {
     return payload.data;
   }
+  if (Array.isArray(payload?.data?.data)) {
+    return payload.data.data;
+  }
+  if (Array.isArray(payload?.orders)) {
+    return payload.orders;
+  }
+  if (Array.isArray(payload?.data?.orders)) {
+    return payload.data.orders;
+  }
+  if (Array.isArray(payload?.transactions)) {
+    return payload.transactions;
+  }
+  if (Array.isArray(payload?.data?.transactions)) {
+    return payload.data.transactions;
+  }
   return [];
 };
 
 const toPaginatedDataList = (payload) => {
   const data = toDataList(payload);
-  const currentPage = Number(payload?.current_page || 1) || 1;
-  const lastPage = Number(payload?.last_page || currentPage) || currentPage;
-  const perPage = Number(payload?.per_page || data.length || 0) || data.length;
-  const total = Number(payload?.total || data.length || 0) || data.length;
+  const pageMeta = payload?.meta && typeof payload.meta === 'object'
+    ? payload.meta
+    : (payload?.data?.meta && typeof payload.data.meta === 'object' ? payload.data.meta : null);
+  const paginationSource = payload?.data && !Array.isArray(payload.data) && typeof payload.data === 'object'
+    ? payload.data
+    : payload;
+  const currentPage = Number(
+    payload?.current_page
+    || paginationSource?.current_page
+    || pageMeta?.current_page
+    || pageMeta?.currentPage
+    || 1,
+  ) || 1;
+  const lastPage = Number(
+    payload?.last_page
+    || paginationSource?.last_page
+    || pageMeta?.last_page
+    || pageMeta?.lastPage
+    || currentPage,
+  ) || currentPage;
+  const perPage = Number(
+    payload?.per_page
+    || paginationSource?.per_page
+    || pageMeta?.per_page
+    || pageMeta?.perPage
+    || data.length
+    || 0,
+  ) || data.length;
+  const total = Number(
+    payload?.total
+    || paginationSource?.total
+    || pageMeta?.total
+    || data.length
+    || 0,
+  ) || data.length;
 
   return {
     data,
