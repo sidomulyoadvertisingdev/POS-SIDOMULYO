@@ -7,6 +7,7 @@ import SalesScreen from './src/screens/SalesScreen';
 import StartupSplashScreen from './src/components/StartupSplashScreen';
 import { appEnv } from './src/config/appEnv';
 import { logoutPosUser } from './src/services/erpApi';
+const { formatAppVersionLabel } = require('./src/utils/appVersion');
 
 class AppErrorBoundary extends Component {
   constructor(props) {
@@ -118,7 +119,7 @@ export default function App() {
 
       {isStartupSplashVisible ? (
         <StartupSplashScreen
-          version={appEnv.appVersion}
+          version={formatAppVersionLabel(appEnv.appVersion, { prefix: 'Version' })}
           onFinish={() => {
             setIsStartupSplashVisible(false);
           }}

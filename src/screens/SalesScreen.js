@@ -107,6 +107,7 @@ import {
 const { buildProductPickerTree, hasA3Token } = require('../utils/productPickerTree');
 const { resolveQtyOnlyProductMode } = require('../utils/productModes');
 const { extractOrderDiscountAmount } = require('../utils/receiptSummary');
+const { formatAppVersionLabel } = require('../utils/appVersion');
 const {
   canUserAccessInvoiceRow,
   canUserViewInvoiceRow,
@@ -6395,13 +6396,6 @@ const resolveDraftSnapshotState = (row) => {
     backgroundColor: '#fef3f2',
   };
 };
-const resolveAppVersionLabel = () => {
-  const raw = appEnv.appVersion;
-  if (!raw) {
-    return 'v1.0.0';
-  }
-  return raw.toLowerCase().startsWith('v') ? raw : `v${raw}`;
-};
 const PRODUCTION_STATUS_TONE_MAP = {
   waiting_design: require('../../assets/notifikasi/notifikasi-masukdesign.mp3'),
   waiting_production: require('../../assets/notifikasi/notifikasi-produksi.mp3'),
@@ -6409,7 +6403,7 @@ const PRODUCTION_STATUS_TONE_MAP = {
   printed: require('../../assets/notifikasi/notifikasi-selesai.mp3'),
   default: require('../../assets/notifikasi/notifikasi-produksi.mp3'),
 };
-const APP_VERSION_LABEL = resolveAppVersionLabel();
+const APP_VERSION_LABEL = formatAppVersionLabel(appEnv.appVersion, { fallback: 'v1.0.0' });
 const isDraftPayload = (payload) => {
   const status = String(payload?.status || '').trim().toLowerCase();
   if (status === 'draft') {
@@ -13275,9 +13269,6 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         error: result.error || transactionResult.error,
         allFailed: transactionResult.allFailed && result.allFailed,
       };
-      if (transactionResult.rows.length > 0) {
-        break;
-      }
     }
 
     if (!transactionResult.allFailed) {
@@ -13300,9 +13291,6 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         error: result.error || orderResult.error,
         allFailed: orderResult.allFailed && result.allFailed,
       };
-      if (orderResult.rows.length > 0) {
-        break;
-      }
     }
 
     return {
@@ -13854,6 +13842,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       const payload = await fetchPosProductionItems({
         status,
         search,
+        scope: 'all',
       });
       setProductionRows(
         toDataRows(payload).filter((row) => !isDraftCandidate(row?.order || row)),
@@ -14134,7 +14123,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     }
     productionPollingRef.current = true;
     try {
-      const payload = await fetchPosProductionItems({ status: 'all' });
+      const payload = await fetchPosProductionItems({ status: 'all', scope: 'all' });
       const rows = toDataRows(payload).filter((row) => !isDraftCandidate(row?.order || row));
       const nextSnapshot = new Map();
       const changes = [];

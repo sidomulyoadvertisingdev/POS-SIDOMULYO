@@ -249,6 +249,72 @@ const resolveDesignFileInfo = (row) => {
   };
 };
 
+const resolveProductionFlow = (row, designFile) => {
+  const status = resolveProductionStatusKey(row?.production_status);
+  const usesProofing = row?.proofing_required === true || Boolean(row?.proofing);
+  const hasFile = Boolean(designFile?.hasFile);
+  const layoutStatus = normalizeTextKey(row?.layout_status);
+
+  const steps = [
+    {
+      key: 'file',
+      label: usesProofing ? 'Proofing/Layout' : 'File Final',
+      done: hasFile || ['waiting_production', 'in_batch', 'printed'].includes(status),
+      active: status === 'waiting_design',
+    },
+    {
+      key: 'queue',
+      label: 'Antrean Produksi',
+      done: ['in_batch', 'printed'].includes(status),
+      active: status === 'waiting_production',
+    },
+    {
+      key: 'batch',
+      label: 'Cetak / Batch',
+      done: status === 'printed',
+      active: status === 'in_batch',
+    },
+    {
+      key: 'printed',
+      label: 'Selesai',
+      done: status === 'printed',
+      active: status === 'printed',
+    },
+  ];
+
+  let title = 'Ikuti alur produksi backend';
+  let hint = 'Status item akan bergerak sesuai gerbang validasi backend.';
+
+  if (status === 'waiting_design') {
+    title = usesProofing ? 'Menunggu layout hasil proofing' : 'Menunggu file final/layout';
+    hint = usesProofing
+      ? 'Naikkan dari menu Layout setelah proofing approved, pembayaran memenuhi syarat, dan file layout terupload.'
+      : (hasFile
+        ? 'File sudah ada. Tekan Masuk Produksi untuk menjalankan gerbang validasi backend.'
+        : 'Upload file final/layout dulu. Backend menolak masuk produksi bila file final belum siap.');
+  } else if (status === 'waiting_production') {
+    title = 'Sudah masuk antrean produksi';
+    hint = layoutStatus === 'proses_layout'
+      ? 'Layout sedang diproses. Setelah siap cetak, operator bisa download file lalu Masuk Batch.'
+      : 'Item sudah lolos gate. Operator bisa download file layout lalu Masuk Batch.';
+  } else if (status === 'in_batch') {
+    title = 'Sedang proses cetak/batch';
+    hint = 'Tandai Printed hanya setelah cetak selesai dan siap lanjut ke proses berikutnya.';
+  } else if (status === 'printed') {
+    title = 'Produksi selesai';
+    hint = 'Item sudah selesai cetak menurut status backend.';
+  }
+
+  return {
+    status,
+    usesProofing,
+    hasFile,
+    steps,
+    title,
+    hint,
+  };
+};
+
 const buildLayoutRows = (items) => items
   .map((row, index) => {
     const dueAt = parseDateValue(row?.layout_due_at) || resolveDueAt(row);
@@ -412,8 +478,11 @@ const ProductionPanel = ({
             const canMoveToBatch = status === 'waiting_production';
             const canMoveToPrinted = status === 'in_batch';
             const usesProofing = row?.proofing_required === true || Boolean(row?.proofing);
-            const canPlanLayout = ['waiting_design', 'waiting_production'].includes(status);
             const designFile = resolveDesignFileInfo(row);
+            const flow = resolveProductionFlow(row, designFile);
+            const canReleaseWaitingDesign = status === 'waiting_design' && !usesProofing && designFile.hasFile;
+            const canPlanLayout = status === 'waiting_production';
+            const canSendDelayInfo = ['waiting_design', 'waiting_production', 'in_batch'].includes(status);
 
             return (
               <View key={String(rowId || `prod-${index}`)} style={styles.card}>
@@ -432,6 +501,31 @@ const ProductionPanel = ({
                     <View style={[styles.badge, statusBadgeStyle(status)]}>
                       <Text style={styles.badgeText}>{toStatusLabel(status)}</Text>
                     </View>
+                    <View style={styles.flowBox}>
+                      <Text style={styles.flowTitle}>{flow.title}</Text>
+                      <View style={styles.flowStepRow}>
+                        {flow.steps.map((step) => (
+                          <View
+                            key={`${rowId}-${step.key}`}
+                            style={[
+                              styles.flowStep,
+                              step.done ? styles.flowStepDone : null,
+                              step.active ? styles.flowStepActive : null,
+                            ]}
+                          >
+                            <Text
+                              style={[
+                                styles.flowStepText,
+                                step.done || step.active ? styles.flowStepTextActive : null,
+                              ]}
+                            >
+                              {step.label}
+                            </Text>
+                          </View>
+                        ))}
+                      </View>
+                      <Text style={styles.flowHint}>{flow.hint}</Text>
+                    </View>
                   </View>
                   <View style={styles.actionWrap}>
                     {designFile.hasFile ? (
@@ -442,6 +536,18 @@ const ProductionPanel = ({
                       >
                         <Text style={styles.actionDownloadButtonText}>Download File Layout</Text>
                       </Pressable>
+                    ) : null}
+                    {canReleaseWaitingDesign ? (
+                      <>
+                        <Pressable
+                          style={[styles.actionButton, isUpdating ? styles.actionDisabled : null]}
+                          disabled={isUpdating}
+                          onPress={() => onReleaseToProduction?.(row)}
+                        >
+                          <Text style={styles.actionButtonText}>{isUpdating ? 'Memproses...' : 'Masuk Produksi'}</Text>
+                        </Pressable>
+                        <Text style={styles.hintText}>Backend akan cek invoice, payment, file final, approval, dan spesifikasi.</Text>
+                      </>
                     ) : null}
                     {canMoveToBatch ? (
                       <Pressable
@@ -461,20 +567,11 @@ const ProductionPanel = ({
                         <Text style={styles.actionButtonText}>{isUpdating ? 'Memproses...' : 'Tandai Printed'}</Text>
                       </Pressable>
                     ) : null}
-                    {status === 'waiting_design' && !usesProofing ? (
-                      <>
-                        <Pressable
-                          style={[styles.actionButton, isUpdating ? styles.actionDisabled : null]}
-                          disabled={isUpdating}
-                          onPress={() => onReleaseToProduction?.(row)}
-                        >
-                          <Text style={styles.actionButtonText}>{isUpdating ? 'Memproses...' : 'Masuk Produksi'}</Text>
-                        </Pressable>
-                        <Text style={styles.hintText}>Backend akan memeriksa seluruh syarat gate.</Text>
-                      </>
-                    ) : null}
                     {status === 'waiting_design' && usesProofing ? (
-                      <Text style={styles.hintText}>Release item ini melalui menu Proofing.</Text>
+                      <Text style={styles.hintText}>Release item proofing lewat menu Layout setelah file layout terupload.</Text>
+                    ) : null}
+                    {status === 'waiting_design' && !usesProofing && !designFile.hasFile ? (
+                      <Text style={styles.hintText}>Belum bisa Masuk Produksi: file final/layout belum ada.</Text>
                     ) : null}
                     {canPlanLayout ? (
                       <>
@@ -492,6 +589,10 @@ const ProductionPanel = ({
                         >
                           <Text style={styles.actionSoftButtonText}>{isUpdating ? 'Memproses...' : 'Langsung Cetak'}</Text>
                         </Pressable>
+                      </>
+                    ) : null}
+                    {canSendDelayInfo ? (
+                      <>
                         <Pressable
                           style={[styles.actionButton, styles.actionSoftOrange, isUpdating ? styles.actionDisabled : null]}
                           disabled={isUpdating}
@@ -825,6 +926,54 @@ const styles = StyleSheet.create({
     fontSize: 10,
     fontWeight: '800',
     color: '#1f1f1f',
+  },
+  flowBox: {
+    borderWidth: 1,
+    borderColor: '#e1e8f5',
+    backgroundColor: '#fbfdff',
+    borderRadius: 10,
+    padding: 8,
+    marginTop: 5,
+    gap: 6,
+  },
+  flowTitle: {
+    fontSize: 11,
+    color: '#173c87',
+    fontWeight: '900',
+  },
+  flowStepRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 5,
+  },
+  flowStep: {
+    borderWidth: 1,
+    borderColor: '#d7e2f4',
+    backgroundColor: '#f3f6fb',
+    borderRadius: 999,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+  },
+  flowStepDone: {
+    borderColor: '#9dd4ad',
+    backgroundColor: '#eaf8ec',
+  },
+  flowStepActive: {
+    borderColor: '#0755b8',
+    backgroundColor: '#e8f1ff',
+  },
+  flowStepText: {
+    fontSize: 9,
+    color: '#65758d',
+    fontWeight: '900',
+  },
+  flowStepTextActive: {
+    color: '#173c87',
+  },
+  flowHint: {
+    fontSize: 10,
+    color: '#53647d',
+    fontWeight: '700',
   },
   actionWrap: {
     minWidth: 120,

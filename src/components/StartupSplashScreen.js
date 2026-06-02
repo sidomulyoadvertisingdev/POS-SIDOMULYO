@@ -165,7 +165,7 @@ export default function StartupSplashScreen({ version, onFinish }) {
         </View>
 
         <View style={styles.footer}>
-          <Text style={styles.versionText}>Version {version || '-'}</Text>
+          <Text style={styles.versionText}>{version || '-'}</Text>
           <Text style={styles.footerText}>©sidomulyoproject</Text>
         </View>
       </View>

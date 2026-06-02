@@ -9,6 +9,7 @@ import {
   loginPosUser,
 } from '../services/erpApi';
 import { appEnv } from '../config/appEnv';
+const { formatAppVersionLabel } = require('../utils/appVersion');
 
 const LOGIN_REMEMBER_KEY = 'pos_login_remember_v1';
 
@@ -202,7 +203,7 @@ const LoginScreen = ({ onLoginSuccess }) => {
 
             <View style={styles.metaWrap}>
               <Text style={styles.metaText}>©sidomulyoproject</Text>
-              <Text style={styles.metaText}>Version {appEnv.appVersion || '-'}</Text>
+              <Text style={styles.metaText}>{formatAppVersionLabel(appEnv.appVersion, { prefix: 'Version' })}</Text>
               <Text style={styles.metaText}>Server {runtimeApiBaseUrl || appEnv.erpApiBaseUrl || '-'}</Text>
             </View>
           </View>
