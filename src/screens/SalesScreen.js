@@ -51,8 +51,10 @@ import {
   fetchPosOrderDetail,
   fetchPosOrdersPage,
   fetchPosOrderTransactionsPage,
+  fetchPosProductionBatches,
   fetchPosProductionItems,
   fetchPosProductionMaterials,
+  fetchPosProductionSetup,
   fetchPosProductDetail,
   fetchPosProofingDetail,
   fetchPosProofingHistory,
@@ -65,6 +67,8 @@ import {
   fetchPosSyncStatus,
   fetchUserDirectory,
   fetchDanaQrisPaymentStatus,
+  finalizePosProductionBatch,
+  generatePosProductionBatch,
   pickupPosOrder,
   logPosOrderPreviewReceipt,
   releasePosProductionItem,
@@ -7101,6 +7105,8 @@ const SalesScreen = ({ currentUser, onLogout }) => {
   const [proofingSearch, setProofingSearch] = useState('');
   const [layoutSearch, setLayoutSearch] = useState('');
   const [updatingProductionItemId, setUpdatingProductionItemId] = useState(null);
+  const [productionMachines, setProductionMachines] = useState([]);
+  const [productionBatches, setProductionBatches] = useState([]);
   const [processingProofingId, setProcessingProofingId] = useState(null);
   const [closingReportDate, setClosingReportDate] = useState(formatIsoDate(new Date()));
   const [isReportDateModalOpen, setIsReportDateModalOpen] = useState(false);
@@ -13271,10 +13277,6 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       };
     }
 
-    if (!transactionResult.allFailed) {
-      return transactionResult;
-    }
-
     let orderResult = {
       rows: [],
       error: null,
@@ -13290,6 +13292,14 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         rows: mergeInvoiceRows(orderResult.rows, result.rows),
         error: result.error || orderResult.error,
         allFailed: orderResult.allFailed && result.allFailed,
+      };
+    }
+
+    if (!transactionResult.allFailed) {
+      return {
+        rows: mergeInvoiceRows(transactionResult.rows, orderResult.rows),
+        error: transactionResult.error || orderResult.error,
+        allFailed: false,
       };
     }
 
@@ -13839,16 +13849,24 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     const search = String(override?.search || productionSearch || '').trim();
     try {
       setIsProductionLoading(true);
-      const payload = await fetchPosProductionItems({
-        status,
-        search,
-        scope: 'all',
-      });
+      const [payload, setupPayload, openBatches] = await Promise.all([
+        fetchPosProductionItems({
+          status,
+          search,
+          scope: 'all',
+        }),
+        fetchPosProductionSetup().catch(() => ({ materials: [], machines: [] })),
+        fetchPosProductionBatches('open').catch(() => []),
+      ]);
       setProductionRows(
         toDataRows(payload).filter((row) => !isDraftCandidate(row?.order || row)),
       );
+      setProductionMachines(Array.isArray(setupPayload?.machines) ? setupPayload.machines : []);
+      setProductionBatches(Array.isArray(openBatches) ? openBatches : []);
     } catch (error) {
       setProductionRows([]);
+      setProductionMachines([]);
+      setProductionBatches([]);
       openNotice('Produksi', `Gagal memuat data produksi: ${error.message}`);
     } finally {
       setIsProductionLoading(false);
@@ -14123,8 +14141,12 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     }
     productionPollingRef.current = true;
     try {
-      const payload = await fetchPosProductionItems({ status: 'all', scope: 'all' });
+      const [payload, openBatches] = await Promise.all([
+        fetchPosProductionItems({ status: 'all', scope: 'all' }),
+        fetchPosProductionBatches('open').catch(() => []),
+      ]);
       const rows = toDataRows(payload).filter((row) => !isDraftCandidate(row?.order || row));
+      setProductionBatches(Array.isArray(openBatches) ? openBatches : []);
       const nextSnapshot = new Map();
       const changes = [];
 
@@ -14284,6 +14306,94 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         ? buildCustomerProcessLockNotice(error, String(row?.order?.customer?.name || '').trim())
         : String(formatBackendValidationError(error) || error?.message || 'Gagal update status produksi.').trim());
       openNotice('Produksi', `Gagal update status item #${itemId}: ${noticeMessage}`);
+    } finally {
+      setUpdatingProductionItemId(null);
+    }
+  };
+
+  const handleCreateProductionBatch = async (row, payload = {}) => {
+    const itemId = Number(row?.id || 0);
+    const materialId = Number(row?.material_id || row?.material?.id || 0);
+    if (itemId <= 0 || materialId <= 0) {
+      openNotice('Batch Produksi', 'Item belum punya material produksi yang valid.');
+      return false;
+    }
+
+    const machineId = Number(payload?.machine_id || 0);
+    if (machineId <= 0) {
+      openNotice('Batch Produksi', 'Pilih mesin produksi terlebih dahulu.');
+      return false;
+    }
+
+    try {
+      setUpdatingProductionItemId(itemId);
+      const response = await generatePosProductionBatch(materialId, {
+        machine_id: machineId,
+        notes: String(payload?.notes || '').trim() || null,
+      });
+      const batchId = Number(response?.data?.id || response?.id || 0);
+      await loadProductionItems();
+      openNotice(
+        'Batch Produksi',
+        batchId > 0
+          ? `Batch #${batchId} berhasil dibuat. Item dengan material yang sama masuk In Batch.`
+          : 'Batch berhasil dibuat. Item dengan material yang sama masuk In Batch.',
+        null,
+        {
+          showDefaultAction: false,
+          autoCloseMs: 1800,
+        },
+      );
+      return true;
+    } catch (error) {
+      const gateMessage = formatProductionGateError(error);
+      openNotice(
+        'Batch Produksi',
+        gateMessage || String(formatBackendValidationError(error) || error?.message || 'Gagal membuat batch produksi.').trim(),
+      );
+      return false;
+    } finally {
+      setUpdatingProductionItemId(null);
+    }
+  };
+
+  const handleFinalizeProductionBatch = async (row, batch, payload = {}) => {
+    const itemId = Number(row?.id || 0);
+    const batchId = Number(batch?.id || payload?.batch_id || 0);
+    if (batchId <= 0) {
+      openNotice('Finalize Batch', 'Batch produksi untuk item ini belum ditemukan. Refresh produksi lalu coba lagi.');
+      return false;
+    }
+
+    const cleanPayload = {};
+    ['meter_start', 'meter_end', 'raw_counter_start', 'raw_counter_end', 'actual_waste_qty'].forEach((key) => {
+      const value = String(payload?.[key] ?? '').trim();
+      if (value !== '') {
+        const numericValue = Number(value);
+        if (Number.isFinite(numericValue)) {
+          cleanPayload[key] = numericValue;
+        }
+      }
+    });
+    if (String(payload?.notes || '').trim()) {
+      cleanPayload.exception_notes = String(payload.notes).trim();
+    }
+
+    try {
+      setUpdatingProductionItemId(itemId || batchId);
+      await finalizePosProductionBatch(batchId, cleanPayload);
+      await loadProductionItems();
+      openNotice('Finalize Batch', `Batch #${batchId} selesai print dan item ditandai Printed.`, null, {
+        showDefaultAction: false,
+        autoCloseMs: 1800,
+      });
+      return true;
+    } catch (error) {
+      openNotice(
+        'Finalize Batch',
+        String(formatBackendValidationError(error) || error?.message || 'Gagal finalize batch produksi.').trim(),
+      );
+      return false;
     } finally {
       setUpdatingProductionItemId(null);
     }
@@ -20458,12 +20568,16 @@ const SalesScreen = ({ currentUser, onLogout }) => {
           ) : activeMenu === 'production' ? (
             <ProductionPanel
               rows={productionRows}
+              machines={productionMachines}
+              batches={productionBatches}
               isLoading={isProductionLoading}
               statusFilter={productionStatusFilter}
               onChangeStatusFilter={setProductionStatusFilter}
               searchText={productionSearch}
               onChangeSearchText={setProductionSearch}
               onRefresh={loadProductionItems}
+              onCreateBatch={handleCreateProductionBatch}
+              onFinalizeBatch={handleFinalizeProductionBatch}
               onUpdateStatus={handleUpdateProductionStatus}
               onReleaseToProduction={handleReleaseProductionItem}
               onUpdateLayoutPlan={handleUpdateProductionLayoutPlan}

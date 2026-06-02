@@ -1661,6 +1661,22 @@ export const fetchPosProductionMaterials = async () => {
   }
 };
 
+export const fetchPosProductionSetup = async () => {
+  await ensureAuthenticated();
+  try {
+    const payload = await request('/pos/production/materials');
+    return {
+      materials: Array.isArray(payload?.materials) ? payload.materials : [],
+      machines: Array.isArray(payload?.machines) ? payload.machines : [],
+    };
+  } catch (_error) {
+    return {
+      materials: [],
+      machines: [],
+    };
+  }
+};
+
 export const fetchPosProductionBatches = async (status = 'all') => {
   await ensureAuthenticated();
   const query = new URLSearchParams();
@@ -1693,6 +1709,22 @@ export const updatePosProductionItemStatus = async (itemId, productionStatus) =>
   return request(`/pos/production/items/${itemId}/status`, {
     method: 'PUT',
     body: JSON.stringify({ production_status: productionStatus }),
+  });
+};
+
+export const generatePosProductionBatch = async (materialId, payload = {}) => {
+  await ensureAuthenticated();
+  return request(`/pos/production/materials/${materialId}/generate`, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+};
+
+export const finalizePosProductionBatch = async (batchId, payload = {}) => {
+  await ensureAuthenticated();
+  return request(`/pos/production/batches/${batchId}/finalize`, {
+    method: 'POST',
+    body: JSON.stringify(payload),
   });
 };
 

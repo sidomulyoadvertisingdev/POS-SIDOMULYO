@@ -270,7 +270,7 @@ const resolveProductionFlow = (row, designFile) => {
     },
     {
       key: 'batch',
-      label: 'Cetak / Batch',
+      label: 'Batch Mesin',
       done: status === 'printed',
       active: status === 'in_batch',
     },
@@ -295,11 +295,11 @@ const resolveProductionFlow = (row, designFile) => {
   } else if (status === 'waiting_production') {
     title = 'Sudah masuk antrean produksi';
     hint = layoutStatus === 'proses_layout'
-      ? 'Layout sedang diproses. Setelah siap cetak, operator bisa download file lalu Masuk Batch.'
-      : 'Item sudah lolos gate. Operator bisa download file layout lalu Masuk Batch.';
+      ? 'Layout sedang diproses. Setelah siap cetak, operator pilih mesin untuk membuat batch backend.'
+      : 'Item sudah lolos gate. Operator bisa download file layout lalu pilih mesin untuk membuat batch backend.';
   } else if (status === 'in_batch') {
-    title = 'Sedang proses cetak/batch';
-    hint = 'Tandai Printed hanya setelah cetak selesai dan siap lanjut ke proses berikutnya.';
+    title = 'Sudah masuk batch mesin';
+    hint = 'Finalize batch hanya setelah proses cetak selesai. Backend akan mengurangi stok dan menandai item Printed.';
   } else if (status === 'printed') {
     title = 'Produksi selesai';
     hint = 'Item sudah selesai cetak menurut status backend.';
@@ -346,12 +346,16 @@ const statusBadgeStyle = (status) => {
 
 const ProductionPanel = ({
   rows,
+  machines,
+  batches,
   isLoading,
   statusFilter,
   onChangeStatusFilter,
   searchText,
   onChangeSearchText,
   onRefresh,
+  onCreateBatch,
+  onFinalizeBatch,
   onUpdateStatus,
   onReleaseToProduction,
   onUpdateLayoutPlan,
@@ -362,7 +366,14 @@ const ProductionPanel = ({
   const [delayItemId, setDelayItemId] = useState(null);
   const [delayExpectedAt, setDelayExpectedAt] = useState('');
   const [delayReason, setDelayReason] = useState('');
+  const [batchPickerItemId, setBatchPickerItemId] = useState(null);
+  const [selectedMachineId, setSelectedMachineId] = useState(null);
+  const [batchNotes, setBatchNotes] = useState('');
+  const [finalizeItemId, setFinalizeItemId] = useState(null);
+  const [finalizeDraft, setFinalizeDraft] = useState({});
   const items = Array.isArray(rows) ? rows : [];
+  const machineRows = Array.isArray(machines) ? machines : [];
+  const batchRows = Array.isArray(batches) ? batches : [];
   const counts = {
     waiting_design: 0,
     waiting_production: 0,
@@ -380,6 +391,26 @@ const ProductionPanel = ({
   const layoutRows = buildLayoutRows(items)
     .filter(({ row }) => ['waiting_design', 'waiting_production'].includes(resolveProductionStatusKey(row?.production_status)))
     .slice(0, 8);
+
+  const findOpenBatchForItem = (itemId) => {
+    const normalizedItemId = Number(itemId || 0);
+    if (normalizedItemId <= 0) return null;
+    return batchRows.find((batch) => (
+      Array.isArray(batch?.items)
+      && batch.items.some((entry) => Number(entry?.pos_order_item_id || 0) === normalizedItemId)
+    )) || null;
+  };
+
+  const updateFinalizeDraft = (itemId, field, value) => {
+    const key = String(itemId || '');
+    setFinalizeDraft((prev) => ({
+      ...(prev && typeof prev === 'object' ? prev : {}),
+      [key]: {
+        ...((prev && typeof prev === 'object' && prev[key]) ? prev[key] : {}),
+        [field]: value,
+      },
+    }));
+  };
 
   return (
     <View style={styles.panel}>
@@ -483,6 +514,8 @@ const ProductionPanel = ({
             const canReleaseWaitingDesign = status === 'waiting_design' && !usesProofing && designFile.hasFile;
             const canPlanLayout = status === 'waiting_production';
             const canSendDelayInfo = ['waiting_design', 'waiting_production', 'in_batch'].includes(status);
+            const openBatch = findOpenBatchForItem(rowId);
+            const finalizeValues = finalizeDraft[String(rowId || '')] || {};
 
             return (
               <View key={String(rowId || `prod-${index}`)} style={styles.card}>
@@ -550,22 +583,41 @@ const ProductionPanel = ({
                       </>
                     ) : null}
                     {canMoveToBatch ? (
-                      <Pressable
-                        style={[styles.actionButton, isUpdating ? styles.actionDisabled : null]}
-                        disabled={isUpdating}
-                        onPress={() => onUpdateStatus?.(row, 'in_batch')}
-                      >
-                        <Text style={styles.actionButtonText}>{isUpdating ? 'Memproses...' : 'Masuk Batch'}</Text>
-                      </Pressable>
+                      <>
+                        <Pressable
+                          style={[styles.actionButton, isUpdating ? styles.actionDisabled : null]}
+                          disabled={isUpdating}
+                          onPress={() => {
+                            setBatchPickerItemId(batchPickerItemId === rowId ? null : rowId);
+                            setSelectedMachineId(null);
+                            setBatchNotes('');
+                          }}
+                        >
+                          <Text style={styles.actionButtonText}>{isUpdating ? 'Memproses...' : 'Pilih Mesin & Buat Batch'}</Text>
+                        </Pressable>
+                        <Text style={styles.hintText}>Backend akan membuat batch untuk semua item siap produksi dengan material yang sama.</Text>
+                      </>
                     ) : null}
                     {canMoveToPrinted ? (
-                      <Pressable
-                        style={[styles.actionButton, isUpdating ? styles.actionDisabled : null]}
-                        disabled={isUpdating}
-                        onPress={() => onUpdateStatus?.(row, 'printed')}
-                      >
-                        <Text style={styles.actionButtonText}>{isUpdating ? 'Memproses...' : 'Tandai Printed'}</Text>
-                      </Pressable>
+                      <>
+                        {openBatch ? (
+                          <View style={styles.batchInfoBox}>
+                            <Text style={styles.batchInfoTitle}>Batch #{openBatch.id} | {openBatch?.machine?.name || 'Mesin belum terbaca'}</Text>
+                            <Text style={styles.batchInfoMeta}>{openBatch?.material?.name || 'Material'} | {Number(openBatch?.item_count || 0)} item</Text>
+                          </View>
+                        ) : (
+                          <Text style={styles.hintText}>Batch open belum ditemukan untuk item ini. Refresh produksi sebelum finalize.</Text>
+                        )}
+                        <Pressable
+                          style={[styles.actionButton, isUpdating || !openBatch ? styles.actionDisabled : null]}
+                          disabled={isUpdating || !openBatch}
+                          onPress={() => {
+                            setFinalizeItemId(finalizeItemId === rowId ? null : rowId);
+                          }}
+                        >
+                          <Text style={styles.actionButtonText}>{isUpdating ? 'Memproses...' : 'Finalize / Selesai Print'}</Text>
+                        </Pressable>
+                      </>
                     ) : null}
                     {status === 'waiting_design' && usesProofing ? (
                       <Text style={styles.hintText}>Release item proofing lewat menu Layout setelah file layout terupload.</Text>
@@ -659,6 +711,140 @@ const ProductionPanel = ({
                         })}
                       >
                         <Text style={styles.actionButtonText}>{isUpdating ? 'Memproses...' : 'Buat Link WA'}</Text>
+                      </Pressable>
+                    </View>
+                  </View>
+                ) : null}
+                {batchPickerItemId === rowId ? (
+                  <View style={styles.batchBox}>
+                    <Text style={styles.delayTitle}>Pilih mesin untuk batch produksi</Text>
+                    {machineRows.length === 0 ? (
+                      <Text style={styles.hintText}>Belum ada mesin aktif dari backend. Cek master mesin produksi.</Text>
+                    ) : (
+                      <View style={styles.machineGrid}>
+                        {machineRows.map((machine) => {
+                          const machineId = Number(machine?.id || 0);
+                          const isSelected = Number(selectedMachineId || 0) === machineId;
+                          return (
+                            <Pressable
+                              key={`machine-${machineId}`}
+                              style={[styles.machineButton, isSelected ? styles.machineButtonActive : null]}
+                              onPress={() => setSelectedMachineId(machineId)}
+                            >
+                              <Text style={[styles.machineButtonText, isSelected ? styles.machineButtonTextActive : null]}>
+                                {machine?.name || machine?.code || `Mesin #${machineId}`}
+                              </Text>
+                              <Text style={[styles.machineButtonMeta, isSelected ? styles.machineButtonTextActive : null]}>
+                                {machine?.code || 'ACTIVE'}
+                              </Text>
+                            </Pressable>
+                          );
+                        })}
+                      </View>
+                    )}
+                    <TextInput
+                      value={batchNotes}
+                      onChangeText={setBatchNotes}
+                      placeholder="Catatan batch opsional"
+                      placeholderTextColor="#8a9ab3"
+                      style={styles.delayInput}
+                    />
+                    <View style={styles.delayActionRow}>
+                      <Pressable
+                        style={[styles.actionButton, styles.actionSoftButton]}
+                        onPress={() => {
+                          setBatchPickerItemId(null);
+                          setSelectedMachineId(null);
+                          setBatchNotes('');
+                        }}
+                      >
+                        <Text style={styles.actionSoftButtonText}>Batal</Text>
+                      </Pressable>
+                      <Pressable
+                        style={[styles.actionButton, isUpdating || !selectedMachineId ? styles.actionDisabled : null]}
+                        disabled={isUpdating || !selectedMachineId}
+                        onPress={async () => {
+                          const ok = await onCreateBatch?.(row, {
+                            machine_id: selectedMachineId,
+                            notes: batchNotes,
+                          });
+                          if (!ok) {
+                            return;
+                          }
+                          setBatchPickerItemId(null);
+                          setSelectedMachineId(null);
+                          setBatchNotes('');
+                        }}
+                      >
+                        <Text style={styles.actionButtonText}>{isUpdating ? 'Memproses...' : 'Buat Batch'}</Text>
+                      </Pressable>
+                    </View>
+                  </View>
+                ) : null}
+                {finalizeItemId === rowId && openBatch ? (
+                  <View style={styles.batchBox}>
+                    <Text style={styles.delayTitle}>Finalize batch #{openBatch.id}</Text>
+                    <Text style={styles.hintText}>Isi meter/counter bila mesin membutuhkan pencatatan. Kosongkan jika tidak dipakai.</Text>
+                    <View style={styles.finalizeGrid}>
+                      <TextInput
+                        value={String(finalizeValues.meter_start || '')}
+                        onChangeText={(value) => updateFinalizeDraft(rowId, 'meter_start', value)}
+                        placeholder="Meter awal"
+                        placeholderTextColor="#8a9ab3"
+                        keyboardType="numeric"
+                        style={[styles.delayInput, styles.finalizeInput]}
+                      />
+                      <TextInput
+                        value={String(finalizeValues.meter_end || '')}
+                        onChangeText={(value) => updateFinalizeDraft(rowId, 'meter_end', value)}
+                        placeholder="Meter akhir"
+                        placeholderTextColor="#8a9ab3"
+                        keyboardType="numeric"
+                        style={[styles.delayInput, styles.finalizeInput]}
+                      />
+                      <TextInput
+                        value={String(finalizeValues.raw_counter_start || '')}
+                        onChangeText={(value) => updateFinalizeDraft(rowId, 'raw_counter_start', value)}
+                        placeholder="Counter awal"
+                        placeholderTextColor="#8a9ab3"
+                        keyboardType="numeric"
+                        style={[styles.delayInput, styles.finalizeInput]}
+                      />
+                      <TextInput
+                        value={String(finalizeValues.raw_counter_end || '')}
+                        onChangeText={(value) => updateFinalizeDraft(rowId, 'raw_counter_end', value)}
+                        placeholder="Counter akhir"
+                        placeholderTextColor="#8a9ab3"
+                        keyboardType="numeric"
+                        style={[styles.delayInput, styles.finalizeInput]}
+                      />
+                    </View>
+                    <TextInput
+                      value={String(finalizeValues.notes || '')}
+                      onChangeText={(value) => updateFinalizeDraft(rowId, 'notes', value)}
+                      placeholder="Catatan finalize opsional"
+                      placeholderTextColor="#8a9ab3"
+                      style={styles.delayInput}
+                    />
+                    <View style={styles.delayActionRow}>
+                      <Pressable
+                        style={[styles.actionButton, styles.actionSoftButton]}
+                        onPress={() => setFinalizeItemId(null)}
+                      >
+                        <Text style={styles.actionSoftButtonText}>Tutup</Text>
+                      </Pressable>
+                      <Pressable
+                        style={[styles.actionButton, isUpdating ? styles.actionDisabled : null]}
+                        disabled={isUpdating}
+                        onPress={async () => {
+                          const ok = await onFinalizeBatch?.(row, openBatch, finalizeValues);
+                          if (!ok) {
+                            return;
+                          }
+                          setFinalizeItemId(null);
+                        }}
+                      >
+                        <Text style={styles.actionButtonText}>{isUpdating ? 'Memproses...' : 'Selesai Print'}</Text>
                       </Pressable>
                     </View>
                   </View>
@@ -1029,6 +1215,25 @@ const styles = StyleSheet.create({
     color: '#7a2d2d',
     fontWeight: '700',
   },
+  batchInfoBox: {
+    borderWidth: 1,
+    borderColor: '#bcd4f4',
+    backgroundColor: '#f2f7ff',
+    borderRadius: 8,
+    paddingHorizontal: 8,
+    paddingVertical: 6,
+    gap: 2,
+  },
+  batchInfoTitle: {
+    fontSize: 10,
+    color: '#173c87',
+    fontWeight: '900',
+  },
+  batchInfoMeta: {
+    fontSize: 10,
+    color: '#53647d',
+    fontWeight: '700',
+  },
   delayBox: {
     borderWidth: 1,
     borderColor: '#f0d4a5',
@@ -1075,6 +1280,55 @@ const styles = StyleSheet.create({
     justifyContent: 'flex-end',
     gap: 8,
     flexWrap: 'wrap',
+  },
+  batchBox: {
+    borderWidth: 1,
+    borderColor: '#bcd4f4',
+    backgroundColor: '#f7fbff',
+    borderRadius: 10,
+    padding: 9,
+    gap: 7,
+  },
+  machineGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 6,
+  },
+  machineButton: {
+    borderWidth: 1,
+    borderColor: '#c8d8f2',
+    backgroundColor: '#ffffff',
+    borderRadius: 8,
+    paddingHorizontal: 9,
+    paddingVertical: 7,
+    minWidth: 120,
+  },
+  machineButtonActive: {
+    borderColor: '#0755b8',
+    backgroundColor: '#e8f1ff',
+  },
+  machineButtonText: {
+    fontSize: 11,
+    color: '#17324f',
+    fontWeight: '900',
+  },
+  machineButtonMeta: {
+    fontSize: 9,
+    color: '#65758d',
+    fontWeight: '800',
+    marginTop: 2,
+  },
+  machineButtonTextActive: {
+    color: '#0755b8',
+  },
+  finalizeGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 7,
+  },
+  finalizeInput: {
+    minWidth: 130,
+    flex: 1,
   },
 });
 
