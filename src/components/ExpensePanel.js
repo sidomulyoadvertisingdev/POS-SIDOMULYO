@@ -43,9 +43,10 @@ const resolveCategoryTypeLabel = (value = '') => {
 };
 
 const normalizeSourceAccountRow = (row) => {
+  const paymentAccountId = Number(row?.payment_account_id || 0) || 0;
   const id = Number(
-    row?.id
-    || row?.payment_account_id
+    paymentAccountId
+    || row?.id
     || row?.bank_account_id
     || row?.account_id
     || 0,
@@ -54,6 +55,7 @@ const normalizeSourceAccountRow = (row) => {
     row?.accounting_account_id
     || row?.bank_account_id
     || row?.account_id
+    || (!paymentAccountId ? row?.id : 0)
     || 0,
   ) || 0;
   const label = toLabel(
@@ -107,6 +109,7 @@ const normalizeSourceAccountRow = (row) => {
   return {
     ...row,
     id,
+    paymentAccountId,
     accountingAccountId,
     label,
     code,
@@ -326,6 +329,10 @@ const ExpensePanel = ({ isActive, onNotify }) => {
       onNotify?.('Pengeluaran', 'Pilih akun kas / bank sumber pembayaran terlebih dahulu.');
       return;
     }
+    if (!Number(selectedSourceAccount?.accountingAccountId || 0)) {
+      onNotify?.('Pengeluaran', 'Akun sumber pembayaran belum terhubung ke akun accounting kas / bank / e-wallet.');
+      return;
+    }
     if (categoryItemRows.length > 0 && !selectedCategoryItem?.id) {
       onNotify?.('Pengeluaran', 'Pilih isi kategori pengeluaran dari popup backend terlebih dahulu.');
       return;
@@ -350,12 +357,8 @@ const ExpensePanel = ({ isActive, onNotify }) => {
         purchase_category_code: toSafeText(selectedCategory.code) || null,
         purchase_category_item_id: Number(selectedCategoryItem?.id || 0) || null,
         payment_method_id: Number(selectedSourceAccount?.payment_method_id || 0) || null,
-        payment_account_id: Number(selectedSourceAccount?.id || 0) || null,
-        source_account_id: Number(
-          selectedSourceAccount?.accountingAccountId
-          || selectedSourceAccount?.id
-          || 0,
-        ) || null,
+        payment_account_id: Number(selectedSourceAccount?.paymentAccountId || selectedSourceAccount?.payment_account_id || 0) || null,
+        source_account_id: Number(selectedSourceAccount?.accountingAccountId || 0) || null,
       };
       await createPosCashFlow(payload);
 

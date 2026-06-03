@@ -786,6 +786,34 @@ const resolvePricingGrandTotal = (pricing) => {
     (pricing?.subtotal || 0) + (pricing?.finishing_total || 0) + (pricing?.express_fee || 0),
   );
 };
+const resolveBookBaseProductFromPricing = (pricing) => {
+  const candidate = pricing?.base_product
+    || pricing?.book_pricing?.base_product
+    || pricing?.rule?.base_product
+    || pricing?.price_breakdown?.book_base_product
+    || pricing?.internal?.base_product
+    || null;
+  if (!candidate || typeof candidate !== 'object') {
+    return null;
+  }
+  const id = Number(candidate.id || candidate.product_id || 0);
+  const name = String(candidate.name || candidate.product_name || '').trim();
+  const unitPrice = Number(candidate.unit_price || candidate.price || 0);
+  if (id <= 0 && !name) {
+    return null;
+  }
+  return {
+    id: id > 0 ? id : null,
+    sku: String(candidate.sku || '').trim(),
+    name,
+    unit_price: Number.isFinite(unitPrice) ? roundMoney(unitPrice) : 0,
+    price_basis: String(candidate.price_basis || 'per_customer_page').trim(),
+    mapping_id: Number(candidate.mapping_id || 0) || null,
+    mapped_from: candidate.mapped_from && typeof candidate.mapped_from === 'object'
+      ? candidate.mapped_from
+      : null,
+  };
+};
 const parseMeterValue = (value) => {
   const normalized = String(value || '').trim().replace(',', '.');
   const parsed = Number(normalized);
@@ -3147,9 +3175,14 @@ const MASTER_SYNC_META_STORAGE_KEY = 'pos_master_sync_meta_v1';
 const MASTER_DATA_SNAPSHOT_STORAGE_KEY = 'pos_master_data_snapshot_v1';
 const INVOICE_SUCCESS_CACHE_KEY = 'pos_invoice_success_cache_v1';
 const INVOICE_SUCCESS_CACHE_MAX = 400;
-const MASTER_SYNC_POLL_INTERVAL_MS = 30000;
-const MASTER_SYNC_FULL_REFRESH_INTERVAL_MS = 5 * 60 * 1000;
-const MASTER_SYNC_FALLBACK_INTERVAL_MS = 45000;
+const MASTER_SYNC_POLL_INTERVAL_MS = 5 * 60 * 1000;
+const MASTER_SYNC_FULL_REFRESH_INTERVAL_MS = 60 * 60 * 1000;
+const MASTER_SYNC_FALLBACK_INTERVAL_MS = 5 * 60 * 1000;
+const RECEIVABLE_APPROVAL_POLL_INTERVAL_MS = 60 * 1000;
+const PROOFING_ASSIGNMENT_POLL_INTERVAL_MS = 60 * 1000;
+const ACTIVE_WORKSPACE_POLL_INTERVAL_MS = 15 * 1000;
+const BACKGROUND_WORKSPACE_POLL_INTERVAL_MS = 60 * 1000;
+const PRODUCTION_SETUP_CACHE_MS = 10 * 60 * 1000;
 let memoryReprintSpecCache = [];
 let memoryPrinterProfile = null;
 let memoryLocalDesignNetworkSettings = null;
@@ -5426,6 +5459,39 @@ const DEFAULT_RECEIPT_SETTINGS = {
   receipt_footer: 'Terima kasih sudah berbelanja.',
   receipt_hotline: '',
   receipt_review_qr_url: '',
+  billing_transfer_bca_line: 'Transfer BCA : 0138811118 a.n. Sidomulyo',
+  billing_whatsapp_template: [
+    '*TAGIHAN PESANAN SIDOMULYO*',
+    'No. Tagihan: {billing_no}',
+    'No. Order: {order_no}',
+    'Invoice: {invoice_no}',
+    'Tanggal: {date}',
+    'Pelanggan: {customer}',
+    '',
+    '*Detail Item*',
+    '{item_lines}',
+    '',
+    '*Total Tagihan: {total_due}*',
+    '',
+    '*Pilihan Pembayaran*',
+    '{payment_lines}',
+    '',
+    '{note}',
+    '',
+    'Pesanan diproses setelah pembayaran diterima.',
+    'Tolong diperiksa dan dicek dengan teliti.',
+  ].join('\n'),
+  whatsapp_templates: {
+    receivable_reminder: {
+      template: [
+        'Halo {customer},',
+        'Kami mengingatkan tagihan invoice {invoice_no} sebesar {due_total}.',
+        'Jatuh tempo: {due_label}{due_status}.',
+        'Mohon segera melakukan pembayaran atau konfirmasi ke kasir Sidomulyo.',
+        'Terima kasih.',
+      ].join('\n'),
+    },
+  },
   receipt_show_order_id: true,
   receipt_show_cashier: true,
   receipt_show_customer: true,
@@ -5461,6 +5527,21 @@ const normalizeReceiptSettings = (value = null) => {
     receipt_footer: toLabel(raw.receipt_footer, nested.footer, DEFAULT_RECEIPT_SETTINGS.receipt_footer),
     receipt_hotline: toLabel(raw.receipt_hotline, raw.hotline, nested.hotline, DEFAULT_RECEIPT_SETTINGS.receipt_hotline),
     receipt_review_qr_url: toLabel(raw.receipt_review_qr_url, raw.review_qr_url, nested.review_qr_url, DEFAULT_RECEIPT_SETTINGS.receipt_review_qr_url),
+    billing_transfer_bca_line: toLabel(
+      raw.billing_transfer_bca_line,
+      raw.billing_whatsapp?.transfer_bca_line,
+      DEFAULT_RECEIPT_SETTINGS.billing_transfer_bca_line,
+    ),
+    billing_whatsapp_template: toLabel(
+      raw.billing_whatsapp_template,
+      raw.billing_whatsapp?.template,
+      DEFAULT_RECEIPT_SETTINGS.billing_whatsapp_template,
+    ),
+    whatsapp_templates: raw.whatsapp_templates && typeof raw.whatsapp_templates === 'object' && !Array.isArray(raw.whatsapp_templates)
+      ? raw.whatsapp_templates
+      : (raw.billing_whatsapp?.templates && typeof raw.billing_whatsapp.templates === 'object' && !Array.isArray(raw.billing_whatsapp.templates)
+        ? raw.billing_whatsapp.templates
+        : DEFAULT_RECEIPT_SETTINGS.whatsapp_templates),
     receipt_show_order_id: raw.receipt_show_order_id ?? nested.show_order_id ?? DEFAULT_RECEIPT_SETTINGS.receipt_show_order_id,
     receipt_show_cashier: raw.receipt_show_cashier ?? nested.show_cashier ?? DEFAULT_RECEIPT_SETTINGS.receipt_show_cashier,
     receipt_show_customer: raw.receipt_show_customer ?? nested.show_customer ?? DEFAULT_RECEIPT_SETTINGS.receipt_show_customer,
@@ -6623,6 +6704,13 @@ const INVOICE_AREA_FILTER_MENU_MAP = Object.freeze({
 const INVOICE_ACTIVE_WORK_AREAS = new Set(['draft', 'approval', 'receivable']);
 const DRAFT_WORKSPACE_PER_PAGE = 100;
 const DRAFT_WORKSPACE_MAX_PAGES = 20;
+const INVOICE_ACTIVE_WORKSPACE_PER_PAGE = 100;
+const INVOICE_ACTIVE_WORKSPACE_MAX_PAGES = 5;
+const INVOICE_SEARCH_PER_PAGE = 100;
+const INVOICE_SEARCH_MAX_PAGES = 100;
+const INVOICE_DASHBOARD_PREVIEW_PER_PAGE = 50;
+const INVOICE_DASHBOARD_PREVIEW_MAX_PAGES = 3;
+const INVOICE_RENDER_LIMIT = 120;
 
 const DANA_QRIS_TERMINAL_STATUSES = new Set(['paid', 'failed', 'expired', 'cancelled', 'refund_required']);
 
@@ -7031,7 +7119,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
   const [bookType, setBookType] = useState('buku_umum');
   const [bookFinishedSize, setBookFinishedSize] = useState('A5');
   const [bookPrintModel, setBookPrintModel] = useState('Cetak Susun Buku / Lipat Buku');
-  const [bookPrintSide, setBookPrintSide] = useState('Cetak Bolak-Balik');
+  const [bookPrintSide, setBookPrintSide] = useState('Cetak 2 Sisi');
   const [bookInsidePrint, setBookInsidePrint] = useState('bw');
   const [bookCoverPrint, setBookCoverPrint] = useState('color');
   const [bookBindingType, setBookBindingType] = useState('');
@@ -7978,6 +8066,8 @@ const SalesScreen = ({ currentUser, onLogout }) => {
   const productionSnapshotRef = useRef(new Map());
   const productionSnapshotReadyRef = useRef(false);
   const productionPollingRef = useRef(false);
+  const productionSetupCacheRef = useRef(null);
+  const productionSetupFetchedAtRef = useRef(0);
   const proofingAssignmentSnapshotRef = useRef(new Map());
   const proofingAssignmentSnapshotReadyRef = useRef(false);
   const proofingAssignmentNotifiedRef = useRef(new Set());
@@ -10202,6 +10292,8 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     };
   };
   const getBillingPaymentOptions = () => {
+    const receiptSettings = normalizeReceiptSettings(posSettings);
+    const configuredBcaLine = String(receiptSettings.billing_transfer_bca_line || '').trim();
     const transferRows = (Array.isArray(bankAccounts) ? bankAccounts : []).filter((row) => {
       const text = normalizeText([
         row?.displayTitle,
@@ -10229,14 +10321,25 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       ].filter(Boolean).join(' '));
       return text.includes('qris') || text.includes('qr');
     }) || null;
-    const transferLines = transferRows.length > 0
+    const transferLinesFromAccounts = transferRows.length > 0
       ? transferRows.slice(0, 3).map((row) => {
         const bank = toLabel(row?.bank_name, row?.bankName, row?.code, 'Transfer');
         const number = toLabel(row?.account_number, row?.accountNumber, row?.number, '');
         const name = toLabel(row?.account_name, row?.accountName, row?.name, 'Sidomulyo');
         return `${bank}${number ? ` : ${number}` : ''}${name ? ` a.n. ${name}` : ''}`;
       })
-      : ['Transfer BCA : 1234567890 a.n. Sidomulyo'];
+      : [];
+    const transferLines = configuredBcaLine
+      ? [
+        configuredBcaLine,
+        ...transferLinesFromAccounts.filter((line) => {
+          const text = normalizeText(line);
+          return !text.includes('bca') && text !== normalizeText(configuredBcaLine);
+        }),
+      ].slice(0, 3)
+      : (transferLinesFromAccounts.length > 0
+        ? transferLinesFromAccounts
+        : ['Transfer BCA : 0138811118 a.n. Sidomulyo']);
     const qrisImageUrl = String(
       qrisRow?.qr_image_url
       || qrisRow?.qrImageUrl
@@ -10419,6 +10522,22 @@ const SalesScreen = ({ currentUser, onLogout }) => {
 </body>
 </html>`;
   };
+  const renderBillingWhatsappTemplate = (template, variables = {}) => {
+    const source = String(template || DEFAULT_RECEIPT_SETTINGS.billing_whatsapp_template || '').trim()
+      || DEFAULT_RECEIPT_SETTINGS.billing_whatsapp_template;
+    const rendered = source.replace(/\{([a-zA-Z0-9_]+)\}/g, (match, key) => {
+      if (!Object.prototype.hasOwnProperty.call(variables, key)) {
+        return match;
+      }
+      return String(variables[key] ?? '');
+    });
+    return rendered
+      .split('\n')
+      .map((line) => line.replace(/[ \t]+$/g, ''))
+      .join('\n')
+      .replace(/\n{3,}/g, '\n\n')
+      .trim();
+  };
   const buildBillingNoteShareText = (payload) => {
     const itemLines = (payload?.items || []).map((item, index) => [
       `${index + 1}. ${item.name}`,
@@ -10429,29 +10548,22 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       item.notes && item.notes !== '-' ? `   Catatan: ${item.notes}` : '',
     ].filter(Boolean).join('\n'));
     const transferLines = Array.isArray(payload?.paymentOptions?.transferLines) ? payload.paymentOptions.transferLines : [];
-    return [
-      '*TAGIHAN PESANAN SIDOMULYO*',
-      `No. Tagihan: ${payload?.transaction?.billingNo || '-'}`,
-      `No. Order: ${payload?.transaction?.orderNo || '-'}`,
-      `Invoice: ${payload?.transaction?.invoiceNo || '-'}`,
-      `Tanggal: ${payload?.transaction?.date || '-'}`,
-      `Pelanggan: ${payload?.transaction?.customer || '-'}`,
-      '',
-      '*Detail Item*',
-      itemLines.join('\n'),
-      '',
-      `*Total Tagihan: ${formatBillingAmount(payload?.amounts?.due || 0)}*`,
-      '',
-      '*Pilihan Pembayaran*',
-      '- Tunai',
-      ...transferLines.map((line) => `- ${line}`),
-      '- QRIS',
-      '',
-      payload?.transaction?.note ? `Catatan: ${payload.transaction.note}` : '',
-      '',
-      'Pesanan diproses setelah pembayaran diterima.',
-      'Tolong diperiksa dan dicek dengan teliti.',
-    ].filter((line) => line !== '').join('\n');
+    const receiptSettings = normalizeReceiptSettings(posSettings);
+    return renderBillingWhatsappTemplate(receiptSettings.billing_whatsapp_template, {
+      billing_no: payload?.transaction?.billingNo || '-',
+      order_no: payload?.transaction?.orderNo || '-',
+      invoice_no: payload?.transaction?.invoiceNo || '-',
+      date: payload?.transaction?.date || '-',
+      customer: payload?.transaction?.customer || '-',
+      item_lines: itemLines.join('\n'),
+      total_due: formatBillingAmount(payload?.amounts?.due || 0),
+      payment_lines: [
+        '- Tunai',
+        ...transferLines.map((line) => `- ${line}`),
+        '- QRIS',
+      ].join('\n'),
+      note: payload?.transaction?.note ? `Catatan: ${payload.transaction.note}` : '',
+    });
   };
   const handlePrintBillingNote = async (row) => {
     try {
@@ -10501,13 +10613,17 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       normalizedPhone = '';
     }
 
-    const text = [
-      `Halo ${customerName},`,
-      `Kami mengingatkan tagihan invoice ${invoiceNo} sebesar ${formatRupiah(dueTotal)}.`,
-      dueMeta?.label ? `Jatuh tempo: ${dueMeta.label}${dueMeta.statusLabel ? ` (${dueMeta.statusLabel})` : ''}.` : 'Tanggal jatuh tempo belum tercatat.',
-      'Mohon segera melakukan pembayaran atau konfirmasi ke kasir Sidomulyo.',
-      'Terima kasih.',
-    ].join('\n');
+    const receiptSettings = normalizeReceiptSettings(posSettings);
+    const reminderTemplate = receiptSettings.whatsapp_templates?.receivable_reminder?.template
+      || DEFAULT_RECEIPT_SETTINGS.whatsapp_templates.receivable_reminder.template;
+    const text = renderBillingWhatsappTemplate(reminderTemplate, {
+      customer: customerName,
+      invoice_no: invoiceNo,
+      due_total: formatRupiah(dueTotal),
+      due_label: dueMeta?.label || 'Tanggal jatuh tempo belum tercatat',
+      due_status: dueMeta?.statusLabel ? ` (${dueMeta.statusLabel})` : '',
+      cashier: currentUser?.name || 'Kasir',
+    });
 
     try {
       await copyTextToClipboard(text);
@@ -11550,9 +11666,42 @@ const SalesScreen = ({ currentUser, onLogout }) => {
   }, [noticeModal.visible, noticeModal.autoCloseMs]);
 
   const bootstrapApp = async () => {
+    const cachedSnapshot = loadMasterDataSnapshotCache();
+    const hasCachedSnapshot = hasUsableMasterDataSnapshot(cachedSnapshot);
+    let usedStartupCache = false;
+
     try {
       setIsPreparingApp(true);
       setPrepareMessage('Menghubungkan POS ke backend...');
+      if (hasCachedSnapshot) {
+        usedStartupCache = true;
+        setPrepareMessage('Memakai cache data master terakhir...');
+        applyMasterDataSnapshot(cachedSnapshot, {
+          resetProductDetails: true,
+          persistCache: false,
+        });
+        setBackendReady(true);
+        setHealthStatus({
+          state: 'online',
+          label: 'Online',
+          checkedAt: new Date().toISOString(),
+        });
+        setMasterSyncStatus((prev) => ({
+          ...prev,
+          state: 'success',
+          label: 'Cache data master siap, sinkron berjalan di belakang',
+          lastSuccessfulAt: masterSyncMetaRef.current?.lastSuccessfulSyncAt || prev.lastSuccessfulAt,
+        }));
+        const queue = loadOrderQueue();
+        setQueueCount(queue.length);
+        setAuditLogs(loadOrderAuditLogs());
+        setPrepareMessage('Data cache siap dipakai.');
+        setIsPreparingApp(false);
+        setTimeout(() => {
+          masterSyncRunnerRef.current?.({ reason: 'startup_cache', silent: true }).catch(() => {});
+        }, 2500);
+        return;
+      }
       const snapshot = await fetchMasterDataSnapshot();
       setPrepareMessage('Merapikan data master POS...');
       applyMasterDataSnapshot(snapshot, { resetProductDetails: true });
@@ -11575,11 +11724,9 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     } catch (error) {
       if (Number(error?.status || 0) === 401) {
         handleSessionExpired();
-        setIsPreparingApp(false);
         return;
       }
-      const cachedSnapshot = loadMasterDataSnapshotCache();
-      if (hasUsableMasterDataSnapshot(cachedSnapshot)) {
+      if (hasCachedSnapshot) {
         applyMasterDataSnapshot(cachedSnapshot, {
           resetProductDetails: true,
           persistCache: false,
@@ -11611,7 +11758,9 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         `${error.message}\nBase URL: ${getApiBaseUrl()}`,
       );
     } finally {
-      setIsPreparingApp(false);
+      if (!usedStartupCache) {
+        setIsPreparingApp(false);
+      }
     }
   };
 
@@ -11746,7 +11895,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         && nextAppState === 'active';
 
       if (isReturningToForeground) {
-        masterSyncRunnerRef.current?.({ reason: 'foreground', forceFull: true }).catch(() => {});
+        masterSyncRunnerRef.current?.({ reason: 'foreground', forceFull: false, silent: true }).catch(() => {});
         if (backendReady) {
           flushQueuedOrders();
           checkReceivableApprovalRealtimeUpdates().catch(() => {});
@@ -13514,11 +13663,16 @@ const SalesScreen = ({ currentUser, onLogout }) => {
 
       if (invoiceRequestOptions.area !== 'approval') {
         try {
-          if (invoiceSuccessDateFilterActive || INVOICE_ACTIVE_WORK_AREAS.has(invoiceRequestOptions.area)) {
+          const shouldLoadActiveWorkspaceBatch = !searchMode && (
+            invoiceSuccessDateFilterActive
+            || INVOICE_ACTIVE_WORK_AREAS.has(invoiceRequestOptions.area)
+          );
+          const shouldDeepSearchActiveWorkspace = searchMode && INVOICE_ACTIVE_WORK_AREAS.has(invoiceRequestOptions.area);
+          if (shouldLoadActiveWorkspaceBatch || shouldDeepSearchActiveWorkspace) {
             const baseRequest = {
               ...invoiceRequestOptions,
-              perPage: invoiceRequestOptions.area === 'draft' ? DRAFT_WORKSPACE_PER_PAGE : 200,
-              maxPages: invoiceRequestOptions.area === 'draft' ? DRAFT_WORKSPACE_MAX_PAGES : 200,
+              perPage: shouldDeepSearchActiveWorkspace ? INVOICE_SEARCH_PER_PAGE : INVOICE_ACTIVE_WORKSPACE_PER_PAGE,
+              maxPages: shouldDeepSearchActiveWorkspace ? INVOICE_SEARCH_MAX_PAGES : INVOICE_ACTIVE_WORKSPACE_MAX_PAGES,
             };
             if (invoiceRequestOptions.area === 'draft') {
               const draftLoadResult = await fetchDraftWorkspaceRows(baseRequest);
@@ -13543,11 +13697,16 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         } catch (error) {
           invoiceLoadError = error;
           try {
-            if (invoiceSuccessDateFilterActive || INVOICE_ACTIVE_WORK_AREAS.has(invoiceRequestOptions.area)) {
+            const shouldLoadActiveWorkspaceBatch = !searchMode && (
+              invoiceSuccessDateFilterActive
+              || INVOICE_ACTIVE_WORK_AREAS.has(invoiceRequestOptions.area)
+            );
+            const shouldDeepSearchActiveWorkspace = searchMode && INVOICE_ACTIVE_WORK_AREAS.has(invoiceRequestOptions.area);
+            if (shouldLoadActiveWorkspaceBatch || shouldDeepSearchActiveWorkspace) {
               const baseRequest = {
                 ...invoiceRequestOptions,
-                perPage: invoiceRequestOptions.area === 'draft' ? DRAFT_WORKSPACE_PER_PAGE : 200,
-                maxPages: invoiceRequestOptions.area === 'draft' ? DRAFT_WORKSPACE_MAX_PAGES : 200,
+                perPage: shouldDeepSearchActiveWorkspace ? INVOICE_SEARCH_PER_PAGE : INVOICE_ACTIVE_WORKSPACE_PER_PAGE,
+                maxPages: shouldDeepSearchActiveWorkspace ? INVOICE_SEARCH_MAX_PAGES : INVOICE_ACTIVE_WORKSPACE_MAX_PAGES,
               };
               rows = await fetchAllPosOrders(baseRequest);
               pageMeta = {
@@ -13691,8 +13850,8 @@ const SalesScreen = ({ currentUser, onLogout }) => {
             const normalizedArea = String(area || '').trim();
             const baseRequest = {
               ...requestOptions,
-              perPage: normalizedArea === 'draft' ? DRAFT_WORKSPACE_PER_PAGE : 200,
-              maxPages: normalizedArea === 'draft' ? DRAFT_WORKSPACE_MAX_PAGES : 200,
+              perPage: INVOICE_DASHBOARD_PREVIEW_PER_PAGE,
+              maxPages: INVOICE_DASHBOARD_PREVIEW_MAX_PAGES,
             };
             if (normalizedArea === 'draft') {
               const draftLoadResult = await fetchDraftWorkspaceRows(baseRequest);
@@ -13707,8 +13866,8 @@ const SalesScreen = ({ currentUser, onLogout }) => {
             const normalizedArea = String(area || '').trim();
             const baseRequest = {
               ...requestOptions,
-              perPage: normalizedArea === 'draft' ? DRAFT_WORKSPACE_PER_PAGE : 200,
-              maxPages: normalizedArea === 'draft' ? DRAFT_WORKSPACE_MAX_PAGES : 200,
+              perPage: INVOICE_DASHBOARD_PREVIEW_PER_PAGE,
+              maxPages: INVOICE_DASHBOARD_PREVIEW_MAX_PAGES,
             };
             try {
               return await fetchAllPosOrders(baseRequest);
@@ -13796,7 +13955,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     }, 500);
 
     return () => clearTimeout(timeout);
-  }, [activeMenu, backendReady, invoiceSearch, invoiceDateFrom, invoiceDateTo]);
+  }, [activeMenu, backendReady, invoiceDateFrom, invoiceDateTo]);
 
   useEffect(() => {
     if (!backendReady) {
@@ -13897,15 +14056,40 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     }
   };
 
-  const fetchActiveProductionBatches = async () => {
-    const batchGroups = await Promise.all([
-      fetchPosProductionBatches('open').catch(() => []),
-      fetchPosProductionBatches('all').catch(() => []),
-    ]);
-    return mergeInvoiceRows([], batchGroups.flat().filter((batch) => {
+  const filterActiveProductionBatches = (rows = []) => (
+    mergeInvoiceRows([], (Array.isArray(rows) ? rows : []).filter((batch) => {
       const status = String(batch?.status || '').trim().toLowerCase();
       return batch && !['printed', 'completed', 'done', 'finished', 'closed'].includes(status);
-    }));
+    }))
+  );
+
+  const fetchActiveProductionBatches = async () => {
+    const openRows = filterActiveProductionBatches(await fetchPosProductionBatches('open').catch(() => []));
+    if (openRows.length > 0) {
+      return openRows;
+    }
+    return filterActiveProductionBatches(await fetchPosProductionBatches('all').catch(() => []));
+  };
+
+  const fetchProductionSetupCached = async (options = {}) => {
+    const cached = productionSetupCacheRef.current;
+    const cacheAge = Date.now() - Number(productionSetupFetchedAtRef.current || 0);
+    if (!options?.force && cached && cacheAge >= 0 && cacheAge < PRODUCTION_SETUP_CACHE_MS) {
+      return cached;
+    }
+
+    try {
+      const setupPayload = await fetchPosProductionSetup();
+      const normalized = {
+        materials: Array.isArray(setupPayload?.materials) ? setupPayload.materials : [],
+        machines: Array.isArray(setupPayload?.machines) ? setupPayload.machines : [],
+      };
+      productionSetupCacheRef.current = normalized;
+      productionSetupFetchedAtRef.current = Date.now();
+      return normalized;
+    } catch (_error) {
+      return cached || { materials: [], machines: [] };
+    }
   };
 
   const loadProductionItems = async (override = {}) => {
@@ -13924,7 +14108,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
           search,
           scope: 'all',
         }),
-        fetchPosProductionSetup().catch(() => ({ materials: [], machines: [] })),
+        fetchProductionSetupCached({ force: override?.refreshSetup === true }),
         fetchActiveProductionBatches(),
       ]);
       setProductionRows(
@@ -14144,7 +14328,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     checkReceivableApprovalRealtimeUpdates();
     const timer = setInterval(() => {
       checkReceivableApprovalRealtimeUpdates();
-    }, 12000);
+    }, RECEIVABLE_APPROVAL_POLL_INTERVAL_MS);
 
     return () => clearInterval(timer);
   }, [backendReady]);
@@ -14200,7 +14384,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     checkProofingAssignmentUpdates();
     const timer = setInterval(() => {
       checkProofingAssignmentUpdates();
-    }, 12000);
+    }, PROOFING_ASSIGNMENT_POLL_INTERVAL_MS);
 
     return () => clearInterval(timer);
   }, [backendReady, currentUserId, activeMenu, proofingStatusFilter, proofingSearch]);
@@ -14289,7 +14473,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     checkProductionRealtimeUpdates();
     const timer = setInterval(() => {
       checkProductionRealtimeUpdates();
-    }, 9000);
+    }, activeMenu === 'production' ? ACTIVE_WORKSPACE_POLL_INTERVAL_MS : BACKGROUND_WORKSPACE_POLL_INTERVAL_MS);
     return () => clearInterval(timer);
   }, [backendReady, activeMenu, productionStatusFilter, productionSearch]);
 
@@ -14302,7 +14486,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     }
     const timer = setInterval(() => {
       loadProductionItems();
-    }, 9000);
+    }, ACTIVE_WORKSPACE_POLL_INTERVAL_MS);
     return () => clearInterval(timer);
   }, [activeMenu, productionStatusFilter, productionSearch, backendReady]);
   useEffect(() => {
@@ -14312,7 +14496,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
 
     const timer = setInterval(() => {
       loadProofingItems();
-    }, 12000);
+    }, ACTIVE_WORKSPACE_POLL_INTERVAL_MS);
 
     return () => clearInterval(timer);
   }, [activeMenu, proofingStatusFilter, proofingSearch, backendReady]);
@@ -14323,7 +14507,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
 
     const timer = setInterval(() => {
       loadLayoutItems();
-    }, 12000);
+    }, ACTIVE_WORKSPACE_POLL_INTERVAL_MS);
 
     return () => clearInterval(timer);
   }, [activeMenu, layoutSearch, backendReady]);
@@ -15881,7 +16065,12 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         if (!cancelled && previewRequestRef.current === requestId) {
           const targetProduct = String(buildSelectedProductLabel(selectedProductRow) || selectedProductRow?.name || '').trim();
           const bookSummaryText = buildBookQuickSummary(bookPrintRule);
+          const bookBaseProduct = resolveBookBaseProductFromPricing(pricing);
+          const bookBaseProductText = bookBaseProduct?.name
+            ? `Harga: ${bookBaseProduct.name}${bookBaseProduct.unit_price > 0 ? ` ${formatRupiah(bookBaseProduct.unit_price)}/hal` : ''}`
+            : '';
           const bookMaterialPreview = [
+            bookBaseProductText,
             selectedBookInsideMaterialLabel ? `Isi: ${selectedBookInsideMaterialLabel}` : '',
             selectedBookCoverMaterialLabel ? `Cover: ${selectedBookCoverMaterialLabel}` : '',
             selectedBookBindingLabel ? `Jilid: ${selectedBookBindingLabel}` : '',
@@ -16132,6 +16321,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       const sourceMeta = toSourceMeta(productDetail || product);
       const bookMode = isBookSalesProduct(product, productDetail);
       const bookPayload = buildSelectedBookPayload(product, productDetail, pages);
+      const bookBaseProduct = bookMode ? resolveBookBaseProductFromPricing(pricing) : null;
       const negotiationConfig = resolveA3NegotiationConfig(product, productDetail);
       const negotiationState = resolveA3NegotiationState({
         config: negotiationConfig,
@@ -16212,6 +16402,9 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         ...bookPayload,
         ...(bookMode ? {
           book_addons: bookAddons,
+          book_base_product: bookBaseProduct,
+          mapped_base_product_id: bookBaseProduct?.id || null,
+          mapped_base_product_name: bookBaseProduct?.name || null,
           book_pricing: pricing?.book_pricing && typeof pricing.book_pricing === 'object'
             ? pricing.book_pricing
             : null,
@@ -16231,9 +16424,16 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         spec_snapshot: {
           type: bookMode ? 'book' : 'custom_order',
           ...(bookMode ? { addons: bookAddons } : {}),
+          ...(bookMode && bookBaseProduct ? {
+            schema: 'book_configurator_v1',
+            price_basis: bookBaseProduct.price_basis || 'per_customer_page',
+            production_basis: 'a3_sheet',
+            base_product: bookBaseProduct,
+          } : {}),
           ...(bookMode && bookPrintRule ? { book_print_rule: bookPrintRule } : {}),
           ...(bookMode ? {
             book_specs: {
+              base_product: bookBaseProduct,
               book_type: bookPayload.book_type || null,
               finished_size: bookPayload.finished_size || null,
               print_model: bookPayload.print_model || null,
@@ -16401,6 +16601,9 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         ...bookPayload,
         ...(bookMode ? {
           book_addons: bookAddons,
+          book_base_product: bookBaseProduct,
+          mapped_base_product_id: bookBaseProduct?.id || null,
+          mapped_base_product_name: bookBaseProduct?.name || null,
         } : {}),
         ...(bookMode && bookPrintRule ? {
           book_print_rule: bookPrintRule,
@@ -18837,6 +19040,11 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     }
     return searchedRows;
   }, [approvalStatusFilter, dateFilteredInvoiceRows, invoiceFilter, invoiceSearch, invoiceWorkspaceRowsByArea]);
+  const renderedInvoices = useMemo(
+    () => (Array.isArray(filteredInvoices) ? filteredInvoices.slice(0, INVOICE_RENDER_LIMIT) : []),
+    [filteredInvoices],
+  );
+  const hiddenRenderedInvoiceCount = Math.max((Array.isArray(filteredInvoices) ? filteredInvoices.length : 0) - renderedInvoices.length, 0);
   const filteredInvoiceSummary = useMemo(() => {
     if (!['draft', 'success'].includes(invoiceFilter)) {
       return null;
@@ -20426,7 +20634,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                       : 'Belum ada invoice sesuai filter.'
                 }
               >
-                {filteredInvoices.map((row, index) => {
+                {renderedInvoices.map((row, index) => {
                     const isApprovalRow = isReceivableApprovalInvoiceRow(row);
                     const approvalInfo = isApprovalRow
                       ? (row?.approval && typeof row.approval === 'object' ? row.approval : null)
@@ -20613,9 +20821,16 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                         onReprintInvoice={() => handleReprintInvoice(row)}
                         onPrintBillingNote={() => handlePrintBillingNote(row)}
                         onShareBillingNote={() => handleShareBillingNote(row)}
-                      />
-                  );
-                })}
+	                      />
+	                  );
+	                })}
+                {hiddenRenderedInvoiceCount > 0 ? (
+                  <View style={styles.invoiceLoadMoreWrap}>
+                    <Text style={styles.invoiceLoadMoreMeta}>
+                      {hiddenRenderedInvoiceCount} invoice lain disembunyikan agar POS tetap ringan. Gunakan pencarian atau filter tanggal untuk mempersempit daftar.
+                    </Text>
+                  </View>
+                ) : null}
                 {invoiceListMeta.hasMore ? (
                   <View style={styles.invoiceLoadMoreWrap}>
                     <Text style={styles.invoiceLoadMoreMeta}>
@@ -20644,7 +20859,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
               onChangeStatusFilter={setProductionStatusFilter}
               searchText={productionSearch}
               onChangeSearchText={setProductionSearch}
-              onRefresh={loadProductionItems}
+              onRefresh={() => loadProductionItems({ refreshSetup: true })}
               onCreateBatch={handleCreateProductionBatch}
               onFinalizeBatch={handleFinalizeProductionBatch}
               onUpdateStatus={handleUpdateProductionStatus}

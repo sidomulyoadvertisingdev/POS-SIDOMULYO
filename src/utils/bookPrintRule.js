@@ -75,7 +75,6 @@ const DEFAULT_FIELD_OPTIONS = {
   print_side: [
     { value: 'Cetak 1 Sisi', label: 'Cetak 1 Sisi', code: 'single_sided' },
     { value: 'Cetak 2 Sisi', label: 'Cetak 2 Sisi', code: 'double_sided' },
-    { value: 'Cetak Bolak-Balik', label: 'Cetak Bolak-Balik', code: 'double_sided' },
   ],
   inside_print: [
     { value: 'bw', label: 'Hitam Putih' },
@@ -143,7 +142,7 @@ const DEFAULT_WIZARD_STEPS = [
     code: 'print_side',
     title: 'Pilih Sisi Cetak',
     shortLabel: 'Sisi',
-    description: 'Pilih 1 sisi atau bolak-balik sesuai kebutuhan customer dan aturan layout.',
+    description: 'Pilih 1 sisi atau 2 sisi sesuai kebutuhan customer dan aturan layout.',
   },
   {
     code: 'customer_page_count',
@@ -182,7 +181,18 @@ const normalizePrintSideCode = (value) => {
   if (['single_sided', 'cetak 1 sisi', '1 sisi', 'simplex', 'single sided', 'single'].includes(text)) {
     return 'single_sided';
   }
-  if (['double_sided', 'cetak 2 sisi', 'cetak bolak-balik', 'bolak-balik', 'bolak balik', 'duplex', 'double sided', 'double'].includes(text)) {
+  if ([
+    'double_sided',
+    'cetak 2 sisi',
+    '2 sisi',
+    'cetak bolak-balik',
+    'cetak bolak balik',
+    'bolak-balik',
+    'bolak balik',
+    'duplex',
+    'double sided',
+    'double',
+  ].includes(text)) {
     return 'double_sided';
   }
   return '';
@@ -194,9 +204,9 @@ const BOOK_PRODUCT_DIRECTION_RULES = {
     segment: 'Buku Keagamaan & Acara Keluarga',
     sizes: ['A5'],
     printModels: ['Cetak Susun Buku / Lipat Buku', 'Cetak Susun Buku / Lipat Buku / Imposisi'],
-    printSides: ['Cetak Bolak-Balik'],
+    printSides: ['Cetak 2 Sisi'],
     pageMultipleRules: {
-      'A5|Cetak Bolak-Balik': 8,
+      'A5|Cetak 2 Sisi': 8,
     },
     cashierNote: 'Jika halaman belum kelipatan 8, tambah halaman kosong.',
   },
@@ -205,9 +215,9 @@ const BOOK_PRODUCT_DIRECTION_RULES = {
     segment: 'Buku Keagamaan & Acara Keluarga',
     sizes: ['A5'],
     printModels: ['Cetak Susun Buku / Lipat Buku', 'Cetak Susun Buku / Lipat Buku / Imposisi'],
-    printSides: ['Cetak Bolak-Balik'],
+    printSides: ['Cetak 2 Sisi'],
     pageMultipleRules: {
-      'A5|Cetak Bolak-Balik': 8,
+      'A5|Cetak 2 Sisi': 8,
     },
     cashierNote: 'Umumnya pakai susun buku agar rapi saat dilipat.',
   },
@@ -216,10 +226,10 @@ const BOOK_PRODUCT_DIRECTION_RULES = {
     segment: 'Bisnis, Perusahaan & Brand',
     sizes: ['A4', 'A5'],
     printModels: ['Cetak Normal / Per Halaman'],
-    printSides: ['Cetak Bolak-Balik'],
+    printSides: ['Cetak 2 Sisi'],
     pageMultipleRules: {
-      'A4|Cetak Bolak-Balik': 4,
-      'A5|Cetak Bolak-Balik': 8,
+      'A4|Cetak 2 Sisi': 4,
+      'A5|Cetak 2 Sisi': 8,
     },
     cashierNote: 'Untuk jilid lem/ring biasanya normal per halaman.',
   },
@@ -228,10 +238,10 @@ const BOOK_PRODUCT_DIRECTION_RULES = {
     segment: 'Bisnis, Perusahaan & Brand',
     sizes: ['A4', 'A5'],
     printModels: ['Cetak Normal / Per Halaman', 'Cetak Susun Buku / Lipat Buku', 'Cetak Susun Buku / Lipat Buku / Imposisi'],
-    printSides: ['Cetak Bolak-Balik'],
+    printSides: ['Cetak 2 Sisi'],
     pageMultipleRules: {
-      'A4|Cetak Bolak-Balik': 4,
-      'A5|Cetak Bolak-Balik': 8,
+      'A4|Cetak 2 Sisi': 4,
+      'A5|Cetak 2 Sisi': 8,
     },
     cashierNote: 'Tentukan dulu mau jilid lem/ring atau staples tengah.',
   },
@@ -240,10 +250,10 @@ const BOOK_PRODUCT_DIRECTION_RULES = {
     segment: 'Kuliner, Restoran, Cafe & UMKM',
     sizes: ['A4', 'A5'],
     printModels: ['Cetak Normal / Per Halaman'],
-    printSides: ['Cetak Bolak-Balik'],
+    printSides: ['Cetak 2 Sisi'],
     pageMultipleRules: {
-      'A4|Cetak Bolak-Balik': 4,
-      'A5|Cetak Bolak-Balik': 8,
+      'A4|Cetak 2 Sisi': 4,
+      'A5|Cetak 2 Sisi': 8,
     },
     cashierNote: 'Menu lembar tebal bisa normal, buku menu bisa jilid atau ring.',
   },
@@ -252,9 +262,9 @@ const BOOK_PRODUCT_DIRECTION_RULES = {
     segment: 'Pendidikan, Sekolah, Kampus & Pelatihan',
     sizes: ['A4'],
     printModels: ['Cetak Normal / Per Halaman'],
-    printSides: ['Cetak Bolak-Balik'],
+    printSides: ['Cetak 2 Sisi'],
     pageMultipleRules: {
-      'A4|Cetak Bolak-Balik': 4,
+      'A4|Cetak 2 Sisi': 4,
     },
     cashierNote: 'Cocok untuk ring, jilid lem, atau staples samping.',
   },
@@ -263,10 +273,10 @@ const BOOK_PRODUCT_DIRECTION_RULES = {
     segment: 'Pendidikan, Sekolah, Kampus & Pelatihan',
     sizes: ['A4'],
     printModels: ['Cetak Normal / Per Halaman'],
-    printSides: ['Cetak 1 Sisi', 'Cetak Bolak-Balik'],
+    printSides: ['Cetak 1 Sisi', 'Cetak 2 Sisi'],
     pageMultipleRules: {
       'A4|Cetak 1 Sisi': 2,
-      'A4|Cetak Bolak-Balik': 4,
+      'A4|Cetak 2 Sisi': 4,
     },
     cashierNote: 'Ikuti permintaan sekolah atau kampus.',
   },
@@ -275,9 +285,9 @@ const BOOK_PRODUCT_DIRECTION_RULES = {
     segment: 'Event, Seminar, Komunitas & Organisasi',
     sizes: ['A5'],
     printModels: ['Cetak Susun Buku / Lipat Buku', 'Cetak Susun Buku / Lipat Buku / Imposisi'],
-    printSides: ['Cetak Bolak-Balik'],
+    printSides: ['Cetak 2 Sisi'],
     pageMultipleRules: {
-      'A5|Cetak Bolak-Balik': 8,
+      'A5|Cetak 2 Sisi': 8,
     },
     cashierNote: 'Paling aman jelaskan harus kelipatan 8 untuk A5.',
   },
@@ -298,10 +308,10 @@ const BOOK_PRODUCT_DIRECTION_RULES = {
     segment: 'Tender, Penawaran & Dokumen Resmi',
     sizes: ['A4'],
     printModels: ['Cetak Normal / Per Halaman'],
-    printSides: ['Cetak 1 Sisi', 'Cetak Bolak-Balik'],
+    printSides: ['Cetak 1 Sisi', 'Cetak 2 Sisi'],
     pageMultipleRules: {
       'A4|Cetak 1 Sisi': 2,
-      'A4|Cetak Bolak-Balik': 4,
+      'A4|Cetak 2 Sisi': 4,
     },
     cashierNote: 'Jika harus 1 sisi, arahkan ke aturan A4 1 sisi.',
   },
@@ -310,10 +320,10 @@ const BOOK_PRODUCT_DIRECTION_RULES = {
     segment: 'Manual, Panduan Produk & After Sales',
     sizes: ['A5', 'A6'],
     printModels: ['Cetak Susun Buku / Lipat Buku', 'Cetak Susun Buku / Lipat Buku / Imposisi'],
-    printSides: ['Cetak Bolak-Balik'],
+    printSides: ['Cetak 2 Sisi'],
     pageMultipleRules: {
-      'A5|Cetak Bolak-Balik': 8,
-      'A6|Cetak Bolak-Balik': 16,
+      'A5|Cetak 2 Sisi': 8,
+      'A6|Cetak 2 Sisi': 16,
     },
     cashierNote: 'Untuk buku kecil, pastikan jumlah halaman pas kelipatan.',
   },
@@ -322,10 +332,10 @@ const BOOK_PRODUCT_DIRECTION_RULES = {
     segment: 'Manual, Panduan Produk & After Sales',
     sizes: ['A5', 'A6'],
     printModels: ['Cetak Susun Buku / Lipat Buku', 'Cetak Susun Buku / Lipat Buku / Imposisi'],
-    printSides: ['Cetak Bolak-Balik'],
+    printSides: ['Cetak 2 Sisi'],
     pageMultipleRules: {
-      'A5|Cetak Bolak-Balik': 8,
-      'A6|Cetak Bolak-Balik': 16,
+      'A5|Cetak 2 Sisi': 8,
+      'A6|Cetak 2 Sisi': 16,
     },
     cashierNote: 'Untuk buku kecil, pastikan jumlah halaman pas kelipatan.',
   },
@@ -334,10 +344,10 @@ const BOOK_PRODUCT_DIRECTION_RULES = {
     segment: 'Media Publikasi & Bacaan',
     sizes: ['A4', 'A5'],
     printModels: ['Cetak Susun Buku / Lipat Buku', 'Cetak Susun Buku / Lipat Buku / Imposisi'],
-    printSides: ['Cetak Bolak-Balik'],
+    printSides: ['Cetak 2 Sisi'],
     pageMultipleRules: {
-      'A4|Cetak Bolak-Balik': 4,
-      'A5|Cetak Bolak-Balik': 8,
+      'A4|Cetak 2 Sisi': 4,
+      'A5|Cetak 2 Sisi': 8,
     },
     cashierNote: 'Jika model majalah staples tengah, pakai susun buku.',
   },
@@ -753,7 +763,7 @@ const resolveLegacyPrintMode = (printSide) => {
   if (['cetak 1 sisi', '1 sisi', 'simplex'].includes(text)) {
     return 'simplex';
   }
-  if (['cetak 2 sisi', 'cetak bolak-balik', 'bolak-balik', 'duplex'].includes(text)) {
+  if (['cetak 2 sisi', '2 sisi', 'cetak bolak-balik', 'cetak bolak balik', 'bolak-balik', 'bolak balik', 'duplex'].includes(text)) {
     return 'duplex';
   }
   return '';

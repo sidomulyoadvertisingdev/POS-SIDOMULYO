@@ -25,7 +25,7 @@ const DEFAULT_WIZARD_STEP_ITEMS = [
     code: 'print_side',
     title: 'Pilih Sisi Cetak',
     shortLabel: 'Sisi',
-    description: 'Pilih 1 sisi atau bolak-balik sesuai kebutuhan customer dan aturan layout.',
+    description: 'Pilih 1 sisi atau 2 sisi sesuai kebutuhan customer dan aturan layout.',
   },
   {
     code: 'customer_page_count',
@@ -518,7 +518,7 @@ const BookRulePanel = ({
               {currentStepCode === 'print_side' ? (
                 <View style={styles.bookOptionGroup}>
                   <Text style={styles.bookOptionLabel}>Langkah {wizardStep}. {String(currentStepMeta?.title || 'Pilih Sisi Cetak')}</Text>
-                  <Text style={styles.bookRuleMessage}>Pilih 1 sisi atau bolak-balik sesuai kebutuhan customer.</Text>
+                  <Text style={styles.bookRuleMessage}>Pilih 1 sisi atau 2 sisi sesuai kebutuhan customer.</Text>
                   {renderBookOptionButtons(styles, bookPrintSideOptions, bookPrintSide, onChangeBookPrintSide)}
                 </View>
               ) : null}

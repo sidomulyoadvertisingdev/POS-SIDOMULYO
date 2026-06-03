@@ -142,7 +142,7 @@ test('buildBookPrintRulePayload emits customer-facing book fields and duplex pri
   const payload = buildBookPrintRulePayload({
     finishedSize: 'A5',
     printModel: 'Cetak Susun Buku / Lipat Buku',
-    printSide: 'Cetak Bolak-Balik',
+    printSide: 'Cetak 2 Sisi',
     customerPageCount: 12,
     productName: 'Buku Yasin',
     productType: 'book',
@@ -151,7 +151,7 @@ test('buildBookPrintRulePayload emits customer-facing book fields and duplex pri
   assert.deepEqual(payload, {
     finished_size: 'A5',
     print_model: 'Cetak Susun Buku / Lipat Buku',
-    print_side: 'Cetak Bolak-Balik',
+    print_side: 'Cetak 2 Sisi',
     customer_page_count: 12,
     page_count: 12,
     product_name: 'Buku Yasin',
@@ -232,7 +232,7 @@ test('getBookDirectionRule returns cashier direction metadata for known book typ
   const rule = getBookDirectionRule('buku_yasin');
 
   assert.equal(rule.segment, 'Buku Keagamaan & Acara Keluarga');
-  assert.equal(rule.pageMultipleRules['A5|Cetak Bolak-Balik'], 8);
+  assert.equal(rule.pageMultipleRules['A5|Cetak 2 Sisi'], 8);
 });
 
 test('filterBookOptionsByRule narrows size, print model, and print side safely', () => {
@@ -302,7 +302,7 @@ test('getBookWizardProductContext normalizes locked print side from backend conf
     product_context: {
       locked_print_side: true,
       forced_print_side_code: 'double_sided',
-      forced_print_side: 'Cetak Bolak-Balik',
+      forced_print_side: 'Cetak 2 Sisi',
       locked_fields: ['print_side'],
     },
   });
@@ -331,7 +331,7 @@ test('filterBookFieldOptionsByFlowContext narrows print side to forced product f
 
   assert.deepEqual(
     filtered.print_side.map((row) => normalizePrintSideCode(row.code || row.value || row.label || '')),
-    ['double_sided', 'double_sided'],
+    ['double_sided'],
   );
 });
 
