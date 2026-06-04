@@ -578,7 +578,9 @@ const toSafeText = (value) => String(value || '').trim();
 
 const normalizeExpenseStatusLabel = (value) => {
   const status = toSafeText(value).toLowerCase();
+  if (status === 'active') return 'Aktif';
   if (status === 'posted') return 'Tercatat';
+  if (status === 'cancelled' || status === 'canceled') return 'Dibatalkan';
   if (status === 'linked_request') return 'Terkait Request';
   if (status === 'draft_local') return 'Draft Lokal';
   if (status === 'pending') return 'Menunggu';
@@ -938,8 +940,12 @@ const normalizeBackendPengeluaranRow = (row) => {
     signed_amount: amount * -1,
     category: toSafeText(row?.category || row?.type?.name || 'Pengeluaran'),
     note: toSafeText(row?.note),
-    status: 'posted',
-    status_label: normalizeExpenseStatusLabel('posted'),
+    status: toSafeText(row?.status) || 'posted',
+    status_label: toSafeText(row?.status_label) || normalizeExpenseStatusLabel(row?.status || 'posted'),
+    is_cancelled: Boolean(row?.is_cancelled) || ['cancelled', 'canceled'].includes(toSafeText(row?.status).toLowerCase()),
+    cancelled_at: toSafeText(row?.cancelled_at),
+    cancellation_reason: toSafeText(row?.cancellation_reason),
+    cancelled_by: row?.cancelled_by || null,
     requester: row?.staff || null,
     purchase_category_id: Number(row?.purchase_category_id || row?.purchase_category?.id || 0) || null,
     purchase_category_code: toSafeText(row?.purchase_category_code || row?.purchase_category?.code),
@@ -962,6 +968,7 @@ const normalizeBackendPengeluaranRow = (row) => {
     category_item_name: toSafeText(row?.category_item_name || row?.purchase_category_item?.name),
     source_account_id: Number(row?.source_account_id || 0) || null,
     accounting_journal_id: Number(row?.accounting_journal_id || 0) || null,
+    reversal_journal_id: Number(row?.reversal_journal_id || 0) || null,
     reference: row?.reference && typeof row.reference === 'object'
       ? {
         type: toSafeText(row.reference.type),
@@ -2448,6 +2455,18 @@ export const createPosCashFlow = async (payload) => {
   return request('/pos/cash-flows', {
     method: 'POST',
     body: JSON.stringify(payload),
+  });
+};
+
+export const cancelPosCashFlow = async (id, reason) => {
+  await ensureAuthenticated();
+  const key = toSafeText(id);
+  if (!key) {
+    throw new Error('ID pengeluaran tidak valid.');
+  }
+  return request(`/pos/cash-flows/${key}/cancel`, {
+    method: 'POST',
+    body: JSON.stringify({ reason: toSafeText(reason) }),
   });
 };
 

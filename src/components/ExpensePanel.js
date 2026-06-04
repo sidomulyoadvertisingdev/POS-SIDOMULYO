@@ -1,9 +1,11 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import {
+  cancelPosCashFlow,
   createPosCashFlow,
   fetchPosBankAccounts,
   getPengeluaranCategoryOptions,
+  getPengeluaranList,
 } from '../services/erpApi';
 import { formatRupiah } from '../utils/currency';
 
@@ -183,6 +185,9 @@ const ExpensePanel = ({ isActive, onNotify }) => {
   const [isCategoriesLoading, setIsCategoriesLoading] = useState(false);
   const [sourceAccounts, setSourceAccounts] = useState([]);
   const [isAccountsLoading, setIsAccountsLoading] = useState(false);
+  const [recentExpenses, setRecentExpenses] = useState([]);
+  const [isHistoryLoading, setIsHistoryLoading] = useState(false);
+  const [cancellingExpenseId, setCancellingExpenseId] = useState(null);
   const [isCategoryModalVisible, setIsCategoryModalVisible] = useState(false);
   const [isCategoryItemModalVisible, setIsCategoryItemModalVisible] = useState(false);
   const [categorySearch, setCategorySearch] = useState('');
@@ -217,6 +222,23 @@ const ExpensePanel = ({ isActive, onNotify }) => {
   ), [categoryItemRows, categoryItemSearch]);
 
   const amountValue = parseCurrencyInput(amountInput);
+
+  const loadRecentExpenses = async () => {
+    setIsHistoryLoading(true);
+    try {
+      const payload = await getPengeluaranList({
+        date_from: expenseDate,
+        date_to: expenseDate,
+        per_page: 20,
+      });
+      setRecentExpenses(Array.isArray(payload?.data) ? payload.data : []);
+    } catch (error) {
+      setRecentExpenses([]);
+      onNotify?.('Pengeluaran', `Gagal memuat riwayat pengeluaran: ${error.message}`);
+    } finally {
+      setIsHistoryLoading(false);
+    }
+  };
 
   const loadMasterData = async () => {
     setIsCategoriesLoading(true);
@@ -396,6 +418,7 @@ const ExpensePanel = ({ isActive, onNotify }) => {
       await createPosCashFlow(payload);
 
       resetFormAfterSubmit();
+      await loadRecentExpenses();
       onNotify?.('Pengeluaran', 'Pengeluaran berhasil disimpan ke backend.');
     } catch (error) {
       onNotify?.('Pengeluaran', `Gagal menyimpan pengeluaran: ${error.message}`);
@@ -404,11 +427,45 @@ const ExpensePanel = ({ isActive, onNotify }) => {
     }
   };
 
+  const handleCancelExpense = async (row) => {
+    const id = toSafeText(row?.id);
+    if (!id || row?.is_cancelled) {
+      return;
+    }
+
+    const promptFn = typeof globalThis !== 'undefined' && typeof globalThis.prompt === 'function'
+      ? globalThis.prompt.bind(globalThis)
+      : null;
+    const reason = promptFn
+      ? promptFn(`Alasan pembatalan pengeluaran ${row?.transaction_no || id}:`, '')
+      : '';
+
+    if (reason === null) {
+      return;
+    }
+    if (!toSafeText(reason) || toSafeText(reason).length < 3) {
+      onNotify?.('Pengeluaran', 'Alasan pembatalan minimal 3 karakter.');
+      return;
+    }
+
+    try {
+      setCancellingExpenseId(id);
+      await cancelPosCashFlow(id, reason);
+      await loadRecentExpenses();
+      onNotify?.('Pengeluaran', 'Pengeluaran berhasil dibatalkan.');
+    } catch (error) {
+      onNotify?.('Pengeluaran', `Gagal membatalkan pengeluaran: ${error.message}`);
+    } finally {
+      setCancellingExpenseId(null);
+    }
+  };
+
   useEffect(() => {
     if (!isActive) {
       return;
     }
     loadMasterData();
+    loadRecentExpenses();
   }, [isActive]);
 
   useEffect(() => {
@@ -612,6 +669,61 @@ const ExpensePanel = ({ isActive, onNotify }) => {
         >
           <Text style={styles.primaryButtonText}>{isSubmitting ? 'Menyimpan...' : 'Simpan Pengeluaran ke Backend'}</Text>
         </Pressable>
+      </View>
+
+      <View style={styles.card}>
+        <View style={styles.formHeaderRow}>
+          <View style={styles.formHeaderInfo}>
+            <Text style={styles.cardTitle}>Riwayat Pengeluaran Hari Ini</Text>
+            <Text style={styles.helperText}>Pengeluaran salah input bisa dibatalkan. Transaksi tetap tercatat sebagai jejak audit dan dibuatkan jurnal pembalik.</Text>
+          </View>
+          <Pressable style={styles.secondaryButton} onPress={loadRecentExpenses} disabled={isHistoryLoading}>
+            <Text style={styles.secondaryButtonText}>{isHistoryLoading ? 'Memuat...' : 'Refresh Riwayat'}</Text>
+          </Pressable>
+        </View>
+
+        {isHistoryLoading ? (
+          <Text style={styles.helperText}>Sedang memuat riwayat pengeluaran...</Text>
+        ) : recentExpenses.length > 0 ? (
+          <View style={styles.historyList}>
+            {recentExpenses.map((row) => {
+              const rowId = toSafeText(row?.id);
+              const isCancelled = Boolean(row?.is_cancelled);
+              const isCancelling = rowId && rowId === toSafeText(cancellingExpenseId);
+              return (
+                <View key={`expense-history-${rowId || row?.transaction_no}`} style={[styles.historyRow, isCancelled ? styles.historyRowCancelled : null]}>
+                  <View style={styles.historyInfo}>
+                    <View style={styles.historyTitleRow}>
+                      <Text style={styles.historyTitle}>{row?.category || 'Pengeluaran'}</Text>
+                      <Text style={[styles.historyBadge, isCancelled ? styles.historyBadgeCancelled : null]}>
+                        {row?.status_label || (isCancelled ? 'Dibatalkan' : 'Aktif')}
+                      </Text>
+                    </View>
+                    <Text style={styles.historyMeta}>{row?.transaction_no || '-'} | {row?.occurred_at || '-'}</Text>
+                    {row?.note ? <Text style={styles.historyNote}>{row.note}</Text> : null}
+                    {isCancelled && row?.cancellation_reason ? (
+                      <Text style={styles.historyCancelReason}>Alasan batal: {row.cancellation_reason}</Text>
+                    ) : null}
+                  </View>
+                  <View style={styles.historyActionColumn}>
+                    <Text style={[styles.historyAmount, isCancelled ? styles.historyAmountCancelled : null]}>{formatRupiah(row?.amount || 0)}</Text>
+                    {!isCancelled && row?.source === 'backend' ? (
+                      <Pressable
+                        style={[styles.cancelExpenseButton, isCancelling ? styles.disabledButton : null]}
+                        onPress={() => handleCancelExpense(row)}
+                        disabled={isCancelling}
+                      >
+                        <Text style={styles.cancelExpenseButtonText}>{isCancelling ? 'Membatalkan...' : 'Batalkan'}</Text>
+                      </Pressable>
+                    ) : null}
+                  </View>
+                </View>
+              );
+            })}
+          </View>
+        ) : (
+          <Text style={styles.helperText}>Belum ada pengeluaran pada tanggal ini.</Text>
+        )}
       </View>
 
       <Modal
@@ -987,6 +1099,97 @@ const styles = StyleSheet.create({
     fontSize: 11,
     lineHeight: 16,
     color: '#617d98',
+  },
+  historyList: {
+    gap: 8,
+  },
+  historyRow: {
+    borderWidth: 1,
+    borderColor: '#dce5f4',
+    backgroundColor: '#fbfdff',
+    borderRadius: 12,
+    padding: 12,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    gap: 10,
+    flexWrap: 'wrap',
+  },
+  historyRowCancelled: {
+    backgroundColor: '#fff7f7',
+    borderColor: '#fecaca',
+  },
+  historyInfo: {
+    flex: 1,
+    minWidth: 220,
+    gap: 3,
+  },
+  historyTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    flexWrap: 'wrap',
+  },
+  historyTitle: {
+    fontSize: 12,
+    fontWeight: '900',
+    color: '#173c87',
+  },
+  historyBadge: {
+    fontSize: 10,
+    fontWeight: '900',
+    color: '#166534',
+    backgroundColor: '#dcfce7',
+    borderRadius: 999,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    overflow: 'hidden',
+  },
+  historyBadgeCancelled: {
+    color: '#991b1b',
+    backgroundColor: '#fee2e2',
+  },
+  historyMeta: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: '#667897',
+  },
+  historyNote: {
+    fontSize: 11,
+    lineHeight: 16,
+    color: '#435674',
+  },
+  historyCancelReason: {
+    fontSize: 11,
+    lineHeight: 16,
+    color: '#991b1b',
+    fontWeight: '700',
+  },
+  historyActionColumn: {
+    alignItems: 'flex-end',
+    gap: 8,
+    minWidth: 130,
+  },
+  historyAmount: {
+    fontSize: 12,
+    fontWeight: '900',
+    color: '#14233d',
+  },
+  historyAmountCancelled: {
+    color: '#991b1b',
+    textDecorationLine: 'line-through',
+  },
+  cancelExpenseButton: {
+    borderWidth: 1,
+    borderColor: '#b91c1c',
+    backgroundColor: '#fff1f2',
+    borderRadius: 10,
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+  },
+  cancelExpenseButtonText: {
+    fontSize: 11,
+    fontWeight: '900',
+    color: '#b91c1c',
   },
   modalBackdrop: {
     flex: 1,
