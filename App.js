@@ -6,7 +6,7 @@ import LoginScreen from './src/screens/LoginScreen';
 import SalesScreen from './src/screens/SalesScreen';
 import StartupSplashScreen from './src/components/StartupSplashScreen';
 import { appEnv } from './src/config/appEnv';
-import { logoutPosUser } from './src/services/erpApi';
+import { logoutPosUser, restorePersistedPosSession } from './src/services/erpApi';
 const { formatAppVersionLabel } = require('./src/utils/appVersion');
 
 class AppErrorBoundary extends Component {
@@ -55,7 +55,7 @@ class AppErrorBoundary extends Component {
 }
 
 export default function App() {
-  const [authState, setAuthState] = useState('unauthenticated');
+  const [authState, setAuthState] = useState('checking');
   const [currentUser, setCurrentUser] = useState(null);
   const [isStartupSplashVisible, setIsStartupSplashVisible] = useState(true);
   const [fontLoadTimedOut, setFontLoadTimedOut] = useState(false);
@@ -63,6 +63,17 @@ export default function App() {
     Poppins_400Regular,
   });
   const isAppFontReady = fontsLoaded || fontLoadTimedOut;
+
+  useEffect(() => {
+    const restoredUser = restorePersistedPosSession();
+    if (restoredUser) {
+      setCurrentUser(restoredUser);
+      setAuthState('authenticated');
+      return;
+    }
+
+    setAuthState('unauthenticated');
+  }, []);
 
   useEffect(() => {
     if (fontsLoaded) {
@@ -105,7 +116,7 @@ export default function App() {
   return (
     <SafeAreaView style={styles.container}>
       <StatusBar style="light" />
-      {!isAppFontReady ? (
+      {!isAppFontReady || authState === 'checking' ? (
         <View style={styles.loadingWrap}>
           <ActivityIndicator size="large" color="#0f45af" />
         </View>

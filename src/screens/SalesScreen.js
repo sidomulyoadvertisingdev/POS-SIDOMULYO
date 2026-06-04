@@ -117,6 +117,7 @@ const {
   canUserViewInvoiceRow,
   filterInvoiceRowsForUser,
   isApprovalInvoiceRow,
+  isCashierUser,
   isDraftInvoiceRow: isDraftInvoiceRowVisible,
   isReceivableInvoiceRow,
   isSuccessfulInvoiceRow,
@@ -5776,6 +5777,7 @@ const mapPaymentMethodTypeToClosingBucket = (value) => {
   if (normalizedType === 'bank_transfer') return 'transfer';
   if (normalizedType === 'qris') return 'qris';
   if (normalizedType === 'card') return 'card';
+  if (normalizedType === 'customer_balance') return 'customerDeposit';
   return 'other';
 };
 const resolveBreakdownPaymentTargetLabel = (row, accountRows = []) => {
@@ -6063,6 +6065,33 @@ const isInvoiceRowInDateRange = (row, dateFrom, dateTo) => {
   }
   return true;
 };
+const resolveInvoiceRowCashierId = (row) => firstPositiveNumber(
+  row?.cashier?.id,
+  row?.cashier_id,
+  row?.order?.cashier?.id,
+  row?.order?.cashier_id,
+  row?.invoice?.cashier?.id,
+  row?.invoice?.cashier_id,
+  row?.created_by?.id,
+  row?.created_by_user?.id,
+  row?.created_by_user_id,
+  row?.order?.created_by?.id,
+  row?.order?.created_by_user?.id,
+  row?.order?.created_by_user_id,
+  row?.invoice?.created_by?.id,
+  row?.invoice?.created_by_user?.id,
+  row?.invoice?.created_by_user_id,
+);
+const isInvoiceRowMatchingCashier = (row, cashierId) => {
+  const selectedCashierId = toPositiveNumber(cashierId);
+  if (!(selectedCashierId > 0)) {
+    return true;
+  }
+  return resolveInvoiceRowCashierId(row) === selectedCashierId;
+};
+const filterInvoiceRowsByCashier = (rows, cashierId) => (
+  (Array.isArray(rows) ? rows : []).filter((row) => isInvoiceRowMatchingCashier(row, cashierId))
+);
 const formatBackendValidationError = (error) => {
   const validationBody = error?.body;
   if (!validationBody || typeof validationBody !== 'object' || Array.isArray(validationBody)) {
@@ -7179,6 +7208,9 @@ const SalesScreen = ({ currentUser, onLogout }) => {
   const [invoiceSearch, setInvoiceSearch] = useState('');
   const [invoiceDateFrom, setInvoiceDateFrom] = useState(() => String(DEFAULT_INVOICE_DATE_FILTER?.from || '').trim());
   const [invoiceDateTo, setInvoiceDateTo] = useState(() => String(DEFAULT_INVOICE_DATE_FILTER?.to || '').trim());
+  const [invoiceCashierId, setInvoiceCashierId] = useState('');
+  const [invoiceCashierOptions, setInvoiceCashierOptions] = useState([]);
+  const [isInvoiceCashierLoading, setIsInvoiceCashierLoading] = useState(false);
   const [isDraftLoading, setIsDraftLoading] = useState(false);
   const [isDeletingDraftId, setIsDeletingDraftId] = useState(null);
   const [productionRows, setProductionRows] = useState([]);
@@ -8441,6 +8473,26 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     } catch (_error) {
       setReportUsers([]);
       return [];
+    }
+  };
+
+  const ensureInvoiceCashiersLoaded = async (options = {}) => {
+    if (!options?.force && invoiceCashierOptions.length > 0) {
+      return invoiceCashierOptions;
+    }
+    try {
+      setIsInvoiceCashierLoading(true);
+      const users = await fetchUserDirectory({ limit: 500 });
+      const userRows = Array.isArray(users) ? users : [];
+      const cashierRows = userRows.filter(isCashierUser);
+      const nextOptions = cashierRows.length > 0 ? cashierRows : userRows;
+      setInvoiceCashierOptions(nextOptions);
+      return nextOptions;
+    } catch (_error) {
+      setInvoiceCashierOptions([]);
+      return [];
+    } finally {
+      setIsInvoiceCashierLoading(false);
     }
   };
 
@@ -13344,6 +13396,10 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       view: 'workspace',
       area: String(options?.area || invoiceFilter || 'success'),
     };
+    const cashierId = String(options?.cashierId ?? invoiceCashierId ?? '').trim();
+    if (toPositiveNumber(cashierId) > 0) {
+      requestOptions.cashier_id = cashierId;
+    }
     const dateFilterDisabled = INVOICE_ACTIVE_WORK_AREAS.has(requestOptions.area);
 
     if (keyword) {
@@ -13612,7 +13668,10 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       && !invoiceSuccessDateFilterActive;
     let showedInvoiceSuccessCachePreview = false;
     if (canUseSuccessCache) {
-      const cachedRows = invoiceSuccessCacheRows.length > 0 ? invoiceSuccessCacheRows : loadInvoiceSuccessCache();
+      const cachedRows = filterInvoiceRowsByCashier(
+        invoiceSuccessCacheRows.length > 0 ? invoiceSuccessCacheRows : loadInvoiceSuccessCache(),
+        invoiceRequestOptions.cashier_id,
+      );
       if (cachedRows.length > 0) {
         showedInvoiceSuccessCachePreview = true;
         setDraftInvoices(cachedRows);
@@ -13631,7 +13690,10 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     }
 
     if (invoiceSuccessDateFilterActive && !appendRows && !options?.forceServer) {
-      const cachedRows = invoiceSuccessCacheRows.length > 0 ? invoiceSuccessCacheRows : loadInvoiceSuccessCache();
+      const cachedRows = filterInvoiceRowsByCashier(
+        invoiceSuccessCacheRows.length > 0 ? invoiceSuccessCacheRows : loadInvoiceSuccessCache(),
+        invoiceRequestOptions.cashier_id,
+      );
       const dateFilteredCacheRows = cachedRows.filter((row) => (
         isInvoiceRowInDateRange(row, invoiceRequestOptions.date_from, invoiceRequestOptions.date_to)
       ));
@@ -13734,7 +13796,10 @@ const SalesScreen = ({ currentUser, onLogout }) => {
 
       const approvalRows = invoiceRequestOptions.area === 'draft'
         ? []
-        : (approvalRowsInput || await fetchReceivableApprovalRows().catch(() => []));
+        : filterInvoiceRowsByCashier(
+          approvalRowsInput || await fetchReceivableApprovalRows().catch(() => []),
+          invoiceRequestOptions.cashier_id,
+        );
       if (invoiceRequestOptions.area !== 'draft') {
         setReceivableApprovalRows(approvalRows);
         syncReceivableApprovalSnapshot(approvalRows);
@@ -13890,7 +13955,10 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         loadAreaRows('receivable').catch(() => null),
         fetchReceivableApprovalRows().catch(() => []),
       ]);
-      const safeApprovalRows = Array.isArray(approvalRows) ? approvalRows : [];
+      const safeApprovalRows = filterInvoiceRowsByCashier(
+        Array.isArray(approvalRows) ? approvalRows : [],
+        invoiceCashierId,
+      );
       const safeDraftRows = Array.isArray(draftRows) ? draftRows : [];
       const safeSuccessRows = Array.isArray(successRows) ? successRows : [];
       const safeReceivableRows = Array.isArray(receivableRows) ? receivableRows : [];
@@ -13943,7 +14011,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     }, String(invoiceSearch || '').trim() ? 350 : 0);
 
     return () => clearTimeout(timeout);
-  }, [activeMenu, backendReady, invoiceFilter, invoiceSearch, invoiceDateFrom, invoiceDateTo]);
+  }, [activeMenu, backendReady, invoiceFilter, invoiceSearch, invoiceDateFrom, invoiceDateTo, invoiceCashierId]);
 
   useEffect(() => {
     if (!isInvoiceAreaMenu(activeMenu) || !backendReady) {
@@ -13955,7 +14023,15 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     }, 500);
 
     return () => clearTimeout(timeout);
-  }, [activeMenu, backendReady, invoiceDateFrom, invoiceDateTo]);
+  }, [activeMenu, backendReady, invoiceDateFrom, invoiceDateTo, invoiceCashierId]);
+
+  useEffect(() => {
+    if (!isInvoiceAreaMenu(activeMenu) || !backendReady) {
+      return undefined;
+    }
+    ensureInvoiceCashiersLoaded().catch(() => {});
+    return undefined;
+  }, [activeMenu, backendReady]);
 
   useEffect(() => {
     if (!backendReady) {
@@ -18820,8 +18896,11 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     onLogout?.();
   };
   const visibleInvoiceRows = useMemo(
-    () => filterInvoiceRowsForUser(draftInvoices, currentUser),
-    [currentUser, draftInvoices],
+    () => filterInvoiceRowsByCashier(
+      filterInvoiceRowsForUser(draftInvoices, currentUser),
+      invoiceCashierId,
+    ),
+    [currentUser, draftInvoices, invoiceCashierId],
   );
   const dateFilteredInvoiceRows = useMemo(
     () => {
@@ -18881,7 +18960,10 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         || approvalNote.includes(keyword);
     };
     const normalizeRows = (rows = [], predicate = () => true, options = {}) => (
-      filterInvoiceRowsForUser(rows, currentUser)
+      filterInvoiceRowsByCashier(
+        filterInvoiceRowsForUser(rows, currentUser),
+        invoiceCashierId,
+      )
         .filter((row) => (options?.ignoreDateFilter ? true : isInvoiceRowInDateRange(row, invoiceDateFrom, invoiceDateTo)))
         .filter(matchesSearch)
         .filter(predicate)
@@ -18915,7 +18997,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         { ignoreDateFilter: true },
       ),
     };
-  }, [currentUser, invoiceDateFrom, invoiceDateTo, invoiceSearch, invoiceWorkspaceRowsByArea, visibleInvoiceRows]);
+  }, [currentUser, invoiceCashierId, invoiceDateFrom, invoiceDateTo, invoiceSearch, invoiceWorkspaceRowsByArea, visibleInvoiceRows]);
   const invoiceAreaSummary = useMemo(() => {
     const summaryRows = invoiceSummaryRowsByArea && typeof invoiceSummaryRowsByArea === 'object'
       ? invoiceSummaryRowsByArea
@@ -18986,7 +19068,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
   const filteredInvoices = useMemo(() => {
     const visibleRows = Array.isArray(dateFilteredInvoiceRows) ? dateFilteredInvoiceRows : [];
     const areaSnapshotRows = invoiceWorkspaceRowsByArea && typeof invoiceWorkspaceRowsByArea === 'object'
-      ? invoiceWorkspaceRowsByArea[invoiceFilter]
+      ? filterInvoiceRowsByCashier(invoiceWorkspaceRowsByArea[invoiceFilter], invoiceCashierId)
       : [];
     const rows = INVOICE_ACTIVE_WORK_AREAS.has(invoiceFilter)
       ? mergeInvoiceRows(
@@ -19039,7 +19121,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       return searchedRows.filter((row) => isReceivableInvoiceRow(row));
     }
     return searchedRows;
-  }, [approvalStatusFilter, dateFilteredInvoiceRows, invoiceFilter, invoiceSearch, invoiceWorkspaceRowsByArea]);
+  }, [approvalStatusFilter, dateFilteredInvoiceRows, invoiceCashierId, invoiceFilter, invoiceSearch, invoiceWorkspaceRowsByArea]);
   const renderedInvoices = useMemo(
     () => (Array.isArray(filteredInvoices) ? filteredInvoices.slice(0, INVOICE_RENDER_LIMIT) : []),
     [filteredInvoices],
@@ -19635,6 +19717,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       transfer: 0,
       qris: 0,
       card: 0,
+      customerDeposit: 0,
       other: 0,
     };
     closingPaymentRows.forEach((row) => {
@@ -19653,9 +19736,12 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       transfer: roundMoney(totals.transfer),
       qris: roundMoney(totals.qris),
       card: roundMoney(totals.card),
+      customerDeposit: roundMoney(
+        Number(closingReport?.payments?.customer_deposit_total ?? totals.customerDeposit ?? 0),
+      ),
       other: roundMoney(totals.other),
     };
-  }, [closingPaymentRows]);
+  }, [closingPaymentRows, closingReport]);
   const closingCashInHandSummary = useMemo(() => {
     const cashSales = roundMoney(Number(closingReport?.payments?.cash_total || 0));
     const cashReceivable = roundMoney(Number(closingReport?.receivable_collections?.cash_total || 0));
@@ -19795,7 +19881,10 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       );
       totals[bucket] = roundMoney((totals[bucket] || 0) + amount);
       return totals;
-    }, { cash: 0, transfer: 0, qris: 0, card: 0, other: 0 });
+    }, { cash: 0, transfer: 0, qris: 0, card: 0, customerDeposit: 0, other: 0 });
+    paymentMethodSummary.customerDeposit = roundMoney(
+      Number(report?.payments?.customer_deposit_total ?? paymentMethodSummary.customerDeposit ?? 0),
+    );
     const cashInHandSummary = {
       cashSales: roundMoney(Number(report?.payments?.cash_total || 0)),
       cashReceivable: roundMoney(Number(report?.receivable_collections?.cash_total || 0)),
@@ -20072,6 +20161,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     <div class="line"><span>Transfer Sales</span><strong>${escapeHtml(formatRupiah(paymentMethodSummary.transfer))}</strong></div>
     <div class="line"><span>QRIS Sales</span><strong>${escapeHtml(formatRupiah(paymentMethodSummary.qris))}</strong></div>
     <div class="line"><span>Card Sales</span><strong>${escapeHtml(formatRupiah(paymentMethodSummary.card))}</strong></div>
+    <div class="line"><span>Saldo Pelanggan</span><strong>${escapeHtml(formatRupiah(paymentMethodSummary.customerDeposit))}</strong></div>
     <div class="line"><span>Non Cash Sales</span><strong>${escapeHtml(formatRupiah(report?.payments?.non_cash_total || 0))}</strong></div>
     ${paymentMethodSummary.other > 0 ? `<div class="line"><span>Metode Lain</span><strong>${escapeHtml(formatRupiah(paymentMethodSummary.other))}</strong></div>` : ''}
     ${paymentLines}
@@ -20606,6 +20696,11 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                 onChangeApprovalStatusFilter={setApprovalStatusFilter}
                 invoiceSearch={invoiceSearch}
                 onChangeInvoiceSearch={setInvoiceSearch}
+                invoiceCashierId={invoiceCashierId}
+                cashierOptions={invoiceCashierOptions}
+                isCashierLoading={isInvoiceCashierLoading}
+                onChangeInvoiceCashierId={setInvoiceCashierId}
+                onLoadCashiers={() => ensureInvoiceCashiersLoaded({ force: true })}
                 invoiceDateFrom={invoiceDateFrom}
                 invoiceDateTo={invoiceDateTo}
                 onChangeInvoiceDateFrom={setInvoiceDateFrom}
@@ -21217,17 +21312,20 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                       </View>
                       <View style={styles.reportSectionCard}>
                         {reportCashierProblemRows.length > 0 ? reportCashierProblemRows.slice(0, 12).map((row) => (
-                          <View key={`cashier-problem-${row.user_id || row.user_name}`} style={styles.reportNestedItem}>
-                            <View style={styles.reportLineRow}>
+                          <View key={`cashier-problem-${row.user_id || row.user_name}`} style={[styles.reportNestedItem, styles.reportAuditItem]}>
+                            <View style={styles.reportAuditHeader}>
                               <Text style={styles.reportNestedTitle}>{row.user_name || 'User belum tercatat'} - {row.risk_label || 'Normal'}</Text>
-                              <Text style={styles.reportLineValue}>Skor {row.score || 0}</Text>
+                              <Text style={styles.reportAuditScore}>Skor {row.score || 0}</Text>
                             </View>
-                            <Text style={styles.reportNestedMeta}>
-                              Piutang telat: {row.overdue_receivable_count || 0} ({formatRupiah(row.overdue_receivable_total || 0)}) | Selisih cash: {row.cash_difference_count || 0} | Closing belum final: {row.closing_not_final_count || 0}
-                            </Text>
-                            <Text style={styles.reportNestedMeta}>
-                              Campur tangan atasan: {row.supervisor_intervention_count || 0} | Revisi/koreksi: {row.correction_count || 0} | Pengajuan approval/edit: {row.manual_approval_count || 0} | Suspend: {row.suspend_count || 0}
-                            </Text>
+                            <View style={styles.reportAuditMetricGrid}>
+                              <Text style={styles.reportAuditMetric}>Piutang telat: {row.overdue_receivable_count || 0} ({formatRupiah(row.overdue_receivable_total || 0)})</Text>
+                              <Text style={styles.reportAuditMetric}>Selisih cash: {row.cash_difference_count || 0}</Text>
+                              <Text style={styles.reportAuditMetric}>Closing belum final: {row.closing_not_final_count || 0}</Text>
+                              <Text style={styles.reportAuditMetric}>Campur tangan atasan: {row.supervisor_intervention_count || 0}</Text>
+                              <Text style={styles.reportAuditMetric}>Revisi/koreksi: {row.correction_count || 0}</Text>
+                              <Text style={styles.reportAuditMetric}>Pengajuan approval/edit: {row.manual_approval_count || 0}</Text>
+                              <Text style={styles.reportAuditMetric}>Suspend: {row.suspend_count || 0}</Text>
+                            </View>
                             {(Array.isArray(row.notes) ? row.notes : []).slice(0, 3).map((note, index) => (
                               <Text key={`cashier-problem-note-${row.user_id || row.user_name}-${index}`} style={styles.reportNestedMeta}>- {note}</Text>
                             ))}
@@ -21278,9 +21376,9 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                   <View style={styles.reportSectionCard}>
                     <Text style={styles.reportSectionTitle}>Qty Penjualan Masing-masing Produk</Text>
                     {closingTopProducts.length > 0 ? closingTopProducts.map((row, index) => (
-                      <View key={`sales-product-qty-${row?.product_id || index}`} style={styles.reportLineRow}>
+                      <View key={`sales-product-qty-${row?.product_id || index}`} style={[styles.reportLineRow, styles.reportSalesLineRow]}>
                         <Text style={styles.reportLineLabel}>{index + 1}. {row?.product_name || '-'}</Text>
-                        <Text style={styles.reportLineValue}>{row?.total_qty || 0} pcs | {formatRupiah(row?.total_amount || 0)}</Text>
+                        <Text style={styles.reportLineValue}>{formatComponentQtyText(row?.total_qty, row?.qty_unit || 'pcs')} | {formatRupiah(row?.total_amount || 0)}</Text>
                       </View>
                     )) : (
                       <Text style={styles.reportEmptyText}>Belum ada data qty produk pada filter ini.</Text>
@@ -21313,6 +21411,10 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                     <View style={[styles.reportSummaryCard, styles.reportSummaryCardNonCash]}>
                       <Text style={styles.reportSummaryLabel}>Card Sales</Text>
                       <Text style={styles.reportSummaryValue}>{formatRupiah(closingPaymentMethodSummary.card)}</Text>
+                    </View>
+                    <View style={[styles.reportSummaryCard, styles.reportSummaryCardAccent]}>
+                      <Text style={styles.reportSummaryLabel}>Saldo Pelanggan</Text>
+                      <Text style={styles.reportSummaryValue}>{formatRupiah(closingPaymentMethodSummary.customerDeposit)}</Text>
                     </View>
                     {closingPaymentMethodSummary.other > 0 ? (
                       <View style={[styles.reportSummaryCard, styles.reportSummaryCardWarning]}>
@@ -21503,9 +21605,9 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                   <View style={styles.reportSectionCard}>
                     <Text style={styles.reportSectionTitle}>Produk Terlaris Hari Ini</Text>
                     {closingTopProducts.length > 0 ? closingTopProducts.map((row, index) => (
-                      <View key={`top-product-${row?.product_id || index}`} style={styles.reportLineRow}>
+                      <View key={`top-product-${row?.product_id || index}`} style={[styles.reportLineRow, styles.reportSalesLineRow]}>
                         <Text style={styles.reportLineLabel}>{index + 1}. {row?.product_name || '-'}</Text>
-                        <Text style={styles.reportLineValue}>{row?.total_qty || 0} pcs | {formatRupiah(row?.total_amount || 0)}</Text>
+                        <Text style={styles.reportLineValue}>{formatComponentQtyText(row?.total_qty, row?.qty_unit || 'pcs')} | {formatRupiah(row?.total_amount || 0)}</Text>
                       </View>
                     )) : (
                       <Text style={styles.reportEmptyText}>Belum ada data produk terlaris.</Text>
@@ -24682,7 +24784,7 @@ const styles = StyleSheet.create({
   reportMainContent: {
     flex: 1,
     minWidth: 0,
-    gap: 12,
+    gap: 14,
   },
   reportAddonHeader: {
     borderWidth: 1,
@@ -24788,6 +24890,8 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     flexWrap: 'wrap',
     gap: 8,
+    marginTop: 4,
+    marginBottom: 2,
   },
   reportBlockTitle: {
     color: '#182b4d',
@@ -25098,12 +25202,14 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     flexWrap: 'wrap',
     gap: 10,
+    alignItems: 'stretch',
+    marginBottom: 6,
   },
   reportSectionCard: {
     flexGrow: 1,
     flexShrink: 1,
-    flexBasis: 360,
-    minWidth: 300,
+    flexBasis: 'auto',
+    minWidth: 320,
     borderWidth: 1,
     borderColor: '#d4dcea',
     backgroundColor: '#ffffff',
@@ -25113,6 +25219,7 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.06,
     shadowRadius: 9,
     shadowOffset: { width: 0, height: 2 },
+    marginBottom: 6,
   },
   reportSectionCardCash: {
     borderColor: '#b8dfc7',
@@ -25160,11 +25267,17 @@ const styles = StyleSheet.create({
     fontWeight: '700',
   },
   reportLineValue: {
+    flexShrink: 1,
+    maxWidth: '48%',
     fontSize: 11,
     lineHeight: 16,
     fontWeight: '900',
     color: '#173c87',
     textAlign: 'right',
+  },
+  reportSalesLineRow: {
+    alignItems: 'center',
+    flexWrap: 'wrap',
   },
   reportCashValue: {
     color: '#1d7a45',
@@ -25196,8 +25309,56 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     paddingHorizontal: 10,
     paddingVertical: 8,
+    flexShrink: 0,
+  },
+  reportAuditItem: {
+    marginBottom: 6,
+  },
+  reportAuditHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'flex-start',
+    gap: 10,
+    flexWrap: 'wrap',
+    paddingBottom: 8,
+    borderBottomWidth: 1,
+    borderBottomColor: '#edf1f8',
+  },
+  reportAuditScore: {
+    borderWidth: 1,
+    borderColor: '#bfd5ff',
+    backgroundColor: '#eff6ff',
+    borderRadius: 999,
+    color: '#173c87',
+    fontSize: 10,
+    lineHeight: 14,
+    fontWeight: '900',
+    paddingHorizontal: 9,
+    paddingVertical: 4,
+    overflow: 'hidden',
+  },
+  reportAuditMetricGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 6,
+    marginTop: 8,
+    marginBottom: 4,
+  },
+  reportAuditMetric: {
+    borderWidth: 1,
+    borderColor: '#dce5f4',
+    backgroundColor: '#ffffff',
+    borderRadius: 8,
+    paddingHorizontal: 8,
+    paddingVertical: 5,
+    color: '#51627f',
+    fontSize: 10,
+    lineHeight: 14,
+    fontWeight: '800',
   },
   reportNestedTitle: {
+    flex: 1,
+    minWidth: 180,
     fontSize: 11,
     fontWeight: '900',
     color: '#20365f',

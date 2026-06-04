@@ -124,6 +124,38 @@ const normalizeSourceAccountRow = (row) => {
   };
 };
 
+const sourceAccountUniqueKey = (row) => {
+  const accountingAccountId = Number(row?.accountingAccountId || 0) || 0;
+  if (accountingAccountId > 0) {
+    return `accounting:${accountingAccountId}`;
+  }
+
+  const code = normalizeText(row?.code || row?.kode_akun);
+  const title = normalizeText(row?.displayTitle || row?.displayName || row?.accountName || row?.name);
+  return `label:${code}:${title}`;
+};
+
+const sourceAccountCompletenessScore = (row) => (
+  (toSafeText(row?.displaySubtitle) ? 4 : 0)
+  + (toSafeText(row?.accountNumber) ? 3 : 0)
+  + (toSafeText(row?.bankName) ? 2 : 0)
+  + (toSafeText(row?.displayDetail) ? 1 : 0)
+);
+
+const dedupeSourceAccounts = (rows = []) => {
+  const uniqueRowsByKey = new Map();
+
+  (Array.isArray(rows) ? rows : []).forEach((row) => {
+    const key = sourceAccountUniqueKey(row);
+    const existingRow = uniqueRowsByKey.get(key);
+    if (!existingRow || sourceAccountCompletenessScore(row) > sourceAccountCompletenessScore(existingRow)) {
+      uniqueRowsByKey.set(key, row);
+    }
+  });
+
+  return Array.from(uniqueRowsByKey.values());
+};
+
 const matchesCategorySearch = (row, keyword) => {
   const normalizedKeyword = normalizeText(keyword);
   if (!normalizedKeyword) {
@@ -238,13 +270,14 @@ const ExpensePanel = ({ isActive, onNotify }) => {
       const nextAccounts = (Array.isArray(accountsResult.value) ? accountsResult.value : [])
         .map((row) => normalizeSourceAccountRow(row))
         .filter((row) => Number(row?.accountingAccountId || row?.id || 0) > 0);
-      setSourceAccounts(nextAccounts);
+      const uniqueAccounts = dedupeSourceAccounts(nextAccounts);
+      setSourceAccounts(uniqueAccounts);
       setSelectedSourceAccountId((currentId) => {
         const resolvedCurrentId = Number(currentId || 0) || 0;
-        if (resolvedCurrentId > 0 && nextAccounts.some((row) => Number(row?.id || 0) === resolvedCurrentId)) {
+        if (resolvedCurrentId > 0 && uniqueAccounts.some((row) => Number(row?.id || 0) === resolvedCurrentId)) {
           return resolvedCurrentId;
         }
-        return Number(nextAccounts[0]?.id || 0) || null;
+        return Number(uniqueAccounts[0]?.id || 0) || null;
       });
     } else {
       setSourceAccounts([]);

@@ -181,8 +181,80 @@ const DEFAULT_PURCHASE_CATEGORIES = [
   },
 ];
 
-let authToken = String(API_TOKEN || '').trim();
-let sessionEmail = '';
+const AUTH_SESSION_STORAGE_KEY = 'pos_auth_session_v1';
+
+const canUseStorage = () => (
+  typeof globalThis !== 'undefined' && typeof globalThis.localStorage !== 'undefined'
+);
+
+const readStoredAuthSession = () => {
+  if (!canUseStorage()) {
+    return null;
+  }
+
+  try {
+    const raw = globalThis.localStorage.getItem(AUTH_SESSION_STORAGE_KEY);
+    if (!raw) {
+      return null;
+    }
+
+    const parsed = JSON.parse(raw);
+    const token = trimString(parsed?.token || parsed?.access_token);
+    if (!token || trimString(parsed?.apiBaseUrl) !== API_BASE_URL) {
+      return null;
+    }
+
+    return {
+      token,
+      email: trimString(parsed?.email),
+      user: parsed?.user && typeof parsed.user === 'object' ? parsed.user : null,
+    };
+  } catch (_error) {
+    return null;
+  }
+};
+
+const writeStoredAuthSession = (patch = {}) => {
+  if (!canUseStorage()) {
+    return;
+  }
+
+  try {
+    const previous = readStoredAuthSession() || {};
+    const next = {
+      ...previous,
+      ...patch,
+      token: trimString(patch?.token || previous.token || authToken),
+      apiBaseUrl: API_BASE_URL,
+      updatedAt: new Date().toISOString(),
+    };
+
+    if (!next.token) {
+      globalThis.localStorage.removeItem(AUTH_SESSION_STORAGE_KEY);
+      return;
+    }
+
+    globalThis.localStorage.setItem(AUTH_SESSION_STORAGE_KEY, JSON.stringify(next));
+  } catch (_error) {
+    // Ignore storage failures in desktop/web runtime.
+  }
+};
+
+const clearStoredAuthSession = () => {
+  if (!canUseStorage()) {
+    return;
+  }
+
+  try {
+    globalThis.localStorage.removeItem(AUTH_SESSION_STORAGE_KEY);
+  } catch (_error) {
+    // Ignore storage failures in desktop/web runtime.
+  }
+};
+
+const storedAuthSession = readStoredAuthSession();
+let authToken = String(API_TOKEN || storedAuthSession?.token || '').trim();
+let sessionEmail = String(storedAuthSession?.email || '').trim();
 let sessionPassword = '';
 let refreshInProgress = null;
 
@@ -314,6 +386,10 @@ const authenticateWithCredentials = async (email, password) => {
   authToken = token;
   sessionEmail = resolvedEmail;
   sessionPassword = resolvedPassword;
+  writeStoredAuthSession({
+    token,
+    email: resolvedEmail,
+  });
   return body;
 };
 
@@ -372,6 +448,7 @@ const request = async (path, options = {}, retryOnAuth = true) => {
           authToken = '';
           sessionEmail = '';
           sessionPassword = '';
+          clearStoredAuthSession();
           throw error;
         })
         .finally(() => {
@@ -384,6 +461,13 @@ const request = async (path, options = {}, retryOnAuth = true) => {
   }
 
   if (!response.ok) {
+    if (response.status === 401) {
+      authToken = '';
+      sessionEmail = '';
+      sessionPassword = '';
+      clearStoredAuthSession();
+    }
+
     const message =
       body?.message ||
       body?.error ||
@@ -958,12 +1042,30 @@ export const loginPosUser = async (email, password) => {
   return authenticateWithCredentials(email, password);
 };
 
+export const saveAuthenticatedPosSession = (user) => {
+  writeStoredAuthSession({
+    user: user && typeof user === 'object' ? user : null,
+  });
+};
+
+export const restorePersistedPosSession = () => {
+  const stored = readStoredAuthSession();
+  if (!stored?.token) {
+    return null;
+  }
+
+  authToken = stored.token;
+  sessionEmail = stored.email || sessionEmail;
+  return stored.user || {};
+};
+
 export const logoutPosUser = async () => {
   const token = authToken;
   authToken = '';
   sessionEmail = '';
   sessionPassword = '';
   refreshInProgress = null;
+  clearStoredAuthSession();
 
   if (!token) {
     return;
@@ -1988,6 +2090,9 @@ export const fetchPosOrderTransactionsPage = async (params = {}) => {
   if (params?.date_to) {
     query.set('date_to', String(params.date_to));
   }
+  if (params?.cashier_id) {
+    query.set('cashier_id', String(params.cashier_id));
+  }
   const payload = await request(`/pos/orders/transactions?${query.toString()}`, { timeoutMs });
   return toPaginatedDataList(payload);
 };
@@ -2065,6 +2170,9 @@ export const fetchPosOrdersPage = async (params = {}) => {
   }
   if (params?.date_to) {
     query.set('date_to', String(params.date_to));
+  }
+  if (params?.cashier_id) {
+    query.set('cashier_id', String(params.cashier_id));
   }
   const payload = await request(`/pos/orders?${query.toString()}`, { timeoutMs });
   return toPaginatedDataList(payload);

@@ -114,6 +114,14 @@ const cashDecisionLabel = (value) => ({
   pending: 'Menunggu Review',
   ...Object.fromEntries(cashDecisions),
 }[value] || value || '-');
+const cashDifferenceLabel = (row) => (
+  safeText(row?.difference_label)
+  || (Number(row?.difference || 0) > 0 ? 'Selisih Lebih' : 'Selisih Kurang')
+);
+const cashDifferenceTreatmentText = (row) => safeText(row?.accounting_treatment)
+  || (Number(row?.difference || 0) > 0
+    ? 'Selisih lebih akan masuk pendapatan lain-lain setelah approval admin.'
+    : 'Selisih kurang menunggu keputusan pembebanan admin.');
 
 const chooseBrowserFile = () => new Promise((resolve, reject) => {
   if (typeof document === 'undefined') {
@@ -178,6 +186,10 @@ const ClosingStorePanel = ({ currentUser, isActive, onNotify, onPrintReport }) =
   const missingExpenses = Array.isArray(summary?.expenses?.missing_evidence) ? summary.expenses.missing_evidence : [];
   const missingPurchases = Array.isArray(summary?.purchases?.missing_evidence) ? summary.purchases.missing_evidence : [];
   const financeBalance = summary?.finance_balance && typeof summary.finance_balance === 'object' ? summary.finance_balance : {};
+  const cashDifferenceSummary = summary?.cash_difference && typeof summary.cash_difference === 'object'
+    ? summary.cash_difference
+    : {};
+  const cashDifferenceRows = Array.isArray(cashDifferenceSummary?.items) ? cashDifferenceSummary.items : [];
   const receivables = summary?.receivables && typeof summary.receivables === 'object' ? summary.receivables : {};
   const cashierReceivableRisks = Array.isArray(receivables?.cashier_risks) ? receivables.cashier_risks : [];
   const receivableGuard = receivables?.operational_guard && typeof receivables.operational_guard === 'object'
@@ -564,6 +576,7 @@ const ClosingStorePanel = ({ currentUser, isActive, onNotify, onPrintReport }) =
             <SummaryCard label="Cash" value={summary.payments?.cash_total} />
             <SummaryCard label="Transfer" value={summary.payments?.transfer_total} />
             <SummaryCard label="QRIS" value={summary.payments?.qris_total} />
+            <SummaryCard label="Saldo Pelanggan" value={summary.payments?.customer_deposit_total} />
             <SummaryCard label="Pengeluaran" value={summary.expenses?.total} warning />
             <SummaryCard label="Pembelian" value={summary.purchases?.total} warning />
           </View>
@@ -586,6 +599,23 @@ const ClosingStorePanel = ({ currentUser, isActive, onNotify, onPrintReport }) =
               })}
             </View>
           </View>
+
+          {cashDifferenceSummary?.has_difference ? (
+            <View style={styles.card}>
+              <Text style={styles.sectionTitle}>Ringkasan Selisih Cash</Text>
+              <Text style={styles.meta}>
+                Selisih lebih {formatRupiah(cashDifferenceSummary.surplus_total || 0)} | Selisih kurang {formatRupiah(cashDifferenceSummary.shortage_total || 0)} | Net {formatRupiah(cashDifferenceSummary.net_difference || 0)}
+              </Text>
+              {cashDifferenceRows.map((row, index) => (
+                <View key={`cash-diff-summary-${row.id || index}`} style={styles.issueCard}>
+                  <Text style={styles.issueTitle}>{cashDifferenceLabel(row)} {row.cashier_name || '-'} - {formatRupiah(row.amount || Math.abs(Number(row.difference || 0)))}</Text>
+                  <Text style={styles.meta}>Keputusan: {row.decision_label || cashDecisionLabel(row.decision_status)} | Tujuan: {row.burden_target_label || '-'}</Text>
+                  <Text style={styles.meta}>{cashDifferenceTreatmentText(row)}</Text>
+                  {row.reason ? <Text style={styles.meta}>Alasan: {row.reason}</Text> : null}
+                </View>
+              ))}
+            </View>
+          ) : null}
 
           {blockers.length > 0 ? (
             <View style={styles.blockerCard}>

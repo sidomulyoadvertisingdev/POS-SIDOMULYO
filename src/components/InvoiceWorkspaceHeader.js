@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react';
-import { Modal, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
+import { Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { formatRupiah } from '../utils/currency';
 
 const AREA_CARDS = [
@@ -181,6 +181,11 @@ const InvoiceWorkspaceHeader = ({
   onChangeInvoiceDateFrom,
   onChangeInvoiceDateTo,
   onClearInvoiceDateFilter,
+  invoiceCashierId,
+  cashierOptions,
+  isCashierLoading,
+  onChangeInvoiceCashierId,
+  onLoadCashiers,
 }) => {
   const [isDateModalVisible, setIsDateModalVisible] = useState(false);
   const [activeDateField, setActiveDateField] = useState('from');
@@ -351,6 +356,59 @@ const InvoiceWorkspaceHeader = ({
       placeholderTextColor="#777777"
       style={styles.searchInput}
     />
+
+    <View style={styles.cashierFilterCard}>
+      <View style={styles.cashierFilterHeader}>
+        <View style={styles.cashierFilterInfo}>
+          <Text style={styles.cashierFilterTitle}>Filter Kasir</Text>
+          <Text style={styles.cashierFilterMeta}>
+            {invoiceCashierId
+              ? 'Invoice yang tampil mengikuti kasir terpilih'
+              : 'Invoice yang tampil dari semua kasir'}
+          </Text>
+        </View>
+        <Pressable
+          style={styles.cashierReloadButton}
+          onPress={onLoadCashiers}
+        >
+          <Text style={styles.cashierReloadButtonText}>
+            {isCashierLoading ? 'Memuat...' : 'Muat Kasir'}
+          </Text>
+        </Pressable>
+      </View>
+      <ScrollView
+        horizontal
+        showsHorizontalScrollIndicator={false}
+        contentContainerStyle={styles.cashierChipRow}
+      >
+        <Pressable
+          style={[styles.cashierChip, !invoiceCashierId ? styles.cashierChipActive : null]}
+          onPress={() => onChangeInvoiceCashierId?.('')}
+        >
+          <Text style={[styles.cashierChipText, !invoiceCashierId ? styles.cashierChipTextActive : null]}>
+            Semua Kasir
+          </Text>
+        </Pressable>
+        {(Array.isArray(cashierOptions) ? cashierOptions : []).map((cashier) => {
+          const id = String(cashier?.id || cashier?.user_id || '').trim();
+          if (!id) {
+            return null;
+          }
+          const active = String(invoiceCashierId || '') === id;
+          return (
+            <Pressable
+              key={`invoice-cashier-${id}`}
+              style={[styles.cashierChip, active ? styles.cashierChipActive : null]}
+              onPress={() => onChangeInvoiceCashierId?.(id)}
+            >
+              <Text style={[styles.cashierChipText, active ? styles.cashierChipTextActive : null]} numberOfLines={1}>
+                {String(cashier?.name || cashier?.full_name || cashier?.email || `Kasir #${id}`).trim()}
+              </Text>
+            </Pressable>
+          );
+        })}
+      </ScrollView>
+    </View>
 
     {shouldShowDateFilter ? (
       <View style={styles.datePickerCard}>
@@ -657,6 +715,74 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
     paddingVertical: 9,
     marginBottom: 8,
+  },
+  cashierFilterCard: {
+    borderWidth: 1,
+    borderColor: '#d4dcea',
+    backgroundColor: '#fbfdff',
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 9,
+    marginBottom: 8,
+  },
+  cashierFilterHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 10,
+    marginBottom: 8,
+  },
+  cashierFilterInfo: {
+    flex: 1,
+  },
+  cashierFilterTitle: {
+    fontSize: 11,
+    fontWeight: '800',
+    color: '#24426f',
+    textTransform: 'uppercase',
+    marginBottom: 2,
+  },
+  cashierFilterMeta: {
+    fontSize: 10,
+    color: '#5c6780',
+  },
+  cashierReloadButton: {
+    borderWidth: 1,
+    borderColor: '#c7d2e5',
+    backgroundColor: '#ffffff',
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+  },
+  cashierReloadButtonText: {
+    fontSize: 10,
+    fontWeight: '800',
+    color: '#344054',
+  },
+  cashierChipRow: {
+    gap: 6,
+    paddingRight: 2,
+  },
+  cashierChip: {
+    maxWidth: 170,
+    borderWidth: 1,
+    borderColor: '#d4dcea',
+    backgroundColor: '#f7f9fd',
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+  },
+  cashierChipActive: {
+    borderColor: '#0755b8',
+    backgroundColor: '#0755b8',
+  },
+  cashierChipText: {
+    fontSize: 11,
+    color: '#445878',
+    fontWeight: '800',
+  },
+  cashierChipTextActive: {
+    color: '#ffffff',
   },
   datePickerCard: {
     borderWidth: 1,

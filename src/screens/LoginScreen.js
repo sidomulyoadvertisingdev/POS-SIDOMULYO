@@ -7,6 +7,7 @@ import {
   getDefaultLoginEmail,
   getApiBaseUrl,
   loginPosUser,
+  saveAuthenticatedPosSession,
 } from '../services/erpApi';
 import { appEnv } from '../config/appEnv';
 const { formatAppVersionLabel } = require('../utils/appVersion');
@@ -114,6 +115,7 @@ const LoginScreen = ({ onLoginSuccess }) => {
       const trimmedEmail = email.trim();
       const loginResponse = await loginPosUser(trimmedEmail, password);
       const me = await fetchAuthMe();
+      saveAuthenticatedPosSession(me || loginResponse?.user || null);
       saveRememberedLogin({
         email: trimmedEmail,
         password,

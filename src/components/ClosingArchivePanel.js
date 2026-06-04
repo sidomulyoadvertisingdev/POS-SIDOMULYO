@@ -28,6 +28,22 @@ const correctionDecisionOptions = [
   ['cancelled', 'Batalkan'],
   ['carry_forward', 'Koreksi Berikutnya'],
 ];
+const cashDecisionLabel = (value) => ({
+  pending: 'Menunggu Review',
+  approved: 'Disetujui admin',
+  charge_employee: 'Beban Karyawan',
+  management: 'Beban Management',
+  shared_team: 'Dibagi Tim',
+}[String(value || '')] || String(value || '-'));
+const safeText = (value) => String(value || '').trim();
+const cashDifferenceLabel = (row) => (
+  safeText(row?.difference_label)
+  || (Number(row?.difference || 0) > 0 ? 'Selisih Lebih' : 'Selisih Kurang')
+);
+const cashDifferenceTreatmentText = (row) => safeText(row?.accounting_treatment)
+  || (Number(row?.difference || 0) > 0
+    ? 'Selisih lebih akan masuk pendapatan lain-lain setelah approval admin.'
+    : 'Selisih kurang menunggu keputusan pembebanan admin.');
 const CALENDAR_DAY_LABELS = ['Sen', 'Sel', 'Rab', 'Kam', 'Jum', 'Sab', 'Min'];
 
 const padDatePart = (value) => String(value).padStart(2, '0');
@@ -296,6 +312,10 @@ const ClosingArchivePanel = ({ isActive, onNotify }) => {
 
   const summary = detail?.summary || null;
   const workflow = detail?.workflow || {};
+  const cashDifferenceSummary = summary?.cash_difference && typeof summary.cash_difference === 'object'
+    ? summary.cash_difference
+    : {};
+  const cashDifferenceRows = Array.isArray(cashDifferenceSummary?.items) ? cashDifferenceSummary.items : [];
   const corrections = Array.isArray(workflow?.corrections) ? workflow.corrections : [];
   const auditEvents = Array.isArray(workflow?.audit_events) ? workflow.audit_events : [];
   const pendingCashReviews = (workflow?.cash_validations || []).filter((row) => row.decision_status === 'pending' && Math.abs(Number(row.difference || 0)) > 0);
@@ -547,9 +567,26 @@ const ClosingArchivePanel = ({ isActive, onNotify }) => {
                 <Metric label="Cash" value={summary.payments?.cash_total} />
                 <Metric label="Transfer" value={summary.payments?.transfer_total} />
                 <Metric label="QRIS" value={summary.payments?.qris_total} />
+                <Metric label="Saldo Pelanggan" value={summary.payments?.customer_deposit_total} />
                 <Metric label="Pengeluaran" value={summary.expenses?.total} warning />
                 <Metric label="Pembelian" value={summary.purchases?.total} warning />
               </View>
+              {cashDifferenceSummary?.has_difference ? (
+                <View style={styles.section}>
+                  <Text style={styles.sectionTitle}>Ringkasan Selisih Cash</Text>
+                  <Text style={styles.meta}>
+                    Selisih lebih {formatRupiah(cashDifferenceSummary.surplus_total || 0)} | Selisih kurang {formatRupiah(cashDifferenceSummary.shortage_total || 0)} | Net {formatRupiah(cashDifferenceSummary.net_difference || 0)}
+                  </Text>
+                  {cashDifferenceRows.map((row, index) => (
+                    <View key={`archive-cash-diff-${row.id || index}`} style={styles.noteRow}>
+                      <Text style={styles.rowTitle}>{cashDifferenceLabel(row)} {row.cashier_name || '-'} - {formatRupiah(row.amount || Math.abs(Number(row.difference || 0)))}</Text>
+                      <Text style={styles.meta}>Keputusan: {row.decision_label || cashDecisionLabel(row.decision_status)} | Tujuan: {row.burden_target_label || '-'}</Text>
+                      <Text style={styles.meta}>{cashDifferenceTreatmentText(row)}</Text>
+                      {row.reason ? <Text style={styles.meta}>Alasan: {row.reason}</Text> : null}
+                    </View>
+                  ))}
+                </View>
+              ) : null}
               {canReview && (pendingCashReviews.length > 0 || pendingCorrectionReviews.length > 0) ? (
                 <View style={styles.reviewCard}>
                   <Text style={styles.sectionTitle}>Keputusan Reviewer</Text>
