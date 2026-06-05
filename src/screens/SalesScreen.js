@@ -19745,17 +19745,29 @@ const SalesScreen = ({ currentUser, onLogout }) => {
   const closingCashInHandSummary = useMemo(() => {
     const cashSales = roundMoney(Number(closingReport?.payments?.cash_total || 0));
     const cashReceivable = roundMoney(Number(closingReport?.receivable_collections?.cash_total || 0));
-    const cashIncomeOther = roundMoney(Number(closingReport?.external_cash?.income_total || 0));
-    const cashExpenseOther = roundMoney(Number(closingReport?.external_cash?.expense_total || 0));
+    const cashIncomeOther = roundMoney(Number(closingReport?.external_cash?.cash_income_total ?? closingReport?.external_cash?.income_total ?? 0));
+    const cashExpenseOther = roundMoney(Number(closingReport?.external_cash?.cash_expense_total ?? closingReport?.external_cash?.expense_total ?? 0));
+    const expenseTotal = roundMoney(Number(closingReport?.external_cash?.expense_total || 0));
     const physicalCashExpected = roundMoney(cashSales + cashReceivable + cashIncomeOther - cashExpenseOther);
     return {
       cashSales,
       cashReceivable,
       cashIncomeOther,
       cashExpenseOther,
+      expenseTotal,
       physicalCashExpected,
     };
   }, [closingReport]);
+  const closingExpensePaymentRows = useMemo(() => (
+    Array.isArray(closingReport?.external_cash?.expense_payment_breakdown)
+      ? closingReport.external_cash.expense_payment_breakdown
+      : []
+  ).map((row) => ({
+    method: String(row?.method || 'other'),
+    label: String(row?.label || row?.method || 'Metode lain'),
+    totalAmount: roundMoney(Number(row?.total_amount || 0)),
+    totalTx: Number(row?.total_tx || 0),
+  })).filter((row) => row.totalAmount > 0), [closingReport]);
   const closingNonCashSummary = useMemo(() => {
     const nonCashSales = roundMoney(Number(closingReport?.payments?.non_cash_total || 0));
     const nonCashReceivable = roundMoney(Number(closingReport?.receivable_collections?.non_cash_total || 0));
@@ -19888,8 +19900,9 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     const cashInHandSummary = {
       cashSales: roundMoney(Number(report?.payments?.cash_total || 0)),
       cashReceivable: roundMoney(Number(report?.receivable_collections?.cash_total || 0)),
-      cashIncomeOther: roundMoney(Number(report?.external_cash?.income_total || 0)),
-      cashExpenseOther: roundMoney(Number(report?.external_cash?.expense_total || 0)),
+      cashIncomeOther: roundMoney(Number(report?.external_cash?.cash_income_total ?? report?.external_cash?.income_total ?? 0)),
+      cashExpenseOther: roundMoney(Number(report?.external_cash?.cash_expense_total ?? report?.external_cash?.expense_total ?? 0)),
+      expenseTotal: roundMoney(Number(report?.external_cash?.expense_total || 0)),
     };
     cashInHandSummary.physicalCashExpected = roundMoney(
       cashInHandSummary.cashSales
@@ -19946,6 +19959,13 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     const paymentLines = paymentRows.length > 0
       ? paymentRows.map((row) => `<div class="line"><span>${escapeHtml(formatClosingBreakdownLabel(row, bankAccounts))}</span><strong>${escapeHtml(formatRupiah(row?.total_amount || 0))}</strong></div>`).join('')
       : '<div class="muted">Belum ada pembayaran penjualan hari ini</div>';
+    const expensePaymentRows = Array.isArray(report?.external_cash?.expense_payment_breakdown) ? report.external_cash.expense_payment_breakdown : [];
+    const expensePaymentLines = expensePaymentRows.length > 0
+      ? expensePaymentRows
+        .filter((row) => Number(row?.total_amount || 0) > 0)
+        .map((row) => `<div class="line"><span>Pengeluaran ${escapeHtml(String(row?.label || row?.method || 'Metode lain'))}</span><strong>${escapeHtml(formatRupiah(row?.total_amount || 0))}</strong></div>`)
+        .join('')
+      : '';
     const receivableLines = receivableBreakdownRows.length > 0
       ? receivableBreakdownRows.map((row) => `<div class="line"><span>${escapeHtml(formatClosingBreakdownLabel(row, bankAccounts))}</span><strong>${escapeHtml(formatRupiah(row?.total_amount || 0))}</strong></div>`).join('')
       : '<div class="muted">Belum ada pelunasan piutang hari ini</div>';
@@ -20165,6 +20185,8 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     <div class="line"><span>Non Cash Sales</span><strong>${escapeHtml(formatRupiah(report?.payments?.non_cash_total || 0))}</strong></div>
     ${paymentMethodSummary.other > 0 ? `<div class="line"><span>Metode Lain</span><strong>${escapeHtml(formatRupiah(paymentMethodSummary.other))}</strong></div>` : ''}
     ${paymentLines}
+    <div class="line"><span>Pengeluaran</span><strong>${escapeHtml(formatRupiah(cashInHandSummary.expenseTotal))}</strong></div>
+    ${expensePaymentLines}
 
     <h2>Kasir vs Rekening</h2>
     <div class="line"><span>Tunai di Kasir</span><strong>${escapeHtml(formatRupiah(cashInHandSummary.physicalCashExpected))}</strong></div>
@@ -21416,6 +21438,16 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                       <Text style={styles.reportSummaryLabel}>Saldo Pelanggan</Text>
                       <Text style={styles.reportSummaryValue}>{formatRupiah(closingPaymentMethodSummary.customerDeposit)}</Text>
                     </View>
+                    <View style={[styles.reportSummaryCard, styles.reportSummaryCardWarning]}>
+                      <Text style={styles.reportSummaryLabel}>Pengeluaran</Text>
+                      <Text style={styles.reportSummaryValue}>{formatRupiah(closingCashInHandSummary.expenseTotal)}</Text>
+                    </View>
+                    {closingExpensePaymentRows.map((row) => (
+                      <View key={`expense-method-${row.method}`} style={[styles.reportSummaryCard, row.method === 'cash' ? styles.reportSummaryCardCash : styles.reportSummaryCardNonCash]}>
+                        <Text style={styles.reportSummaryLabel}>Pengeluaran {row.label}</Text>
+                        <Text style={styles.reportSummaryValue}>{formatRupiah(row.totalAmount)}</Text>
+                      </View>
+                    ))}
                     {closingPaymentMethodSummary.other > 0 ? (
                       <View style={[styles.reportSummaryCard, styles.reportSummaryCardWarning]}>
                         <Text style={styles.reportSummaryLabel}>Metode Lain</Text>
@@ -21477,6 +21509,18 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                       <Text style={styles.reportLineLabel}>Cash dari pelunasan piutang</Text>
                       <Text style={[styles.reportLineValue, styles.reportCashValue]}>{formatRupiah(closingCashInHandSummary.cashReceivable)}</Text>
                     </View>
+                    {closingCashInHandSummary.cashIncomeOther > 0 ? (
+                      <View style={styles.reportLineRow}>
+                        <Text style={styles.reportLineLabel}>Pemasukan cash non-penjualan</Text>
+                        <Text style={[styles.reportLineValue, styles.reportCashValue]}>{formatRupiah(closingCashInHandSummary.cashIncomeOther)}</Text>
+                      </View>
+                    ) : null}
+                    {closingCashInHandSummary.cashExpenseOther > 0 ? (
+                      <View style={styles.reportLineRow}>
+                        <Text style={styles.reportLineLabel}>Pengeluaran yang mengurangi tunai</Text>
+                        <Text style={[styles.reportLineValue, styles.reportCashValue]}>- {formatRupiah(closingCashInHandSummary.cashExpenseOther)}</Text>
+                      </View>
+                    ) : null}
                     <View style={[styles.reportLineRow, styles.reportLineRowEmphasis]}>
                       <Text style={styles.reportLineLabel}>Tunai seharusnya di kasir</Text>
                       <Text style={[styles.reportLineValue, styles.reportCashValueStrong]}>{formatRupiah(closingCashInHandSummary.physicalCashExpected)}</Text>

@@ -20,6 +20,7 @@ const cashDecisionOptions = [
   ['charge_employee', 'Beban Karyawan'],
   ['management', 'Beban Management'],
   ['shared_team', 'Dibagi Tim'],
+  ['rejected', 'Tolak - Validasi Ulang'],
 ];
 const correctionDecisionOptions = [
   ['employee_burden', 'Beban Karyawan'],
@@ -34,6 +35,7 @@ const cashDecisionLabel = (value) => ({
   charge_employee: 'Beban Karyawan',
   management: 'Beban Management',
   shared_team: 'Dibagi Tim',
+  rejected: 'Ditolak - validasi ulang',
 }[String(value || '')] || String(value || '-'));
 const safeText = (value) => String(value || '').trim();
 const cashDifferenceLabel = (row) => (
@@ -322,11 +324,16 @@ const ClosingArchivePanel = ({ isActive, onNotify }) => {
   const pendingCorrectionReviews = corrections.filter((row) => row.decision === 'pending_review');
 
   const decideCash = async (row, decision) => {
+    const decisionNote = safeText(decisionNotes[`cash-${row.id}`]);
+    if (decision === 'rejected' && !decisionNote) {
+      onNotify?.('Review Closing', 'Catatan penolakan wajib diisi agar kasir tahu apa yang harus divalidasi ulang.');
+      return;
+    }
     try {
       setDetail(await decideStoreClosingCashDifference(detail.closing.id, {
         cashier_id: row.cashier_id,
         decision_status: decision,
-        decision_note: decisionNotes[`cash-${row.id}`] || '',
+        decision_note: decisionNote,
       }));
       await loadReviewQueue();
       onNotify?.('Review Closing', 'Keputusan selisih cash berhasil disimpan.');
@@ -570,7 +577,20 @@ const ClosingArchivePanel = ({ isActive, onNotify }) => {
                 <Metric label="Saldo Pelanggan" value={summary.payments?.customer_deposit_total} />
                 <Metric label="Pengeluaran" value={summary.expenses?.total} warning />
                 <Metric label="Pembelian" value={summary.purchases?.total} warning />
+                <Metric label="Cash Closing" value={summary.cash_validation?.expected_cash_movement || 0} />
               </View>
+              {Number(summary.cash_validation?.cash_expense_total || 0) > 0 ? (
+                <View style={styles.cashNoteBox}>
+                  <Text style={styles.rowTitle}>Detail pengeluaran metode cash</Text>
+                  <Text style={styles.meta}>
+                    Total pengeluaran tetap ditampilkan sebagai Pengeluaran. Bagian yang memakai cash
+                    {' '}({formatRupiah(summary.cash_validation?.cash_expense_total || 0)}) mengurangi uang tunai closing:
+                    {' '}{formatRupiah((summary.payments?.cash_total || 0) + (summary.cash_validation?.cash_income_total || 0))}
+                    {' '}- {formatRupiah(summary.cash_validation?.cash_expense_total || 0)}
+                    {' '}= {formatRupiah(summary.cash_validation?.expected_cash_movement || 0)}.
+                  </Text>
+                </View>
+              ) : null}
               {cashDifferenceSummary?.has_difference ? (
                 <View style={styles.section}>
                   <Text style={styles.sectionTitle}>Ringkasan Selisih Cash</Text>
@@ -726,6 +746,7 @@ const styles = StyleSheet.create({
   section: { borderTopWidth: 1, borderTopColor: '#edf2fa', paddingTop: 10, gap: 6 },
   reviewCard: { padding: 10, borderRadius: 12, backgroundColor: '#fff6e7', borderWidth: 1, borderColor: '#efd4a1', gap: 8 },
   noteRow: { padding: 8, borderRadius: 9, backgroundColor: '#fafbf8', gap: 3 },
+  cashNoteBox: { padding: 10, borderRadius: 12, borderWidth: 1, borderColor: '#efce9c', backgroundColor: '#fff7eb', gap: 4 },
   textarea: { minHeight: 48, textAlignVertical: 'top' },
   actionWrap: { flexDirection: 'row', flexWrap: 'wrap', gap: 6 },
 });

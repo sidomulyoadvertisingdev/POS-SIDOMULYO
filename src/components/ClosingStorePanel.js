@@ -74,6 +74,7 @@ const cashDecisions = [
   ['charge_employee', 'Beban karyawan'],
   ['management', 'Beban management'],
   ['shared_team', 'Dibagi tim'],
+  ['rejected', 'Tolak - Validasi ulang'],
 ];
 const orderActionOptions = [
   ['cancel', 'Cancel'],
@@ -113,6 +114,7 @@ const correctionDecisionLabel = (value) => ({
 const cashDecisionLabel = (value) => ({
   pending: 'Menunggu Review',
   ...Object.fromEntries(cashDecisions),
+  rejected: 'Ditolak - validasi ulang',
 }[value] || value || '-');
 const cashDifferenceLabel = (row) => (
   safeText(row?.difference_label)
@@ -167,7 +169,10 @@ const ClosingStorePanel = ({ currentUser, isActive, onNotify, onPrintReport }) =
   const closingId = Number(closing?.id || 0);
   const existingCash = summary?.cash_validation?.data || null;
   const expectedMovement = Number(summary?.cash_validation?.expected_cash_movement || 0);
+  const cashIncomeTotal = Number(summary?.cash_validation?.cash_income_total || 0);
+  const cashExpenseTotal = Number(summary?.cash_validation?.cash_expense_total || 0);
   const expectedCashPreview = expectedMovement;
+  const isCashValidationRejected = String(existingCash?.decision_status || '') === 'rejected';
   const cashBreakdownTotal = calculateCashBreakdownTotal(cashBreakdown);
   const physicalCashValue = parseAmount(physicalCash);
   const cashDifferencePreview = physicalCashValue - expectedCashPreview;
@@ -340,12 +345,17 @@ const ClosingStorePanel = ({ currentUser, isActive, onNotify, onPrintReport }) =
   };
 
   const saveCashDecision = async (validation, decisionStatus) => {
+    const decisionNote = safeText(cashDecisionNotes[validation.id]);
+    if (decisionStatus === 'rejected' && !decisionNote) {
+      onNotify?.('Review Selisih', 'Catatan penolakan wajib diisi agar kasir tahu apa yang harus divalidasi ulang.');
+      return;
+    }
     try {
       setSubmitting(true);
       const nextPayload = await decideStoreClosingCashDifference(closingId, {
         cashier_id: validation.cashier_id,
         decision_status: decisionStatus,
-        decision_note: safeText(cashDecisionNotes[validation.id]),
+        decision_note: decisionNote,
       });
       setPayload(nextPayload);
       hydrateForm(nextPayload);
@@ -630,6 +640,29 @@ const ClosingStorePanel = ({ currentUser, isActive, onNotify, onPrintReport }) =
             <View style={styles.card}>
               <Text style={styles.sectionTitle}>Validasi Cash</Text>
               <Text style={styles.meta}>Pergerakan cash transaksi: {formatRupiah(expectedMovement)}</Text>
+              <View style={styles.cashMovementBox}>
+                <View style={styles.cashMovementRow}>
+                  <Text style={styles.meta}>Cash masuk laporan</Text>
+                  <Text style={styles.cashMovementValue}>{formatRupiah((summary?.payments?.cash_total || 0) + cashIncomeTotal)}</Text>
+                </View>
+                {cashExpenseTotal > 0 ? (
+                  <View style={styles.cashMovementRow}>
+                    <Text style={styles.meta}>Pengeluaran metode cash</Text>
+                    <Text style={[styles.cashMovementValue, styles.badText]}>- {formatRupiah(cashExpenseTotal)}</Text>
+                  </View>
+                ) : null}
+                <View style={styles.cashMovementRow}>
+                  <Text style={styles.issueTitle}>Cash seharusnya setelah pengeluaran cash</Text>
+                  <Text style={[styles.cashMovementValue, styles.goodText]}>{formatRupiah(expectedCashPreview)}</Text>
+                </View>
+              </View>
+              {isCashValidationRejected ? (
+                <View style={styles.rejectedNotice}>
+                  <Text style={styles.rejectedNoticeTitle}>Validasi cash ditolak reviewer</Text>
+                  <Text style={styles.meta}>Catatan reviewer: {existingCash?.decision_note || '-'}</Text>
+                  <Text style={styles.meta}>Kasir harus hitung ulang pecahan / cash fisik lalu simpan validasi cash baru.</Text>
+                </View>
+              ) : null}
               <View style={styles.cashBreakdownBox}>
                 <View style={styles.cashBreakdownHeader}>
                   <Text style={styles.cashBreakdownTitle}>Hitung Pecahan Uang</Text>
@@ -1069,6 +1102,11 @@ const styles = StyleSheet.create({
   cashQtyInput: { width: 74, borderWidth: 1, borderColor: '#d4dcea', backgroundColor: '#fff', borderRadius: 8, paddingHorizontal: 9, paddingVertical: 7, fontSize: 12, color: '#14233d', textAlign: 'center' },
   cashSubtotalText: { flex: 1, textAlign: 'right', fontSize: 11, color: '#435674', fontWeight: '800' },
   cashDiff: { fontSize: 13, fontWeight: '900' },
+  cashMovementBox: { borderWidth: 1, borderColor: '#dce5f4', backgroundColor: '#fbfdff', borderRadius: 12, padding: 10, gap: 6 },
+  cashMovementRow: { flexDirection: 'row', justifyContent: 'space-between', gap: 10, alignItems: 'center' },
+  cashMovementValue: { fontSize: 12, fontWeight: '900', color: '#173c87' },
+  rejectedNotice: { borderWidth: 1, borderColor: '#efb3a0', backgroundColor: '#fff4f0', borderRadius: 12, padding: 10, gap: 4 },
+  rejectedNoticeTitle: { fontSize: 12, fontWeight: '900', color: '#9f3318' },
   goodText: { color: '#1d6c43' },
   badText: { color: '#aa4a1d' },
   primaryButton: { backgroundColor: '#0755b8', paddingHorizontal: 14, paddingVertical: 11, borderRadius: 10, alignItems: 'center' },
