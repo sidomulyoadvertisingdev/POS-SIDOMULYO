@@ -2109,6 +2109,25 @@ export const fetchPosOrderTransactions = async (params = {}) => {
   return payload.data;
 };
 
+export const fetchPosSalesDashboardSummary = async (params = {}) => {
+  await ensureAuthenticated();
+  const query = new URLSearchParams();
+  if (params?.date_from) {
+    query.set('date_from', String(params.date_from));
+  }
+  if (params?.date_to) {
+    query.set('date_to', String(params.date_to));
+  }
+  if (params?.cashier_id) {
+    query.set('cashier_id', String(params.cashier_id));
+  }
+
+  const suffix = query.toString() ? `?${query.toString()}` : '';
+  return request(`/pos/dashboard/sales-summary${suffix}`, {
+    timeoutMs: Number(params?.timeoutMs || 0) > 0 ? Number(params.timeoutMs) : INVOICE_REQUEST_TIMEOUT_MS,
+  });
+};
+
 export const fetchAllPosOrderTransactions = async (params = {}) => {
   const requestedPerPage = Number(params?.perPage || 0);
   const perPage = Number.isFinite(requestedPerPage) && requestedPerPage > 0
@@ -2504,6 +2523,8 @@ export const saveStoreClosingCashValidation = async (closingId, payload = {}) =>
     if (Array.isArray(payload.cash_breakdown)) formData.append('cash_breakdown', JSON.stringify(payload.cash_breakdown));
     if (payload.reason) formData.append('reason', String(payload.reason));
     if (payload.responsible_user_id) formData.append('responsible_user_id', String(payload.responsible_user_id));
+    if (payload.surplus_allocation_type) formData.append('surplus_allocation_type', String(payload.surplus_allocation_type));
+    if (payload.surplus_allocation_note) formData.append('surplus_allocation_note', String(payload.surplus_allocation_note));
     formData.append('evidence', payload.evidence);
     return request(`/pos/store-closings/${closingId}/cash-validation`, {
       method: 'POST',

@@ -44,7 +44,7 @@ const cashDifferenceLabel = (row) => (
 );
 const cashDifferenceTreatmentText = (row) => safeText(row?.accounting_treatment)
   || (Number(row?.difference || 0) > 0
-    ? 'Selisih lebih akan masuk pendapatan lain-lain setelah approval admin.'
+    ? 'Selisih lebih dialokasikan kasir tanpa approval admin.'
     : 'Selisih kurang menunggu keputusan pembebanan admin.');
 const CALENDAR_DAY_LABELS = ['Sen', 'Sel', 'Rab', 'Kam', 'Jum', 'Sab', 'Min'];
 
@@ -155,7 +155,7 @@ const downloadCsv = (rows) => {
   URL.revokeObjectURL(url);
 };
 
-const ClosingArchivePanel = ({ isActive, onNotify }) => {
+const ClosingArchivePanel = ({ isActive, onNotify, onPrintReport, onExportPdfReport }) => {
   const [dateFrom, setDateFrom] = useState('');
   const [dateTo, setDateTo] = useState('');
   const [draftDateFrom, setDraftDateFrom] = useState('');
@@ -320,7 +320,10 @@ const ClosingArchivePanel = ({ isActive, onNotify }) => {
   const cashDifferenceRows = Array.isArray(cashDifferenceSummary?.items) ? cashDifferenceSummary.items : [];
   const corrections = Array.isArray(workflow?.corrections) ? workflow.corrections : [];
   const auditEvents = Array.isArray(workflow?.audit_events) ? workflow.audit_events : [];
-  const pendingCashReviews = (workflow?.cash_validations || []).filter((row) => row.decision_status === 'pending' && Math.abs(Number(row.difference || 0)) > 0);
+  const pendingCashReviews = (workflow?.cash_validations || []).filter((row) => (
+    row.decision_status === 'pending'
+    && Number(row.difference || 0) < 0
+  ));
   const pendingCorrectionReviews = corrections.filter((row) => row.decision === 'pending_review');
 
   const decideCash = async (row, decision) => {
@@ -364,13 +367,29 @@ const ClosingArchivePanel = ({ isActive, onNotify }) => {
   const printReport = () => {
     if (!detail?.closing?.is_locked) {
       onNotify?.('Arsip Closing', 'Hanya laporan final yang sudah dikunci dapat dicetak.');
-      return;
+      return false;
+    }
+    const reportDate = String(detail?.closing?.date || '').trim();
+    if (typeof onPrintReport === 'function') {
+      onPrintReport(reportDate);
+      return true;
     }
     if (typeof window === 'undefined' || typeof window.print !== 'function') {
       onNotify?.('Arsip Closing', 'Print tersedia pada aplikasi web/desktop.');
-      return;
+      return false;
     }
     window.print();
+    return true;
+  };
+
+  const exportPdf = () => {
+    if (detail?.closing?.is_locked && typeof onExportPdfReport === 'function') {
+      onExportPdfReport(String(detail?.closing?.date || '').trim());
+      return;
+    }
+    if (printReport()) {
+      onNotify?.('Export PDF Closing', 'Dialog cetak dibuka. Pilih tujuan "Save as PDF" untuk menyimpan file PDF.');
+    }
   };
 
   const exportArchive = () => {
@@ -394,6 +413,9 @@ const ClosingArchivePanel = ({ isActive, onNotify }) => {
           </Pressable>
           <Pressable style={styles.primaryButton} onPress={printReport} disabled={!summary || !detail?.closing?.is_locked}>
             <Text style={styles.primaryText}>Print Laporan</Text>
+          </Pressable>
+          <Pressable style={styles.primaryButton} onPress={exportPdf} disabled={!summary || !detail?.closing?.is_locked}>
+            <Text style={styles.primaryText}>Export PDF</Text>
           </Pressable>
         </View>
       </View>
@@ -577,7 +599,8 @@ const ClosingArchivePanel = ({ isActive, onNotify }) => {
                 <Metric label="Saldo Pelanggan" value={summary.payments?.customer_deposit_total} />
                 <Metric label="Pengeluaran" value={summary.expenses?.total} warning />
                 <Metric label="Pembelian" value={summary.purchases?.total} warning />
-                <Metric label="Cash Closing" value={summary.cash_validation?.expected_cash_movement || 0} />
+                <Metric label="Modal Kasir" value={summary.cash_validation?.opening_cash || summary.cash_validation?.management_opening_cash || 0} />
+                <Metric label="Cash Closing" value={summary.cash_validation?.expected_cash || summary.cash_validation?.expected_cash_movement || 0} />
               </View>
               {Number(summary.cash_validation?.cash_expense_total || 0) > 0 ? (
                 <View style={styles.cashNoteBox}>
@@ -602,6 +625,7 @@ const ClosingArchivePanel = ({ isActive, onNotify }) => {
                       <Text style={styles.rowTitle}>{cashDifferenceLabel(row)} {row.cashier_name || '-'} - {formatRupiah(row.amount || Math.abs(Number(row.difference || 0)))}</Text>
                       <Text style={styles.meta}>Keputusan: {row.decision_label || cashDecisionLabel(row.decision_status)} | Tujuan: {row.burden_target_label || '-'}</Text>
                       <Text style={styles.meta}>{cashDifferenceTreatmentText(row)}</Text>
+                      {row.surplus_allocation_note ? <Text style={styles.meta}>Catatan alokasi: {row.surplus_allocation_note}</Text> : null}
                       {row.reason ? <Text style={styles.meta}>Alasan: {row.reason}</Text> : null}
                     </View>
                   ))}

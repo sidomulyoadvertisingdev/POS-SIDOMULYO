@@ -1,5 +1,4 @@
 import { Pressable, Text, View } from 'react-native';
-import SyncLoadingAnimation from './SyncLoadingAnimation';
 import { formatRupiah } from '../utils/currency';
 
 const resolvePaymentBadgeStyle = (styles, variant) => (
@@ -85,297 +84,112 @@ const InvoiceWorkspaceRowCard = ({
   onReprintInvoice,
   onPrintBillingNote,
   onShareBillingNote,
-}) => (
-  <View style={styles.draftCard}>
-    <View style={styles.draftInfo}>
-      <Text style={styles.draftTitle}>#{displayId} | {invoiceNo}</Text>
-      <Text style={styles.draftMeta}>{customerName}</Text>
-      {Array.isArray(auditSummaryLines) && auditSummaryLines.length > 0 ? (
-        auditSummaryLines.map((line, index) => (
-          <Text key={`audit-line-${index}`} style={styles.draftMeta}>{line}</Text>
-        ))
-      ) : null}
-      {snapshotState ? (
-        <View
-          style={[
-            styles.draftSnapshotBadge,
-            { backgroundColor: snapshotState.backgroundColor, borderColor: snapshotState.color },
-          ]}
-        >
-          <Text style={[styles.draftSnapshotBadgeText, { color: snapshotState.color }]}>
-            {snapshotState.label}
-          </Text>
-        </View>
-      ) : null}
-      {isDraftRow && draftStockState?.key === 'out_of_stock' ? (
-        <View
-          style={[
-            styles.draftSnapshotBadge,
-            styles.draftStockEmptyBadge,
-          ]}
-        >
-          <Text style={[styles.draftSnapshotBadgeText, styles.draftStockEmptyBadgeText]}>
-            {draftStockState.label || 'Stok Habis'}
-          </Text>
-        </View>
-      ) : null}
-      <View style={styles.invoiceStatusRow}>
-        <Text style={styles.draftMeta}>Status: </Text>
-        <Text style={[styles.draftMeta, styles.invoiceStatusText, { color: invoiceStatusColor }]}>
-          {invoiceStatusLabel}
-        </Text>
+}) => {
+  const paymentStatusLabel = dueTotal > 0
+    ? (paidTotal > 0 ? 'DP / Belum Lunas' : 'Belum Lunas')
+    : 'Lunas';
+  const paymentStatusColor = dueTotal > 0
+    ? (paidTotal > 0 ? '#b54708' : '#b42318')
+    : '#067647';
+  const compactStatusLabel = isDraftRow
+    ? (invoiceStatusLabel || 'Draft')
+    : paymentStatusLabel;
+  const compactStatusColor = isDraftRow
+    ? (invoiceStatusColor || '#b54708')
+    : paymentStatusColor;
+  const compactStatusBackground = isDraftRow
+    ? '#fff7ed'
+    : (dueTotal > 0 ? '#fff7ed' : '#ecfdf3');
+  const agendaLabel = dueTotal > 0
+    ? (receivableDueMeta?.label || 'Agenda belum diisi')
+    : '-';
+  const agendaStatusLabel = dueTotal > 0 ? String(receivableDueMeta?.statusLabel || '').trim() : '';
+
+  return (
+    <View style={styles.invoiceTableRow}>
+      <View style={styles.invoiceTableColInvoice}>
+        <Text style={styles.invoiceTableInvoiceTitle}>#{displayId} | {invoiceNo}</Text>
+        <Text style={styles.invoiceTableCustomerName} numberOfLines={1}>{customerName}</Text>
       </View>
-      {!isDraftRow && paymentLifecycle?.label !== '-' ? (
-        <View style={styles.invoiceStatusRow}>
-          <Text style={styles.draftMeta}>Pembayaran: </Text>
-          <Text style={[styles.draftMeta, styles.invoiceStatusText, { color: paymentLifecycle.color }]}>
-            {paymentLifecycle.label}
-          </Text>
+      <View style={styles.invoiceTableColStatus}>
+        <View style={[styles.invoiceTableStatusBadge, { borderColor: compactStatusColor, backgroundColor: compactStatusBackground }]}>
+          <Text style={[styles.invoiceTableStatusText, { color: compactStatusColor }]}>{compactStatusLabel}</Text>
         </View>
-      ) : null}
-      {!isDraftRow && providerPaymentSummary ? (
-        <>
-          <View style={styles.invoiceStatusRow}>
-            <Text style={styles.draftMeta}>Monitor Online: </Text>
-            <Text style={[styles.draftMeta, styles.invoiceStatusText, { color: providerPaymentSummary.statusColor || '#1849a9' }]}>
-              {providerPaymentSummary.methodLabel} | {providerPaymentSummary.statusLabel}
-            </Text>
-          </View>
-          {providerPaymentCountdownLabel ? (
-            <Text style={styles.draftMeta}>Sisa waktu bayar: {providerPaymentCountdownLabel}</Text>
-          ) : null}
-          {providerPaymentSummary.providerMessage ? (
-            <Text style={styles.draftMeta}>
-              Provider: {providerPaymentSummary.providerStatusCode ? `${providerPaymentSummary.providerStatusCode} - ` : ''}
-              {providerPaymentSummary.providerMessage}
-            </Text>
-          ) : null}
-        </>
-      ) : null}
-      {approvalInfo ? (
-        <View style={styles.invoiceStatusRow}>
-          <Text style={styles.draftMeta}>{approvalLabelPrefix}</Text>
-          <Text style={[styles.draftMeta, styles.invoiceStatusText, { color: approvalStatusColor }]}>
-            {approvalStatusText}
-          </Text>
-        </View>
-      ) : null}
-      <View style={styles.productionCurrentRow}>
-        <Text style={styles.draftMeta}>Produksi: </Text>
-        <Text style={[styles.draftMeta, styles.productionCurrentText, { color: productionLifecycle.color }]}>
-          {productionLifecycle.label}
-        </Text>
       </View>
-      <View style={styles.productionCurrentRow}>
-        <Text style={styles.draftMeta}>Tahap Produksi: </Text>
-        <Text style={[styles.draftMeta, styles.productionCurrentText, { color: productionColor }]}>
-          {productionLabel}
-          {productionStageCount > 0 ? ` (${productionStageCount} item)` : ''}
-        </Text>
-      </View>
-      {String(proofingSummaryLabel || '').trim() ? (
-        <View style={styles.productionCurrentRow}>
-          <Text style={styles.draftMeta}>{String(proofingSummarySectionLabel || 'Proofing')}: </Text>
-          <Text style={[styles.draftMeta, styles.productionCurrentText, { color: proofingSummaryColor || '#6b7280' }]}>
-            {proofingSummaryLabel}
-          </Text>
-        </View>
-      ) : null}
-      {String(proofingSummaryNote || '').trim() ? (
-        <Text style={styles.draftMeta}>{proofingSummaryNote}</Text>
-      ) : null}
-      <View style={styles.invoicePaymentBadgeRow}>
+      <View style={styles.invoiceTableColMethod}>
         <View style={resolvePaymentBadgeStyle(styles, paymentBadgeVariant)}>
-          <Text style={resolvePaymentBadgeTextStyle(styles, paymentBadgeVariant)}>
-            {paymentMethodLabel}
+          <Text style={resolvePaymentBadgeTextStyle(styles, paymentBadgeVariant)} numberOfLines={1}>
+            {paymentMethodLabel || '-'}
           </Text>
         </View>
         {paymentTargetLabel ? (
-          <View style={styles.invoicePaymentTargetBadge}>
-            <Text style={styles.invoicePaymentTargetBadgeText}>{paymentTargetLabel}</Text>
-          </View>
+          <Text style={styles.invoiceTableSubText} numberOfLines={1}>{paymentTargetLabel}</Text>
         ) : null}
       </View>
-      <Text style={styles.draftMeta}>Item: {itemCount} | Total: {formatRupiah(total)}</Text>
-      {approvalInfo?.contextLabel ? (
-        <Text style={styles.draftMeta}>Konteks request: {approvalInfo.contextLabel}</Text>
-      ) : null}
-      {approvalInfo?.amount > 0 ? (
-        <Text style={styles.draftMeta}>Nominal approval: {formatRupiah(approvalInfo.amount)}</Text>
-      ) : null}
-      {approvalInfo?.type === 'receivable_limit' && approvalInfo?.currentApprovedLimitAmount > 0 ? (
-        <Text style={styles.draftMeta}>
-          Plafon aktif saat request: {formatRupiah(approvalInfo.currentApprovedLimitAmount)}
+      <View style={styles.invoiceTableColDue}>
+        <Text style={[
+          styles.invoiceTableDueAmount,
+          dueTotal > 0 ? styles.invoiceTableDueAmountActive : null,
+        ]}>
+          {dueTotal > 0 ? formatRupiah(dueTotal) : '-'}
         </Text>
-      ) : null}
-      {approvalInfo?.type === 'receivable_limit' && approvalInfo?.projectedOutstandingTotal > 0 ? (
-        <Text style={styles.draftMeta}>
-          Proyeksi piutang setelah order: {formatRupiah(approvalInfo.projectedOutstandingTotal)}
+        {dueTotal > 0 ? (
+          <Text style={styles.invoiceTableSubText}>Terbayar {formatRupiah(paidTotal)}</Text>
+        ) : null}
+      </View>
+      <View style={styles.invoiceTableColAgenda}>
+        <Text style={[
+          styles.invoiceTableAgendaText,
+          receivableDueMeta?.isOverdue ? styles.invoiceTableAgendaOverdue : null,
+        ]}>
+          {agendaLabel}
         </Text>
-      ) : null}
-      {approvalInfo?.outstandingTotal > 0 ? (
-        <Text style={styles.receivableDueText}>
-          Piutang sebelumnya: {formatRupiah(approvalInfo.outstandingTotal)}
-          {approvalInfo?.approver?.name ? ` | Diproses oleh: ${approvalInfo.approver.name}` : ''}
-        </Text>
-      ) : null}
-      {approvalInfo?.handledBy?.name ? (
-        <Text style={styles.draftMeta}>
-          Handled by: {approvalInfo.handledBy.name}
-          {approvalInfo?.handledAt ? ` | ${approvalInfo.handledAt}` : ''}
-        </Text>
-      ) : null}
-      {approvalInfo?.resolvedAt ? (
-        <Text style={styles.draftMeta}>Selesai ditangani: {approvalInfo.resolvedAt}</Text>
-      ) : null}
-      {approvalInfo?.decisionNote ? (
-        <Text style={styles.draftMeta}>Catatan approval: {approvalInfo.decisionNote}</Text>
-      ) : null}
-      {dueTotal > 0 ? (
-        <Text style={styles.receivableDueText}>
-          Piutang: {formatRupiah(dueTotal)} | Terbayar: {formatRupiah(paidTotal)}
-        </Text>
-      ) : null}
-      {dueTotal > 0 && receivableDueMeta?.label ? (
-        <Text
-          style={[
-            styles.receivableDueText,
-            receivableDueMeta.isOverdue ? styles.receivableOverdueText : null,
-          ]}
-        >
-          Jatuh Tempo: {receivableDueMeta.label}
-          {receivableDueMeta.statusLabel ? ` | ${receivableDueMeta.statusLabel}` : ''}
-        </Text>
-      ) : null}
-      <Text style={styles.draftMeta}>Tanggal: {createdAtText}</Text>
-      {isDraftRow ? (
-        <Text
-          style={[
-            styles.draftExpiryMeta,
-            draftExpired ? styles.draftExpiryMetaExpired : null,
-          ]}
-        >
-          {draftExpiryLabel}
-        </Text>
-      ) : null}
-    </View>
-    <View style={styles.draftActionColumn}>
-      {isDraftRow ? (
-        <>
-          {canContinueDraft ? (
-            <Pressable
-              style={[
-                styles.continueDraftButton,
-                isDeleting ? styles.draftActionDisabled : null,
-              ]}
-              disabled={isDeleting}
-              onPress={onContinueDraft}
-            >
-              <Text style={styles.continueDraftButtonText}>Lanjutkan</Text>
-            </Pressable>
-          ) : (
-            <Pressable style={styles.continueDraftButton} onPress={onViewDetail}>
-              <Text style={styles.continueDraftButtonText}>Detail</Text>
-            </Pressable>
-          )}
-          {canDeleteDraft ? (
-            <Pressable
-              style={[
-                styles.deleteDraftButton,
-                isDeleting ? styles.draftActionDisabled : null,
-              ]}
-              disabled={isDeleting}
-              onPress={onDeleteDraft}
-            >
-              {isDeleting ? (
-                <View style={styles.inlineLoadingButtonContent}>
-                  <SyncLoadingAnimation size={20} />
-                  <Text style={styles.deleteDraftButtonText}>Memproses...</Text>
-                </View>
-              ) : (
-                <Text style={styles.deleteDraftButtonText}>Hapus</Text>
-              )}
-            </Pressable>
-          ) : null}
-          {canPrintBillingNote ? (
-            <>
-              <Pressable style={styles.approvalResolveButton} onPress={onPrintBillingNote}>
-                <Text style={styles.approvalResolveButtonText}>Print Tagihan</Text>
-              </Pressable>
-              <Pressable style={styles.refreshButton} onPress={onShareBillingNote}>
-                <Text style={styles.refreshButtonText}>Share Tagihan</Text>
-              </Pressable>
-            </>
-          ) : null}
-        </>
-      ) : (
-        <>
-          <Pressable style={styles.continueDraftButton} onPress={onViewDetail}>
-            <Text style={styles.continueDraftButtonText}>Detail</Text>
+        {agendaStatusLabel ? (
+          <Text style={[
+            styles.invoiceTableSubText,
+            receivableDueMeta?.isOverdue ? styles.invoiceTableAgendaOverdue : null,
+          ]}>{agendaStatusLabel}</Text>
+        ) : null}
+      </View>
+      <View style={styles.invoiceTableColAction}>
+        {isDraftRow && canContinueDraft ? (
+          <Pressable
+            style={[
+              styles.invoiceTableDetailButton,
+              isDeleting ? styles.draftActionDisabled : null,
+            ]}
+            disabled={isDeleting}
+            onPress={onContinueDraft}
+          >
+            <Text style={styles.invoiceTableDetailButtonText}>Lanjutkan</Text>
           </Pressable>
-          {canOpenProviderPayment ? (
-            <Pressable style={styles.approvalResolveButton} onPress={onOpenProviderPayment}>
-              <Text style={styles.approvalResolveButtonText}>Lihat Pembayaran</Text>
-            </Pressable>
-          ) : null}
-          {canCreateManualApproval ? (
-            <Pressable style={styles.approvalCreateButton} onPress={onCreateManualApproval}>
-              <Text style={styles.approvalCreateButtonText}>Buat Approval</Text>
-            </Pressable>
-          ) : null}
-          {canApproveManualApprovalRow ? (
-            <Pressable style={styles.approvalResolveButton} onPress={onApproveManualApproval}>
-              <Text style={styles.approvalResolveButtonText}>Setujui</Text>
-            </Pressable>
-          ) : null}
-          {canApproveManualApprovalRow ? (
-            <Pressable style={styles.deleteDraftButton} onPress={onRejectManualApproval}>
-              <Text style={styles.deleteDraftButtonText}>Tolak</Text>
-            </Pressable>
-          ) : null}
-          {canResolveManualApprovalRow ? (
-            <Pressable style={styles.approvalResolveButton} onPress={onResolveManualApproval}>
-              <Text style={styles.approvalResolveButtonText}>Selesai</Text>
-            </Pressable>
-          ) : null}
-          {!isApprovalRow && dueTotal > 0 ? (
-            <Pressable
-              style={[
-                styles.receivablePayButton,
-                !canPayReceivable ? styles.draftActionDisabled : null,
-              ]}
-              disabled={!canPayReceivable}
-              onPress={onOpenReceivablePayment}
-            >
-              <Text style={styles.receivablePayButtonText}>
-                {canPayReceivable ? 'Bayar Piutang' : 'Belum Bisa Dibayar'}
-              </Text>
-            </Pressable>
-          ) : null}
-          {!isApprovalRow && dueTotal > 0 && canRemindReceivable ? (
-            <Pressable style={styles.deleteDraftButton} onPress={onRemindReceivable}>
-              <Text style={styles.deleteDraftButtonText}>Reminder WA</Text>
-            </Pressable>
-          ) : null}
-          {canPrintBillingNote ? (
-            <>
-              <Pressable style={styles.approvalResolveButton} onPress={onPrintBillingNote}>
-                <Text style={styles.approvalResolveButtonText}>Print Tagihan</Text>
-              </Pressable>
-              <Pressable style={styles.refreshButton} onPress={onShareBillingNote}>
-                <Text style={styles.refreshButtonText}>Share Tagihan</Text>
-              </Pressable>
-            </>
-          ) : null}
-          {!isApprovalRow ? (
-            <Pressable style={styles.refreshButton} onPress={onReprintInvoice}>
-              <Text style={styles.refreshButtonText}>Cetak Ulang</Text>
-            </Pressable>
-          ) : null}
-        </>
-      )}
+        ) : (
+          <Pressable style={styles.invoiceTableDetailButton} onPress={onViewDetail}>
+            <Text style={styles.invoiceTableDetailButtonText}>Detail</Text>
+          </Pressable>
+        )}
+        {isDraftRow && canDeleteDraft ? (
+          <Pressable
+            style={[
+              styles.invoiceTableTagihButton,
+              isDeleting ? styles.draftActionDisabled : null,
+            ]}
+            disabled={isDeleting}
+            onPress={onDeleteDraft}
+          >
+            <Text style={styles.invoiceTableTagihButtonText}>
+              {isDeleting ? 'Hapus...' : 'Hapus'}
+            </Text>
+          </Pressable>
+        ) : null}
+        {!isDraftRow && dueTotal > 0 && canRemindReceivable ? (
+          <Pressable style={styles.invoiceTableTagihButton} onPress={onRemindReceivable}>
+            <Text style={styles.invoiceTableTagihButtonText}>Tagih</Text>
+          </Pressable>
+        ) : null}
+      </View>
     </View>
-  </View>
-);
+  );
+};
 
 export default InvoiceWorkspaceRowCard;

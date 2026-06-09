@@ -46,11 +46,13 @@ import {
   fetchPosFinishings,
   fetchPosMaterials,
   fetchPosClosingSummary,
+  fetchStoreDailyClosing,
   fetchAllPosOrders,
   fetchAllPosOrderTransactions,
   fetchPosOrderDetail,
   fetchPosOrdersPage,
   fetchPosOrderTransactionsPage,
+  fetchPosSalesDashboardSummary,
   fetchPosProductionBatches,
   fetchPosProductionItems,
   fetchPosProductionMaterials,
@@ -541,6 +543,27 @@ const normalizeReceivableApprovalRow = (row) => {
   };
 };
 const isReceivableApprovalInvoiceRow = (row) => isApprovalInvoiceRow(row);
+const shouldShowReceivableApprovalWorkspaceRow = (row) => {
+  const approvalStatus = normalizeReceivableApprovalStatus(row?.approval?.status || row?.status);
+  if (approvalStatus === 'resolved') {
+    return false;
+  }
+
+  const orderId = Number(row?.approval?.orderId || row?.order?.id || 0) || 0;
+  const invoiceId = Number(row?.invoice?.id || row?.approval?.invoiceId || 0) || 0;
+  const linkedInvoiceNo = String(row?.approval?.orderInvoiceNo || '').trim();
+  const approvalType = normalizeApprovalType(row?.approval?.type || row?.approval_type);
+
+  if (approvalType === 'receivable' && approvalStatus === 'approved' && orderId > 0) {
+    return false;
+  }
+
+  const customerName = String(row?.customer?.name || '').trim().toLowerCase();
+  const isPlaceholderCustomer = customerName === 'pelanggan umum';
+  const hasLinkedOrderOrInvoice = orderId > 0 || invoiceId > 0 || linkedInvoiceNo.length > 0;
+
+  return !(isPlaceholderCustomer && !hasLinkedOrderOrInvoice);
+};
 const buildReceivableApprovalUpdateNotice = (row) => {
   const approval = row?.approval && typeof row.approval === 'object' ? row.approval : {};
   const customerName = String(row?.customer?.name || 'Pelanggan umum').trim() || 'Pelanggan umum';
@@ -5505,6 +5528,75 @@ const resolveDefaultReceiptLogoUrl = () => {
     return '';
   }
 };
+const resolvePrintAssetUrl = (value = '') => {
+  const rawValue = String(value || '').trim();
+  if (!rawValue) {
+    return '';
+  }
+  if (/^(data:|blob:|https?:)/i.test(rawValue)) {
+    return rawValue;
+  }
+  try {
+    if (typeof window !== 'undefined' && window.location?.href) {
+      return new URL(rawValue, window.location.href).toString();
+    }
+  } catch (_error) {
+    return rawValue;
+  }
+  return rawValue;
+};
+const blobToDataUrl = (blob) => new Promise((resolve) => {
+  if (typeof FileReader === 'undefined' || !blob) {
+    resolve('');
+    return;
+  }
+  const reader = new FileReader();
+  reader.onloadend = () => resolve(String(reader.result || '').trim());
+  reader.onerror = () => resolve('');
+  reader.readAsDataURL(blob);
+});
+const resolvePrintImageDataUrl = async (value = '') => {
+  const assetUrl = resolvePrintAssetUrl(value);
+  if (!assetUrl || /^data:/i.test(assetUrl)) {
+    return assetUrl;
+  }
+  if (typeof fetch !== 'function') {
+    return assetUrl;
+  }
+  try {
+    const response = await fetch(assetUrl);
+    if (!response?.ok) {
+      return assetUrl;
+    }
+    const blob = await response.blob();
+    const dataUrl = await blobToDataUrl(blob);
+    return dataUrl || assetUrl;
+  } catch (_error) {
+    return assetUrl;
+  }
+};
+const resolveDefaultReceiptLogoDataUrl = async () => {
+  try {
+    const asset = Asset.fromModule(DEFAULT_RECEIPT_LOGO_MODULE);
+    if (asset && typeof asset.downloadAsync === 'function') {
+      await asset.downloadAsync();
+    }
+    const candidates = [
+      asset?.localUri,
+      asset?.uri,
+      resolveDefaultReceiptLogoUrl(),
+    ].map((item) => String(item || '').trim()).filter(Boolean);
+    for (const candidate of candidates) {
+      const dataUrl = await resolvePrintImageDataUrl(candidate);
+      if (/^data:image\//i.test(dataUrl)) {
+        return dataUrl;
+      }
+    }
+    return candidates[0] || '';
+  } catch (_error) {
+    return resolveDefaultReceiptLogoUrl();
+  }
+};
 const normalizeReceiptSettings = (value = null) => {
   const raw = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
   const nested = raw?.receipt && typeof raw.receipt === 'object' && !Array.isArray(raw.receipt) ? raw.receipt : {};
@@ -5771,6 +5863,126 @@ const humanizePaymentMethod = (value) => {
   const text = String(normalized || '').trim();
   return text || 'Lainnya';
 };
+const resolveInvoiceStatusFilterKey = (row) => {
+  const total = roundMoney(Number(row?.invoice?.total || row?.total || row?.grand_total || 0) || 0);
+  const paidTotal = roundMoney(Number(row?.invoice?.paid_total || row?.paid_total || 0) || 0);
+  const dueTotal = roundMoney(Math.max(0, Number(row?.invoice?.due_total || row?.due_total || Math.max(total - paidTotal, 0)) || 0));
+
+  if (total > 0 && dueTotal <= 0) {
+    return 'paid';
+  }
+  if (paidTotal > 0 && dueTotal > 0) {
+    return 'dp';
+  }
+  return 'unpaid';
+};
+const resolveInvoicePaymentMethodFilterKey = (row) => normalizePaymentMethodType(
+  row?.provider_payment?.payment_method_label
+  || row?.provider_payment?.methodLabel
+  || row?.providerPayment?.payment_method_label
+  || row?.providerPayment?.methodLabel
+  || row?.payment?.method
+  || row?.payment_method
+  || row?.invoice?.payment_method
+  || row?.payment?.payment_method
+  || '',
+);
+const resolveInvoiceCustomerTypeFilterKey = (row, customerTypes = [], customerRows = []) => {
+  const rowCustomer = row?.customer && typeof row.customer === 'object' ? row.customer : {};
+  const rowOrder = row?.order && typeof row.order === 'object' ? row.order : {};
+  const rowInvoice = row?.invoice && typeof row.invoice === 'object' ? row.invoice : {};
+  const orderCustomer = rowOrder?.customer && typeof rowOrder.customer === 'object' ? rowOrder.customer : {};
+  const invoiceCustomer = rowInvoice?.customer && typeof rowInvoice.customer === 'object' ? rowInvoice.customer : {};
+  const resolvedCustomerId = Number(
+    rowCustomer?.id
+    || row?.customer_id
+    || rowInvoice?.customer_id
+    || rowOrder?.customer_id
+    || invoiceCustomer?.id
+    || orderCustomer?.id
+    || 0
+  ) || 0;
+  const masterCustomer = resolvedCustomerId > 0
+    ? ((Array.isArray(customerRows) ? customerRows : [])
+      .find((customerRow) => Number(customerRow?.id || 0) === resolvedCustomerId) || {})
+    : {};
+  const customer = {
+    ...masterCustomer,
+    ...invoiceCustomer,
+    ...orderCustomer,
+    ...rowCustomer,
+    label: rowCustomer?.label
+      || rowCustomer?.customer_label
+      || row?.customer_label
+      || rowOrder?.customer_label
+      || rowInvoice?.customer_label
+      || masterCustomer?.label
+      || masterCustomer?.customer_label
+      || invoiceCustomer?.label
+      || orderCustomer?.label
+      || '',
+    customer_type_id: rowCustomer?.customer_type_id
+      || rowCustomer?.type_id
+      || row?.customer_type_id
+      || rowInvoice?.customer_type_id
+      || rowOrder?.customer_type_id
+      || masterCustomer?.customer_type_id
+      || masterCustomer?.type_id
+      || invoiceCustomer?.customer_type_id
+      || orderCustomer?.customer_type_id,
+    customer_type_code: rowCustomer?.customer_type_code
+      || rowCustomer?.type_code
+      || row?.customer_type_code
+      || rowInvoice?.customer_type_code
+      || rowOrder?.customer_type_code
+      || masterCustomer?.customer_type_code
+      || masterCustomer?.type_code
+      || invoiceCustomer?.customer_type_code
+      || orderCustomer?.customer_type_code,
+    customer_type_name: rowCustomer?.customer_type_name
+      || rowCustomer?.type_name
+      || row?.customer_type_name
+      || rowInvoice?.customer_type_name
+      || rowOrder?.customer_type_name
+      || masterCustomer?.customer_type_name
+      || masterCustomer?.type_name
+      || invoiceCustomer?.customer_type_name
+      || orderCustomer?.customer_type_name,
+    customer_type: rowCustomer?.customer_type
+      || row?.customer_type
+      || rowInvoice?.customer_type
+      || rowOrder?.customer_type
+      || masterCustomer?.customer_type
+      || invoiceCustomer?.customer_type
+      || orderCustomer?.customer_type,
+    price_type: rowCustomer?.price_type
+      || row?.price_type
+      || rowInvoice?.price_type
+      || rowOrder?.price_type
+      || masterCustomer?.price_type
+      || invoiceCustomer?.price_type
+      || orderCustomer?.price_type,
+    is_reseller: rowCustomer?.is_reseller
+      ?? row?.is_reseller
+      ?? rowInvoice?.is_reseller
+      ?? rowOrder?.is_reseller
+      ?? masterCustomer?.is_reseller
+      ?? invoiceCustomer?.is_reseller
+      ?? orderCustomer?.is_reseller,
+  };
+  const resolved = resolveCustomerCategoryCode(customer, customerTypes);
+  return resolved === 'reseller' ? 'reseller' : 'retail';
+};
+const normalizeInvoiceCustomerName = (row) => normalizeText(
+  row?.customer?.name
+  || row?.order?.customer?.name
+  || row?.invoice?.customer?.name
+  || row?.customer_name
+  || '',
+);
+const isInvoiceSpecialCustomerRow = (row, expectedName = '') => (
+  normalizeInvoiceCustomerName(row) === normalizeText(expectedName)
+);
 const mapPaymentMethodTypeToClosingBucket = (value) => {
   const normalizedType = normalizePaymentMethodType(value);
   if (normalizedType === 'cash') return 'cash';
@@ -5984,6 +6196,57 @@ const resolveInvoiceRowDateText = (row) => {
     || row?.order?.updated_at
     || '',
   ).trim();
+};
+const resolveInvoiceRowInputDateText = (row) => String(
+  row?.approval?.createdAt
+  || row?.approval?.created_at
+  || row?.invoice?.created_at
+  || row?.created_at
+  || row?.order?.created_at
+  || row?.invoice?.invoice_date
+  || '',
+).trim();
+const isInvoiceRowInputToday = (row) => {
+  const rawDate = resolveInvoiceRowInputDateText(row);
+  if (!rawDate) {
+    return false;
+  }
+  const parsed = new Date(rawDate);
+  if (Number.isNaN(parsed.getTime())) {
+    return false;
+  }
+  return startOfLocalDay(parsed).getTime() === startOfLocalDay(new Date()).getTime();
+};
+const buildSpecialReceivableTodaySummary = (rows = []) => {
+  const totals = {
+    managementCount: 0,
+    managementAmount: 0,
+    productionCount: 0,
+    productionAmount: 0,
+  };
+
+  (Array.isArray(rows) ? rows : []).forEach((row) => {
+    if (!isReceivableInvoiceRow(row) || !isInvoiceRowInputToday(row)) {
+      return;
+    }
+    const amount = resolveInvoiceRowTotalAmount(row);
+    if (isInvoiceSpecialCustomerRow(row, 'BEBAN MANAGEMENT')) {
+      totals.managementCount += 1;
+      totals.managementAmount += amount;
+      return;
+    }
+    if (isInvoiceSpecialCustomerRow(row, 'KESALAHAN PRODUKSI')) {
+      totals.productionCount += 1;
+      totals.productionAmount += amount;
+    }
+  });
+
+  return {
+    managementCount: totals.managementCount,
+    managementAmount: roundMoney(totals.managementAmount),
+    productionCount: totals.productionCount,
+    productionAmount: roundMoney(totals.productionAmount),
+  };
 };
 const resolveActorName = (...candidates) => {
   for (const candidate of candidates) {
@@ -6616,6 +6879,17 @@ const collectUserRoleLabels = (user) => {
     .map((label) => String(label || '').trim().toLowerCase())
     .filter(Boolean);
 };
+const userMatchesFinanceRole = (user) => {
+  const roleText = collectUserRoleLabels(user).join(' ');
+  return roleText.includes('finance')
+    || roleText.includes('keuangan')
+    || roleText.includes('accounting')
+    || roleText.includes('akunting');
+};
+const resolveFinanceSignerName = (users = []) => {
+  const financeUser = (Array.isArray(users) ? users : []).find(userMatchesFinanceRole);
+  return financeUser ? extractUserDisplayName(financeUser) : 'Finance';
+};
 const userMatchesProofingTargetRole = (user, targetRole) => {
   const normalizedRole = normalizeProofingTargetRole(targetRole);
   const roleText = collectUserRoleLabels(user).join(' ');
@@ -6735,6 +7009,7 @@ const DRAFT_WORKSPACE_PER_PAGE = 100;
 const DRAFT_WORKSPACE_MAX_PAGES = 20;
 const INVOICE_ACTIVE_WORKSPACE_PER_PAGE = 100;
 const INVOICE_ACTIVE_WORKSPACE_MAX_PAGES = 5;
+const INVOICE_DATE_FILTER_MAX_PAGES = 100;
 const INVOICE_SEARCH_PER_PAGE = 100;
 const INVOICE_SEARCH_MAX_PAGES = 100;
 const INVOICE_DASHBOARD_PREVIEW_PER_PAGE = 50;
@@ -7194,6 +7469,8 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     searchMode: false,
     source: 'server',
   });
+  const [invoiceDashboardSummary, setInvoiceDashboardSummary] = useState(null);
+  const [invoiceDashboardSummaryError, setInvoiceDashboardSummaryError] = useState('');
   const draftServerRowsRef = useRef([]);
   const [invoiceRealtimeState, setInvoiceRealtimeState] = useState({
     available: false,
@@ -7206,6 +7483,10 @@ const SalesScreen = ({ currentUser, onLogout }) => {
   const [invoiceFilter, setInvoiceFilter] = useState('success');
   const [approvalStatusFilter, setApprovalStatusFilter] = useState('all');
   const [invoiceSearch, setInvoiceSearch] = useState('');
+  const [invoiceStatusFilter, setInvoiceStatusFilter] = useState('all');
+  const [invoicePaymentMethodFilter, setInvoicePaymentMethodFilter] = useState('all');
+  const [invoiceCustomerTypeFilter, setInvoiceCustomerTypeFilter] = useState('all');
+  const [invoiceOperationalSummaryFilter, setInvoiceOperationalSummaryFilter] = useState('');
   const [invoiceDateFrom, setInvoiceDateFrom] = useState(() => String(DEFAULT_INVOICE_DATE_FILTER?.from || '').trim());
   const [invoiceDateTo, setInvoiceDateTo] = useState(() => String(DEFAULT_INVOICE_DATE_FILTER?.to || '').trim());
   const [invoiceCashierId, setInvoiceCashierId] = useState('');
@@ -7310,9 +7591,18 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     setActiveMenu(nextMenu);
     setInvoiceFilter(nextFilter);
     setApprovalStatusFilter('all');
+    setInvoiceOperationalSummaryFilter('');
   };
   const openInvoiceAreaFilter = (filter) => {
     openInvoiceAreaMenu(resolveInvoiceMenuForFilter(filter));
+  };
+  const openInvoiceOperationalSummaryFilter = (summaryKey) => {
+    const key = String(summaryKey || '').trim();
+    const nextArea = key === 'draft' ? 'draft' : 'receivable';
+    setActiveMenu(resolveInvoiceMenuForFilter(nextArea));
+    setInvoiceFilter(nextArea);
+    setApprovalStatusFilter('all');
+    setInvoiceOperationalSummaryFilter(key);
   };
   const previewRequestRef = useRef(0);
   const lastBookProductIdRef = useRef(null);
@@ -7358,6 +7648,15 @@ const SalesScreen = ({ currentUser, onLogout }) => {
   }));
   const [modalDetailPesanan, setModalDetailPesanan] = useState(false);
   const [modalPilihPembayaran, setModalPilihPembayaran] = useState(false);
+  const [isClosingStoreModalVisible, setIsClosingStoreModalVisible] = useState(false);
+  const [dashboardClosingAction, setDashboardClosingAction] = useState({
+    label: 'Closing Toko',
+    tone: 'default',
+    mode: 'input',
+    date: formatIsoDate(new Date()),
+  });
+  const [closingStoreModalMode, setClosingStoreModalMode] = useState('input');
+  const [closingAutoFinalizeToken, setClosingAutoFinalizeToken] = useState(0);
   const [danaQrisModal, setDanaQrisModal] = useState(() => createDanaQrisModalState());
   const [danaQrisTick, setDanaQrisTick] = useState(() => Date.now());
   const [danaGatewayModal, setDanaGatewayModal] = useState(() => createDanaGatewayModalState());
@@ -13387,20 +13686,25 @@ const SalesScreen = ({ currentUser, onLogout }) => {
   };
 
   const buildInvoiceWorkspaceRequestOptions = (options = {}) => {
-    const keyword = String(options?.search ?? invoiceSearch ?? '').trim();
     const page = Math.max(1, Math.trunc(Number(options?.page || 1)) || 1);
+    const area = String(options?.area || invoiceFilter || 'success').trim() || 'success';
+    const shouldApplyInvoiceSuccessFilters = area === 'success';
+    const keyword = shouldApplyInvoiceSuccessFilters
+      ? String(options?.search ?? invoiceSearch ?? '').trim()
+      : '';
     const requestOptions = {
       perPage: 50,
       page,
       timeoutMs: 25000,
       view: 'workspace',
-      area: String(options?.area || invoiceFilter || 'success'),
+      area,
     };
-    const cashierId = String(options?.cashierId ?? invoiceCashierId ?? '').trim();
+    const cashierId = shouldApplyInvoiceSuccessFilters
+      ? String(options?.cashierId ?? invoiceCashierId ?? '').trim()
+      : '';
     if (toPositiveNumber(cashierId) > 0) {
       requestOptions.cashier_id = cashierId;
     }
-    const dateFilterDisabled = INVOICE_ACTIVE_WORK_AREAS.has(requestOptions.area);
 
     if (keyword) {
       requestOptions.search = keyword;
@@ -13409,10 +13713,10 @@ const SalesScreen = ({ currentUser, onLogout }) => {
 
     const dateFrom = String(options?.dateFrom ?? invoiceDateFrom ?? '').trim();
     const dateTo = String(options?.dateTo ?? invoiceDateTo ?? '').trim();
-    if (!dateFilterDisabled && dateFrom) {
+    if (shouldApplyInvoiceSuccessFilters && dateFrom) {
       requestOptions.date_from = dateFrom;
     }
-    if (!dateFilterDisabled && dateTo) {
+    if (shouldApplyInvoiceSuccessFilters && dateTo) {
       requestOptions.date_to = dateTo;
     }
     return requestOptions;
@@ -13598,9 +13902,31 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     });
   };
 
+  const removeDraftSourceFromWorkspace = (sourceOrderId) => {
+    const resolvedSourceOrderId = Number(sourceOrderId || 0) || 0;
+    if (!(resolvedSourceOrderId > 0)) {
+      return;
+    }
+
+    const withoutSourceDraft = (rows = []) => (Array.isArray(rows) ? rows : [])
+      .filter((row) => Number(row?.id || row?.order?.id || 0) !== resolvedSourceOrderId);
+
+    draftServerRowsRef.current = withoutSourceDraft(draftServerRowsRef.current);
+    setDraftInvoices((prev) => withoutSourceDraft(prev));
+    setInvoiceWorkspaceRowsByArea((prev) => {
+      const current = prev && typeof prev === 'object' ? prev : {};
+      return {
+        ...current,
+        draft: withoutSourceDraft(current.draft),
+      };
+    });
+  };
+
   const loadDraftInvoices = async (options = {}) => {
     const appendRows = Boolean(options?.append);
-    const searchMode = String(options?.search ?? invoiceSearch ?? '').trim() !== '';
+    const requestedArea = String(options?.area || invoiceFilter || 'success').trim() || 'success';
+    const searchMode = requestedArea === 'success'
+      && String(options?.search ?? invoiceSearch ?? '').trim() !== '';
     const requestPage = Math.max(1, Math.trunc(Number(options?.page || 1)) || 1);
     const queueRows = loadOrderQueue()
       .filter((queued) => isDraftPayload(queued?.payload))
@@ -13689,34 +14015,6 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       }
     }
 
-    if (invoiceSuccessDateFilterActive && !appendRows && !options?.forceServer) {
-      const cachedRows = filterInvoiceRowsByCashier(
-        invoiceSuccessCacheRows.length > 0 ? invoiceSuccessCacheRows : loadInvoiceSuccessCache(),
-        invoiceRequestOptions.cashier_id,
-      );
-      const dateFilteredCacheRows = cachedRows.filter((row) => (
-        isInvoiceRowInDateRange(row, invoiceRequestOptions.date_from, invoiceRequestOptions.date_to)
-      ));
-      if (dateFilteredCacheRows.length > 0) {
-        showedInvoiceSuccessCachePreview = true;
-        setDraftInvoices(dateFilteredCacheRows);
-        updateInvoiceWorkspaceAreaSnapshot(dateFilteredCacheRows, {
-          area: 'success',
-          replaceAreas: ['success'],
-        });
-        setInvoiceListMeta({
-          currentPage: 1,
-          lastPage: 1,
-          hasMore: false,
-          total: dateFilteredCacheRows.length,
-          searchMode: false,
-          source: 'local_success_cache_date_filter',
-        });
-        markInvoiceRealtimeUpdatesApplied();
-        hydrateDanaInvoiceMonitorsFromRows(dateFilteredCacheRows);
-      }
-    }
-
     try {
       setIsDraftLoading(true);
       let rows = [];
@@ -13734,7 +14032,9 @@ const SalesScreen = ({ currentUser, onLogout }) => {
             const baseRequest = {
               ...invoiceRequestOptions,
               perPage: shouldDeepSearchActiveWorkspace ? INVOICE_SEARCH_PER_PAGE : INVOICE_ACTIVE_WORKSPACE_PER_PAGE,
-              maxPages: shouldDeepSearchActiveWorkspace ? INVOICE_SEARCH_MAX_PAGES : INVOICE_ACTIVE_WORKSPACE_MAX_PAGES,
+              maxPages: shouldDeepSearchActiveWorkspace
+                ? INVOICE_SEARCH_MAX_PAGES
+                : (invoiceSuccessDateFilterActive ? INVOICE_DATE_FILTER_MAX_PAGES : INVOICE_ACTIVE_WORKSPACE_MAX_PAGES),
             };
             if (invoiceRequestOptions.area === 'draft') {
               const draftLoadResult = await fetchDraftWorkspaceRows(baseRequest);
@@ -13768,7 +14068,9 @@ const SalesScreen = ({ currentUser, onLogout }) => {
               const baseRequest = {
                 ...invoiceRequestOptions,
                 perPage: shouldDeepSearchActiveWorkspace ? INVOICE_SEARCH_PER_PAGE : INVOICE_ACTIVE_WORKSPACE_PER_PAGE,
-                maxPages: shouldDeepSearchActiveWorkspace ? INVOICE_SEARCH_MAX_PAGES : INVOICE_ACTIVE_WORKSPACE_MAX_PAGES,
+                maxPages: shouldDeepSearchActiveWorkspace
+                  ? INVOICE_SEARCH_MAX_PAGES
+                  : (invoiceSuccessDateFilterActive ? INVOICE_DATE_FILTER_MAX_PAGES : INVOICE_ACTIVE_WORKSPACE_MAX_PAGES),
               };
               rows = await fetchAllPosOrders(baseRequest);
               pageMeta = {
@@ -13798,17 +14100,14 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         ? []
         : filterInvoiceRowsByCashier(
           approvalRowsInput || await fetchReceivableApprovalRows().catch(() => []),
-          invoiceRequestOptions.cashier_id,
+          invoiceRequestOptions.area === 'success' ? invoiceRequestOptions.cashier_id : '',
         );
       if (invoiceRequestOptions.area !== 'draft') {
         setReceivableApprovalRows(approvalRows);
         syncReceivableApprovalSnapshot(approvalRows);
       }
       const approvalListRows = invoiceRequestOptions.area === 'draft' ? [] : approvalRows.filter((row) => {
-        const approvalStatus = normalizeReceivableApprovalStatus(row?.approval?.status || row?.status);
-        const orderId = Number(row?.approval?.orderId || row?.order?.id || 0) || 0;
-        const approvalType = normalizeApprovalType(row?.approval?.type || row?.approval_type);
-        return !(approvalType === 'receivable' && approvalStatus === 'approved' && orderId > 0);
+        return shouldShowReceivableApprovalWorkspaceRow(row);
       });
       const baseRows = appendRows
         || (invoiceLoadError && INVOICE_ACTIVE_WORK_AREAS.has(invoiceRequestOptions.area))
@@ -13957,16 +14256,13 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       ]);
       const safeApprovalRows = filterInvoiceRowsByCashier(
         Array.isArray(approvalRows) ? approvalRows : [],
-        invoiceCashierId,
+        '',
       );
       const safeDraftRows = Array.isArray(draftRows) ? draftRows : [];
       const safeSuccessRows = Array.isArray(successRows) ? successRows : [];
       const safeReceivableRows = Array.isArray(receivableRows) ? receivableRows : [];
       const approvalListRows = safeApprovalRows.filter((row) => {
-        const approvalStatus = normalizeReceivableApprovalStatus(row?.approval?.status || row?.status);
-        const orderId = Number(row?.approval?.orderId || row?.order?.id || 0) || 0;
-        const approvalType = normalizeApprovalType(row?.approval?.type || row?.approval_type);
-        return !(approvalType === 'receivable' && approvalStatus === 'approved' && orderId > 0);
+        return shouldShowReceivableApprovalWorkspaceRow(row);
       });
 
       setReceivableApprovalRows(safeApprovalRows);
@@ -13978,9 +14274,19 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         });
       }
       if (Array.isArray(successRows)) {
-        updateInvoiceWorkspaceAreaSnapshot(safeSuccessRows, {
-          area: 'success',
-          replaceAreas: ['success'],
+        setInvoiceWorkspaceRowsByArea((prev) => {
+          const current = prev && typeof prev === 'object' ? prev : {};
+          const currentSuccessRows = Array.isArray(current.success) ? current.success : [];
+          if (currentSuccessRows.length > 0) {
+            return current;
+          }
+
+          return {
+            draft: Array.isArray(current.draft) ? current.draft : [],
+            success: safeSuccessRows.filter((row) => isInvoiceSuccessRow(row)),
+            approval: Array.isArray(current.approval) ? current.approval : [],
+            receivable: Array.isArray(current.receivable) ? current.receivable : [],
+          };
         });
       }
       updateInvoiceWorkspaceAreaSnapshot(approvalListRows, {
@@ -14002,6 +14308,147 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     }
   };
 
+  const loadInvoiceDashboardSummary = async () => {
+    if (!backendReady) {
+      return null;
+    }
+
+    const params = {
+      timeoutMs: 25000,
+    };
+    const dateFrom = String(invoiceDateFrom || '').trim();
+    const dateTo = String(invoiceDateTo || '').trim();
+    const cashierId = String(invoiceCashierId || '').trim();
+    if (dateFrom) {
+      params.date_from = dateFrom;
+    }
+    if (dateTo) {
+      params.date_to = dateTo;
+    }
+    if (cashierId) {
+      params.cashier_id = cashierId;
+    }
+
+    try {
+      const payload = await fetchPosSalesDashboardSummary(params);
+      setInvoiceDashboardSummary(payload && typeof payload === 'object' ? payload : null);
+      setInvoiceDashboardSummaryError('');
+      return payload;
+    } catch (error) {
+      setInvoiceDashboardSummaryError(error?.message || 'Gagal memuat summary dashboard invoice.');
+      return null;
+    }
+  };
+
+  const resolveDashboardClosingAction = (payload = null) => {
+    const closing = payload?.closing || {};
+    const summary = payload?.summary || {};
+    const workflow = payload?.workflow || {};
+    const cashValidations = Array.isArray(workflow?.cash_validations) ? workflow.cash_validations : [];
+    const hasPendingShortageReview = cashValidations.some((row) => (
+      Number(row?.difference || 0) < 0
+      && String(row?.decision_status || '') === 'pending'
+    ));
+    const blockers = Array.isArray(summary?.blockers) ? summary.blockers : [];
+    const nonChecklistBlockers = blockers.filter((row) => String(row?.code || '') !== 'manual_checklist_incomplete');
+    const isLocked = Boolean(closing?.is_locked);
+    const isReady = Boolean(summary?.is_ready || closing?.is_ready || (blockers.length > 0 && nonChecklistBlockers.length === 0));
+    const dateText = String(closing?.date || summary?.date || formatIsoDate(new Date())).trim();
+
+    if (isLocked) {
+      return { label: 'Closing Terkunci', tone: 'locked', mode: 'locked', date: dateText };
+    }
+    if (hasPendingShortageReview) {
+      return { label: 'Review', tone: 'review', mode: 'review', date: dateText };
+    }
+    if (isReady) {
+      return { label: 'Final Closing', tone: 'ready', mode: 'finalize', date: dateText };
+    }
+
+    return { label: 'Validasi Closing', tone: 'default', mode: 'input', date: dateText };
+  };
+
+  const refreshDashboardClosingAction = async () => {
+    if (!backendReady) {
+      return dashboardClosingAction;
+    }
+    const today = formatIsoDate(new Date());
+    try {
+      const payload = await fetchStoreDailyClosing(today);
+      const nextAction = resolveDashboardClosingAction(payload);
+      setDashboardClosingAction(nextAction);
+      return nextAction;
+    } catch (_error) {
+      const fallback = {
+        label: 'Closing Toko',
+        tone: 'default',
+        mode: 'input',
+        date: today,
+      };
+      setDashboardClosingAction(fallback);
+      return fallback;
+    }
+  };
+
+  const handleDashboardClosingStoreAction = async () => {
+    const nextAction = await refreshDashboardClosingAction();
+    if (nextAction.mode === 'finalize') {
+      setClosingStoreModalMode('finalize');
+      setIsClosingStoreModalVisible(true);
+      setClosingAutoFinalizeToken((current) => current + 1);
+      return;
+    }
+    if (['review', 'finalize', 'locked'].includes(nextAction.mode)) {
+      setIsClosingStoreModalVisible(false);
+      setActiveMenu('closing_store');
+      return;
+    }
+    setClosingStoreModalMode('input');
+    setIsClosingStoreModalVisible(true);
+  };
+
+  const closeClosingStoreModal = () => {
+    setIsClosingStoreModalVisible(false);
+    setClosingStoreModalMode('input');
+    refreshDashboardClosingAction().catch(() => {});
+  };
+
+  const reviewClosingFromFinalConfirmation = () => {
+    setDashboardClosingAction((current) => ({
+      ...current,
+      label: 'Validasi Closing',
+      tone: 'default',
+      mode: 'input',
+    }));
+    setClosingStoreModalMode('input');
+    setIsClosingStoreModalVisible(true);
+  };
+
+  const closingStoreModalTitle = dashboardClosingAction.mode === 'review'
+    ? 'Review Selisih Closing'
+    : dashboardClosingAction.mode === 'finalize'
+      ? 'Konfirmasi Final Closing'
+      : dashboardClosingAction.mode === 'locked'
+        ? 'Laporan Closing Terkunci'
+        : 'Input Validasi Closing Kasir';
+  const closingStoreModalSubtitle = dashboardClosingAction.mode === 'review'
+    ? 'Uang kurang setoran membutuhkan keputusan reviewer sebelum laporan bisa dikunci.'
+    : dashboardClosingAction.mode === 'finalize'
+      ? 'Semua validasi sudah valid. Periksa ringkasan terakhir lalu kunci Final Closing.'
+      : dashboardClosingAction.mode === 'locked'
+        ? 'Laporan tanggal ini sudah dikunci. Buka tanggal baru untuk closing berikutnya.'
+        : 'Hitung cash fisik, cek validasi nota, pengeluaran, pembelian, draft, dan piutang sebelum final closing.';
+  const currentBusinessDate = formatIsoDate(new Date());
+  const lockedClosingDate = String(dashboardClosingAction?.date || '').trim();
+  const posInputLockedByClosing = Boolean(
+    dashboardClosingAction?.mode === 'locked'
+    && lockedClosingDate
+    && currentBusinessDate <= lockedClosingDate,
+  );
+  const posInputLockedMessage = lockedClosingDate
+    ? `Final closing tanggal ${formatDateText(lockedClosingDate)} sudah dikunci. Input order untuk tanggal ini ditutup dan akan terbuka otomatis saat tanggal operasional berikutnya.`
+    : 'Final closing sudah dikunci. Input order untuk tanggal ini ditutup.';
+
   useEffect(() => {
     if (!isInvoiceAreaMenu(activeMenu)) {
       return undefined;
@@ -14014,13 +14461,46 @@ const SalesScreen = ({ currentUser, onLogout }) => {
   }, [activeMenu, backendReady, invoiceFilter, invoiceSearch, invoiceDateFrom, invoiceDateTo, invoiceCashierId]);
 
   useEffect(() => {
-    if (!isInvoiceAreaMenu(activeMenu) || !backendReady) {
+    if (!(isInvoiceAreaMenu(activeMenu) || activeMenu === 'pos') || !backendReady) {
       return undefined;
     }
 
     const timeout = setTimeout(() => {
       loadInvoiceDashboardSnapshots().catch(() => {});
     }, 500);
+
+    return () => clearTimeout(timeout);
+  }, [activeMenu, backendReady, invoiceDateFrom, invoiceDateTo, invoiceCashierId]);
+
+  useEffect(() => {
+    if (!isInvoiceAreaMenu(activeMenu) || !backendReady) {
+      return undefined;
+    }
+
+    const timeout = setTimeout(() => {
+      refreshDashboardClosingAction().catch(() => {});
+    }, 350);
+
+    return () => clearTimeout(timeout);
+  }, [activeMenu, backendReady, invoiceDateFrom, invoiceDateTo, invoiceCashierId, isClosingStoreModalVisible]);
+
+  useEffect(() => {
+    if (!posInputLockedByClosing) {
+      return;
+    }
+    setModalDetailPesanan(false);
+    setModalPilihPembayaran(false);
+    setIsOrderPreviewOpen(false);
+  }, [posInputLockedByClosing]);
+
+  useEffect(() => {
+    if (!isInvoiceAreaMenu(activeMenu) || !backendReady) {
+      return undefined;
+    }
+
+    const timeout = setTimeout(() => {
+      loadInvoiceDashboardSummary().catch(() => {});
+    }, 250);
 
     return () => clearTimeout(timeout);
   }, [activeMenu, backendReady, invoiceDateFrom, invoiceDateTo, invoiceCashierId]);
@@ -16331,6 +16811,10 @@ const SalesScreen = ({ currentUser, onLogout }) => {
   };
 
   const handleAddToCart = async () => {
+    if (posInputLockedByClosing) {
+      openNotice('Input Order Dikunci', posInputLockedMessage);
+      return;
+    }
     if (!backendReady) {
       openNotice('Backend Belum Siap', 'Koneksi API belum siap.');
       return;
@@ -16832,6 +17316,10 @@ const SalesScreen = ({ currentUser, onLogout }) => {
   const validateTransactionBeforeSubmit = async (mode = 'draft', options = {}) => {
     if (isSubmitting) {
       openNotice('Informasi', 'Transaksi sedang diproses, mohon tunggu.');
+      return null;
+    }
+    if (posInputLockedByClosing) {
+      openNotice('Input Order Dikunci', posInputLockedMessage);
       return null;
     }
 
@@ -17606,7 +18094,8 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       }
       let draftStatusWarning = '';
       if (!isDraftMode && backendOrderId && Number(currentDraftSourceId || 0) > 0) {
-        setDraftInvoices((prev) => prev.filter((draft) => Number(draft?.id || 0) !== Number(currentDraftSourceId || 0)));
+        removeDraftSourceFromWorkspace(currentDraftSourceId);
+        loadDraftInvoices({ area: 'draft', page: 1, forceServer: true }).catch(() => {});
       }
       if (mode === 'draft' && backendOrderId) {
         const createdDraftRow = normalizeOrderDetailRow(created, {
@@ -18896,11 +19385,8 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     onLogout?.();
   };
   const visibleInvoiceRows = useMemo(
-    () => filterInvoiceRowsByCashier(
-      filterInvoiceRowsForUser(draftInvoices, currentUser),
-      invoiceCashierId,
-    ),
-    [currentUser, draftInvoices, invoiceCashierId],
+    () => filterInvoiceRowsForUser(draftInvoices, currentUser),
+    [currentUser, draftInvoices],
   );
   const dateFilteredInvoiceRows = useMemo(
     () => {
@@ -18937,9 +19423,9 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     return { orderIds, invoiceIds };
   }, [receivableApprovalRows]);
   const invoiceSummaryRowsByArea = useMemo(() => {
-    const keyword = normalizeText(invoiceSearch);
-    const matchesSearch = (row) => {
-      if (!keyword) {
+    const successKeyword = normalizeText(invoiceSearch);
+    const matchesSuccessSearch = (row) => {
+      if (!successKeyword) {
         return true;
       }
       const customerName = normalizeText(row?.customer?.name || '');
@@ -18950,38 +19436,45 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       const approvalType = normalizeText(row?.approval?.typeLabel || row?.approval?.type || '');
       const approvalContext = normalizeText(row?.approval?.contextLabel || '');
       const approvalNote = normalizeText(row?.approval?.decisionNote || '');
-      return customerName.includes(keyword)
-        || customerPhone.includes(keyword)
-        || invoiceNo.includes(keyword)
-        || orderId.includes(keyword)
-        || approvalLabel.includes(keyword)
-        || approvalType.includes(keyword)
-        || approvalContext.includes(keyword)
-        || approvalNote.includes(keyword);
+      return customerName.includes(successKeyword)
+        || customerPhone.includes(successKeyword)
+        || invoiceNo.includes(successKeyword)
+        || orderId.includes(successKeyword)
+        || approvalLabel.includes(successKeyword)
+        || approvalType.includes(successKeyword)
+        || approvalContext.includes(successKeyword)
+        || approvalNote.includes(successKeyword);
     };
     const normalizeRows = (rows = [], predicate = () => true, options = {}) => (
       filterInvoiceRowsByCashier(
         filterInvoiceRowsForUser(rows, currentUser),
-        invoiceCashierId,
+        options?.applySuccessFilters ? invoiceCashierId : '',
       )
-        .filter((row) => (options?.ignoreDateFilter ? true : isInvoiceRowInDateRange(row, invoiceDateFrom, invoiceDateTo)))
-        .filter(matchesSearch)
+        .filter((row) => (options?.applySuccessFilters ? isInvoiceRowInDateRange(row, invoiceDateFrom, invoiceDateTo) : true))
+        .filter((row) => (options?.applySuccessFilters ? matchesSuccessSearch(row) : true))
         .filter(predicate)
     );
     const snapshot = invoiceWorkspaceRowsByArea && typeof invoiceWorkspaceRowsByArea === 'object'
       ? invoiceWorkspaceRowsByArea
       : {};
     const visibleRows = Array.isArray(visibleInvoiceRows) ? visibleInvoiceRows : [];
+    const snapshotSuccessRows = Array.isArray(snapshot.success) ? snapshot.success : [];
+    const activeSuccessRows = invoiceFilter === 'success'
+      ? visibleRows.filter((row) => isInvoiceSuccessRow(row))
+      : [];
+    const successRows = snapshotSuccessRows.length > 0
+      ? snapshotSuccessRows
+      : activeSuccessRows;
 
     return {
       draft: normalizeRows(
         mergeInvoiceRows(snapshot.draft, visibleRows.filter((row) => isDraftInvoiceRow(row))),
         (row) => isDraftInvoiceRow(row),
-        { ignoreDateFilter: true },
       ),
       success: normalizeRows(
-        mergeInvoiceRows(snapshot.success, visibleRows.filter((row) => isInvoiceSuccessRow(row))),
+        successRows,
         (row) => isInvoiceSuccessRow(row),
+        { applySuccessFilters: true },
       ),
       approval: normalizeRows(
         mergeInvoiceRows(snapshot.approval, visibleRows.filter((row) => isReceivableApprovalInvoiceRow(row))),
@@ -18989,15 +19482,13 @@ const SalesScreen = ({ currentUser, onLogout }) => {
           const approvalStatus = normalizeReceivableApprovalStatus(row?.approval?.status || row?.status);
           return isReceivableApprovalInvoiceRow(row) && approvalStatus === 'pending';
         },
-        { ignoreDateFilter: true },
       ),
       receivable: normalizeRows(
         mergeInvoiceRows(snapshot.receivable, visibleRows.filter((row) => isReceivableInvoiceRow(row))),
         (row) => isReceivableInvoiceRow(row),
-        { ignoreDateFilter: true },
       ),
     };
-  }, [currentUser, invoiceCashierId, invoiceDateFrom, invoiceDateTo, invoiceSearch, invoiceWorkspaceRowsByArea, visibleInvoiceRows]);
+  }, [currentUser, invoiceCashierId, invoiceDateFrom, invoiceDateTo, invoiceFilter, invoiceSearch, invoiceWorkspaceRowsByArea, visibleInvoiceRows]);
   const invoiceAreaSummary = useMemo(() => {
     const summaryRows = invoiceSummaryRowsByArea && typeof invoiceSummaryRowsByArea === 'object'
       ? invoiceSummaryRowsByArea
@@ -19035,17 +19526,233 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       receivableDueTotal: roundMoney(totals.receivableDueTotal),
     };
   }, [invoiceSummaryRowsByArea]);
+  const invoiceDashboardAreaSummary = useMemo(() => {
+    const cards = invoiceDashboardSummary?.cards && typeof invoiceDashboardSummary.cards === 'object'
+      ? invoiceDashboardSummary.cards
+      : null;
+    if (!cards) {
+      return invoiceAreaSummary;
+    }
+    const salesPaymentBreakdown = invoiceDashboardSummary?.sales?.payments?.breakdown
+      && typeof invoiceDashboardSummary.sales.payments.breakdown === 'object'
+      ? invoiceDashboardSummary.sales.payments.breakdown
+      : {};
+    const depositTopupBreakdown = invoiceDashboardSummary?.deposit_topups?.breakdown
+      && typeof invoiceDashboardSummary.deposit_topups.breakdown === 'object'
+      ? invoiceDashboardSummary.deposit_topups.breakdown
+      : {};
+    const receivableCollectionBreakdown = invoiceDashboardSummary?.receivable_collections?.breakdown
+      && typeof invoiceDashboardSummary.receivable_collections.breakdown === 'object'
+      ? invoiceDashboardSummary.receivable_collections.breakdown
+      : {};
+    const expenseBreakdown = invoiceDashboardSummary?.expenses?.breakdown
+      && typeof invoiceDashboardSummary.expenses.breakdown === 'object'
+      ? invoiceDashboardSummary.expenses.breakdown
+      : {};
+    const purchaseBreakdown = invoiceDashboardSummary?.purchases?.breakdown
+      && typeof invoiceDashboardSummary.purchases.breakdown === 'object'
+      ? invoiceDashboardSummary.purchases.breakdown
+      : {};
+    const specialTodaySummary = buildSpecialReceivableTodaySummary(invoiceSummaryRowsByArea?.receivable);
+    const breakdownAmount = (breakdown, key) => roundMoney(Number(breakdown?.[key]?.amount || 0) || 0);
+    const breakdownCount = (breakdown, key) => Number(breakdown?.[key]?.count || 0) || 0;
+    const firstNumber = (...candidates) => {
+      for (const candidate of candidates) {
+        if (candidate !== undefined && candidate !== null && candidate !== '') {
+          return Number(candidate || 0) || 0;
+        }
+      }
+      return 0;
+    };
+
+    return {
+      ...invoiceAreaSummary,
+      draftCount: Number(cards?.draft?.count ?? invoiceAreaSummary.draftCount ?? 0) || 0,
+      draftAmount: roundMoney(Number(cards?.draft?.amount ?? invoiceAreaSummary.draftAmount ?? 0) || 0),
+      successCount: Number(cards?.success?.count ?? invoiceAreaSummary.successCount ?? 0) || 0,
+      successAmount: roundMoney(Number(cards?.success?.amount ?? invoiceAreaSummary.successAmount ?? 0) || 0),
+      approvalCount: Number(cards?.approval?.count ?? invoiceAreaSummary.approvalCount ?? 0) || 0,
+      receivableCount: Number(cards?.receivable?.count ?? invoiceAreaSummary.receivableCount ?? 0) || 0,
+      receivableDueTotal: roundMoney(Number(cards?.receivable?.amount ?? invoiceAreaSummary.receivableDueTotal ?? 0) || 0),
+      dueTodayCount: Number(cards?.due_today?.count || 0) || 0,
+      dueTodayAmount: roundMoney(Number(cards?.due_today?.amount || 0) || 0),
+      overdueReceivableCount: Number(cards?.overdue_receivable?.count || 0) || 0,
+      overdueReceivableAmount: roundMoney(Number(cards?.overdue_receivable?.amount || 0) || 0),
+      managementBurdenCount: Number(cards?.management_burden?.count || 0) || 0,
+      managementBurdenAmount: roundMoney(Number(cards?.management_burden?.amount || 0) || 0),
+      managementBurdenUnprocessedCount: Number(cards?.management_burden?.unprocessed_count || 0) || 0,
+      managementBurdenUnprocessedAmount: roundMoney(Number(cards?.management_burden?.unprocessed_amount || 0) || 0),
+      managementBurdenPendingCount: Number(cards?.management_burden?.pending_count || 0) || 0,
+      managementBurdenPendingAmount: roundMoney(Number(cards?.management_burden?.pending_amount || 0) || 0),
+      managementBurdenApprovedCount: Number(cards?.management_burden?.approved_count || 0) || 0,
+      managementBurdenApprovedAmount: roundMoney(Number(cards?.management_burden?.approved_amount || 0) || 0),
+      managementBurdenTodayCount: firstNumber(
+        cards?.management_burden?.today_count,
+        cards?.management_burden?.input_today_count,
+        cards?.management_burden?.created_today_count,
+        specialTodaySummary.managementCount,
+      ),
+      managementBurdenTodayAmount: roundMoney(firstNumber(
+        cards?.management_burden?.today_amount,
+        cards?.management_burden?.input_today_amount,
+        cards?.management_burden?.created_today_amount,
+        specialTodaySummary.managementAmount,
+      )),
+      productionMistakeCount: Number(cards?.production_mistake?.count || 0) || 0,
+      productionMistakeAmount: roundMoney(Number(cards?.production_mistake?.amount || 0) || 0),
+      productionMistakeUnprocessedCount: Number(cards?.production_mistake?.unprocessed_count || 0) || 0,
+      productionMistakeUnprocessedAmount: roundMoney(Number(cards?.production_mistake?.unprocessed_amount || 0) || 0),
+      productionMistakePendingCount: Number(cards?.production_mistake?.pending_count || 0) || 0,
+      productionMistakePendingAmount: roundMoney(Number(cards?.production_mistake?.pending_amount || 0) || 0),
+      productionMistakeApprovedCount: Number(cards?.production_mistake?.approved_count || 0) || 0,
+      productionMistakeApprovedAmount: roundMoney(Number(cards?.production_mistake?.approved_amount || 0) || 0),
+      productionMistakeTodayCount: firstNumber(
+        cards?.production_mistake?.today_count,
+        cards?.production_mistake?.input_today_count,
+        cards?.production_mistake?.created_today_count,
+        specialTodaySummary.productionCount,
+      ),
+      productionMistakeTodayAmount: roundMoney(firstNumber(
+        cards?.production_mistake?.today_amount,
+        cards?.production_mistake?.input_today_amount,
+        cards?.production_mistake?.created_today_amount,
+        specialTodaySummary.productionAmount,
+      )),
+      depositTopupCount: Number(invoiceDashboardSummary?.deposit_topups?.count || 0) || 0,
+      depositTopupAmount: roundMoney(Number(invoiceDashboardSummary?.deposit_topups?.amount || 0) || 0),
+      depositTopupCashCount: breakdownCount(depositTopupBreakdown, 'cash'),
+      depositTopupCashAmount: breakdownAmount(depositTopupBreakdown, 'cash'),
+      depositTopupTransferCount: breakdownCount(depositTopupBreakdown, 'transfer'),
+      depositTopupTransferAmount: breakdownAmount(depositTopupBreakdown, 'transfer'),
+      depositTopupQrisCount: breakdownCount(depositTopupBreakdown, 'qris'),
+      depositTopupQrisAmount: breakdownAmount(depositTopupBreakdown, 'qris'),
+      depositTopupCustomerOverpayCount: breakdownCount(depositTopupBreakdown, 'customer_overpay'),
+      depositTopupCustomerOverpayAmount: breakdownAmount(depositTopupBreakdown, 'customer_overpay'),
+      depositTopupAccountBreakdown: Array.isArray(invoiceDashboardSummary?.deposit_topups?.account_breakdown)
+        ? invoiceDashboardSummary.deposit_topups.account_breakdown
+          .map((row) => ({
+            bankAccountId: Number(row?.bank_account_id || 0) || 0,
+            accountCode: String(row?.account_code || '').trim(),
+            accountName: String(row?.account_name || '').trim(),
+            count: Number(row?.count || 0) || 0,
+            amount: roundMoney(Number(row?.amount || 0) || 0),
+          }))
+          .filter((row) => row.amount > 0 || row.count > 0)
+        : [],
+      receivableCollectionCount: Number(invoiceDashboardSummary?.receivable_collections?.customer_count ?? invoiceDashboardSummary?.receivable_collections?.count ?? 0) || 0,
+      receivableCollectionTransactionCount: Number(invoiceDashboardSummary?.receivable_collections?.count || 0) || 0,
+      receivableCollectionAmount: roundMoney(Number(invoiceDashboardSummary?.receivable_collections?.amount || 0) || 0),
+      receivableCollectionCashCount: breakdownCount(receivableCollectionBreakdown, 'cash'),
+      receivableCollectionCashAmount: breakdownAmount(receivableCollectionBreakdown, 'cash'),
+      receivableCollectionTransferCount: breakdownCount(receivableCollectionBreakdown, 'transfer'),
+      receivableCollectionTransferAmount: breakdownAmount(receivableCollectionBreakdown, 'transfer'),
+      receivableCollectionQrisCount: breakdownCount(receivableCollectionBreakdown, 'qris'),
+      receivableCollectionQrisAmount: breakdownAmount(receivableCollectionBreakdown, 'qris'),
+      receivableCollectionDepositAgentCount: breakdownCount(receivableCollectionBreakdown, 'deposit_agent'),
+      receivableCollectionDepositAgentAmount: breakdownAmount(receivableCollectionBreakdown, 'deposit_agent'),
+      receivableCollectionAccountBreakdown: Array.isArray(invoiceDashboardSummary?.receivable_collections?.account_breakdown)
+        ? invoiceDashboardSummary.receivable_collections.account_breakdown
+          .map((row) => ({
+            bankAccountId: Number(row?.bank_account_id || 0) || 0,
+            accountCode: String(row?.account_code || '').trim(),
+            accountName: String(row?.account_name || '').trim(),
+            count: Number(row?.count || 0) || 0,
+            amount: roundMoney(Number(row?.amount || 0) || 0),
+          }))
+          .filter((row) => row.amount > 0 || row.count > 0)
+        : [],
+      expenseCount: Number(invoiceDashboardSummary?.expenses?.count || 0) || 0,
+      expenseAmount: roundMoney(Number(invoiceDashboardSummary?.expenses?.amount || 0) || 0),
+      expenseCashCount: breakdownCount(expenseBreakdown, 'cash'),
+      expenseCashAmount: breakdownAmount(expenseBreakdown, 'cash'),
+      expenseTransferCount: breakdownCount(expenseBreakdown, 'transfer'),
+      expenseTransferAmount: breakdownAmount(expenseBreakdown, 'transfer'),
+      expenseQrisCount: breakdownCount(expenseBreakdown, 'qris'),
+      expenseQrisAmount: breakdownAmount(expenseBreakdown, 'qris'),
+      expenseUnpaidCount: breakdownCount(expenseBreakdown, 'unpaid'),
+      expenseUnpaidAmount: breakdownAmount(expenseBreakdown, 'unpaid'),
+      expenseAccountBreakdown: Array.isArray(invoiceDashboardSummary?.expenses?.account_breakdown)
+        ? invoiceDashboardSummary.expenses.account_breakdown
+          .map((row) => ({
+            bankAccountId: Number(row?.bank_account_id || 0) || 0,
+            accountCode: String(row?.account_code || '').trim(),
+            accountName: String(row?.account_name || '').trim(),
+            count: Number(row?.count || 0) || 0,
+            amount: roundMoney(Number(row?.amount || 0) || 0),
+          }))
+          .filter((row) => row.amount > 0 || row.count > 0)
+        : [],
+      purchaseCount: Number(invoiceDashboardSummary?.purchases?.count || 0) || 0,
+      purchaseAmount: roundMoney(Number(invoiceDashboardSummary?.purchases?.amount || 0) || 0),
+      purchaseCashCount: breakdownCount(purchaseBreakdown, 'cash'),
+      purchaseCashAmount: breakdownAmount(purchaseBreakdown, 'cash'),
+      purchaseTransferCount: breakdownCount(purchaseBreakdown, 'transfer'),
+      purchaseTransferAmount: breakdownAmount(purchaseBreakdown, 'transfer'),
+      purchaseQrisCount: breakdownCount(purchaseBreakdown, 'qris'),
+      purchaseQrisAmount: breakdownAmount(purchaseBreakdown, 'qris'),
+      purchaseUnpaidCount: breakdownCount(purchaseBreakdown, 'unpaid'),
+      purchaseUnpaidAmount: breakdownAmount(purchaseBreakdown, 'unpaid'),
+      purchaseUnlinkedCount: breakdownCount(purchaseBreakdown, 'unlinked_purchase'),
+      purchaseUnlinkedAmount: breakdownAmount(purchaseBreakdown, 'unlinked_purchase'),
+      purchaseAccountBreakdown: Array.isArray(invoiceDashboardSummary?.purchases?.account_breakdown)
+        ? invoiceDashboardSummary.purchases.account_breakdown
+          .map((row) => ({
+            bankAccountId: Number(row?.bank_account_id || 0) || 0,
+            accountCode: String(row?.account_code || '').trim(),
+            accountName: String(row?.account_name || '').trim(),
+            count: Number(row?.count || 0) || 0,
+            amount: roundMoney(Number(row?.amount || 0) || 0),
+          }))
+          .filter((row) => row.amount > 0 || row.count > 0)
+        : [],
+      remittanceTotalReadyAmount: roundMoney(Number(invoiceDashboardSummary?.cashier_remittance?.total_ready_to_deposit || 0) || 0),
+      remittanceOpeningCashAmount: roundMoney(Number(invoiceDashboardSummary?.cashier_remittance?.opening_cash || invoiceDashboardSummary?.cashier_remittance?.cash?.opening_cash || 0) || 0),
+      remittanceCashReadyAmount: roundMoney(Number(invoiceDashboardSummary?.cashier_remittance?.cash?.ready_to_deposit || 0) || 0),
+      remittanceCashNetAmount: roundMoney(
+        (Number(invoiceDashboardSummary?.cashier_remittance?.cash?.ready_to_deposit || 0) || 0)
+        - (Number(invoiceDashboardSummary?.cashier_remittance?.opening_cash || invoiceDashboardSummary?.cashier_remittance?.cash?.opening_cash || 0) || 0),
+      ),
+      remittanceTransferReadyAmount: roundMoney(Number(invoiceDashboardSummary?.cashier_remittance?.transfer?.ready_to_deposit || 0) || 0),
+      remittanceQrisReadyAmount: roundMoney(Number(invoiceDashboardSummary?.cashier_remittance?.qris?.ready_to_deposit || 0) || 0),
+      remittanceCustomerDepositSettlementCount: Number(invoiceDashboardSummary?.cashier_remittance?.customer_deposit_settlement?.count || 0) || 0,
+      remittanceCustomerDepositSettlementAmount: roundMoney(Number(invoiceDashboardSummary?.cashier_remittance?.customer_deposit_settlement?.amount || 0) || 0),
+      remittanceCashIncomeAmount: roundMoney(Number(invoiceDashboardSummary?.cashier_remittance?.cash?.income || 0) || 0),
+      remittanceTransferIncomeAmount: roundMoney(Number(invoiceDashboardSummary?.cashier_remittance?.transfer?.income || 0) || 0),
+      remittanceQrisIncomeAmount: roundMoney(Number(invoiceDashboardSummary?.cashier_remittance?.qris?.income || 0) || 0),
+      remittanceCashExpenseAmount: roundMoney(Number(invoiceDashboardSummary?.cashier_remittance?.cash?.expense || 0) || 0),
+      remittanceTransferExpenseAmount: roundMoney(Number(invoiceDashboardSummary?.cashier_remittance?.transfer?.expense || 0) || 0),
+      remittanceQrisExpenseAmount: roundMoney(Number(invoiceDashboardSummary?.cashier_remittance?.qris?.expense || 0) || 0),
+      salesCashCount: breakdownCount(salesPaymentBreakdown, 'cash'),
+      salesCashAmount: breakdownAmount(salesPaymentBreakdown, 'cash'),
+      salesTransferCount: breakdownCount(salesPaymentBreakdown, 'transfer'),
+      salesTransferAmount: breakdownAmount(salesPaymentBreakdown, 'transfer'),
+      salesQrisCount: breakdownCount(salesPaymentBreakdown, 'qris'),
+      salesQrisAmount: breakdownAmount(salesPaymentBreakdown, 'qris'),
+      salesDepositAgentCount: breakdownCount(salesPaymentBreakdown, 'deposit_agent'),
+      salesDepositAgentAmount: breakdownAmount(salesPaymentBreakdown, 'deposit_agent'),
+      salesSplitPaymentCount: breakdownCount(salesPaymentBreakdown, 'split_payment'),
+      salesSplitPaymentAmount: breakdownAmount(salesPaymentBreakdown, 'split_payment'),
+      salesDpCount: breakdownCount(salesPaymentBreakdown, 'dp'),
+      salesDpAmount: breakdownAmount(salesPaymentBreakdown, 'dp'),
+      salesUnpaidCount: breakdownCount(salesPaymentBreakdown, 'unpaid'),
+      salesUnpaidAmount: breakdownAmount(salesPaymentBreakdown, 'unpaid'),
+      source: 'server_dashboard_summary',
+      error: invoiceDashboardSummaryError,
+    };
+  }, [invoiceAreaSummary, invoiceDashboardSummary, invoiceDashboardSummaryError, invoiceSummaryRowsByArea]);
   const invoiceSectionMeta = useMemo(() => {
     if (invoiceFilter === 'draft') {
       return {
-        title: 'Draft Order',
-        description: 'Order sementara untuk follow up customer, simulasi harga, dan revisi sebelum jadi invoice sukses.',
+        title: 'Ringkasan Operasional',
+        description: invoiceOperationalSummaryFilter === 'draft'
+          ? 'Menampilkan draft yang dipilih dari shortcut dashboard operasional.'
+          : 'Ringkasan draft, piutang, approval, pengeluaran, pembelian, dan estimasi setoran kasir.',
       };
     }
     if (invoiceFilter === 'success') {
       return {
-        title: 'Invoice Sukses',
-        description: 'Invoice resmi yang sudah difakturkan, termasuk yang belum lunas maupun yang sudah lunas.',
+        title: 'Nota Penjualan Tercatat',
+        description: 'Nota resmi yang sudah masuk pencatatan penjualan, termasuk yang belum lunas maupun yang sudah lunas.',
       };
     }
     if (invoiceFilter === 'approval') {
@@ -19055,20 +19762,31 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       };
     }
     if (invoiceFilter === 'receivable') {
+      const operationalDescriptions = {
+        receivable: 'Menampilkan semua invoice yang masih punya sisa piutang.',
+        due_today: 'Menampilkan invoice piutang yang agenda pelunasannya jatuh tempo hari ini.',
+        overdue: 'Menampilkan invoice piutang yang sudah melewati agenda pelunasan.',
+        management: 'Menampilkan invoice khusus pelanggan BEBAN MANAGEMENT.',
+        production: 'Menampilkan invoice khusus pelanggan KESALAHAN PRODUKSI.',
+      };
       return {
         title: 'Piutang',
-        description: 'Semua invoice sukses yang masih punya outstanding dan perlu dipantau sampai lunas.',
+        description: operationalDescriptions[invoiceOperationalSummaryFilter]
+          || 'Semua invoice sukses yang masih punya outstanding dan perlu dipantau sampai lunas.',
       };
     }
     return {
       title: 'Pusat Invoice',
-      description: 'Ringkasan Draft Order, Invoice Sukses, Butuh Approval, dan Piutang dalam satu area kerja kasir.',
+      description: 'Ringkasan Operasional, Nota Penjualan Tercatat, Butuh Approval, dan Piutang dalam satu area kerja kasir.',
     };
-  }, [invoiceFilter]);
+  }, [invoiceFilter, invoiceOperationalSummaryFilter]);
   const filteredInvoices = useMemo(() => {
     const visibleRows = Array.isArray(dateFilteredInvoiceRows) ? dateFilteredInvoiceRows : [];
     const areaSnapshotRows = invoiceWorkspaceRowsByArea && typeof invoiceWorkspaceRowsByArea === 'object'
-      ? filterInvoiceRowsByCashier(invoiceWorkspaceRowsByArea[invoiceFilter], invoiceCashierId)
+      ? filterInvoiceRowsByCashier(
+        invoiceWorkspaceRowsByArea[invoiceFilter],
+        invoiceFilter === 'success' ? invoiceCashierId : '',
+      )
       : [];
     const rows = INVOICE_ACTIVE_WORK_AREAS.has(invoiceFilter)
       ? mergeInvoiceRows(
@@ -19076,7 +19794,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         visibleRows,
       )
       : visibleRows;
-    const keyword = normalizeText(invoiceSearch);
+    const keyword = invoiceFilter === 'success' ? normalizeText(invoiceSearch) : '';
     const searchedRows = keyword
       ? rows.filter((row) => {
         const customerName = normalizeText(row?.customer?.name || '');
@@ -19097,20 +19815,39 @@ const SalesScreen = ({ currentUser, onLogout }) => {
           || approvalNote.includes(keyword);
       })
       : rows;
+    const successFilteredRows = invoiceFilter === 'success'
+      ? searchedRows
+        .filter((row) => {
+          if (invoiceStatusFilter === 'all') {
+            return true;
+          }
+          return resolveInvoiceStatusFilterKey(row) === invoiceStatusFilter;
+        })
+        .filter((row) => {
+          if (invoicePaymentMethodFilter === 'all') {
+            return true;
+          }
+          return resolveInvoicePaymentMethodFilterKey(row) === normalizePaymentMethodType(invoicePaymentMethodFilter);
+        })
+        .filter((row) => {
+          if (invoiceCustomerTypeFilter === 'all') {
+            return true;
+          }
+          return resolveInvoiceCustomerTypeFilterKey(row, customerTypes, customers) === invoiceCustomerTypeFilter;
+        })
+      : searchedRows;
     if (invoiceFilter === 'draft') {
       return searchedRows.filter((row) => isDraftInvoiceRow(row));
     }
     if (invoiceFilter === 'success') {
-      return searchedRows.filter((row) => isInvoiceSuccessRow(row));
+      return successFilteredRows.filter((row) => isInvoiceSuccessRow(row));
     }
     if (invoiceFilter === 'approval') {
       return searchedRows
         .filter((row) => isReceivableApprovalInvoiceRow(row))
+        .filter((row) => shouldShowReceivableApprovalWorkspaceRow(row))
         .filter((row) => {
           const approvalStatus = normalizeReceivableApprovalStatus(row?.approval?.status || row?.status);
-          if (approvalStatus === 'resolved') {
-            return false;
-          }
           if (approvalStatusFilter === 'all') {
             return true;
           }
@@ -19118,13 +19855,39 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         });
     }
     if (invoiceFilter === 'receivable') {
-      return searchedRows.filter((row) => isReceivableInvoiceRow(row));
+      const receivableRows = searchedRows.filter((row) => isReceivableInvoiceRow(row));
+      if (invoiceOperationalSummaryFilter === 'due_today') {
+        return receivableRows.filter((row) => {
+          const dueMeta = resolveReceivableDueMeta(row);
+          return Boolean(dueMeta?.label) && !dueMeta?.isOverdue && String(dueMeta?.statusLabel || '').toLowerCase().includes('hari ini');
+        });
+      }
+      if (invoiceOperationalSummaryFilter === 'overdue') {
+        return receivableRows.filter((row) => Boolean(resolveReceivableDueMeta(row)?.isOverdue));
+      }
+      if (invoiceOperationalSummaryFilter === 'management') {
+        return receivableRows.filter((row) => isInvoiceSpecialCustomerRow(row, 'BEBAN MANAGEMENT'));
+      }
+      if (invoiceOperationalSummaryFilter === 'production') {
+        return receivableRows.filter((row) => isInvoiceSpecialCustomerRow(row, 'KESALAHAN PRODUKSI'));
+      }
+      return receivableRows;
     }
     return searchedRows;
-  }, [approvalStatusFilter, dateFilteredInvoiceRows, invoiceCashierId, invoiceFilter, invoiceSearch, invoiceWorkspaceRowsByArea]);
+  }, [approvalStatusFilter, customerTypes, customers, dateFilteredInvoiceRows, invoiceCashierId, invoiceCustomerTypeFilter, invoiceFilter, invoiceOperationalSummaryFilter, invoicePaymentMethodFilter, invoiceSearch, invoiceStatusFilter, invoiceWorkspaceRowsByArea]);
   const renderedInvoices = useMemo(
-    () => (Array.isArray(filteredInvoices) ? filteredInvoices.slice(0, INVOICE_RENDER_LIMIT) : []),
-    [filteredInvoices],
+    () => {
+      if (!Array.isArray(filteredInvoices)) {
+        return [];
+      }
+
+      const dateRangeActive = invoiceFilter === 'success'
+        && !String(invoiceSearch || '').trim()
+        && Boolean(String(invoiceDateFrom || '').trim() || String(invoiceDateTo || '').trim());
+
+      return dateRangeActive ? filteredInvoices : filteredInvoices.slice(0, INVOICE_RENDER_LIMIT);
+    },
+    [filteredInvoices, invoiceDateFrom, invoiceDateTo, invoiceFilter, invoiceSearch],
   );
   const hiddenRenderedInvoiceCount = Math.max((Array.isArray(filteredInvoices) ? filteredInvoices.length : 0) - renderedInvoices.length, 0);
   const filteredInvoiceSummary = useMemo(() => {
@@ -19151,7 +19914,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         : 'Semua tanggal');
 
     return {
-      title: invoiceFilter === 'draft' ? 'Ringkasan Draft Tampil' : 'Ringkasan Invoice Sukses Tampil',
+      title: invoiceFilter === 'draft' ? 'Ringkasan Operasional Tampil' : 'Ringkasan Nota Penjualan Tercatat Tampil',
       totalInvoices: totals.totalInvoices,
       totalAmount: roundMoney(totals.totalAmount),
       periodLabel,
@@ -19745,13 +20508,15 @@ const SalesScreen = ({ currentUser, onLogout }) => {
   const closingCashInHandSummary = useMemo(() => {
     const cashSales = roundMoney(Number(closingReport?.payments?.cash_total || 0));
     const cashReceivable = roundMoney(Number(closingReport?.receivable_collections?.cash_total || 0));
+    const cashDepositTopup = roundMoney(Number(closingReport?.deposit_topups?.cash_total || 0));
     const cashIncomeOther = roundMoney(Number(closingReport?.external_cash?.cash_income_total ?? closingReport?.external_cash?.income_total ?? 0));
     const cashExpenseOther = roundMoney(Number(closingReport?.external_cash?.cash_expense_total ?? closingReport?.external_cash?.expense_total ?? 0));
     const expenseTotal = roundMoney(Number(closingReport?.external_cash?.expense_total || 0));
-    const physicalCashExpected = roundMoney(cashSales + cashReceivable + cashIncomeOther - cashExpenseOther);
+    const physicalCashExpected = roundMoney(cashSales + cashReceivable + cashDepositTopup + cashIncomeOther - cashExpenseOther);
     return {
       cashSales,
       cashReceivable,
+      cashDepositTopup,
       cashIncomeOther,
       cashExpenseOther,
       expenseTotal,
@@ -19771,10 +20536,16 @@ const SalesScreen = ({ currentUser, onLogout }) => {
   const closingNonCashSummary = useMemo(() => {
     const nonCashSales = roundMoney(Number(closingReport?.payments?.non_cash_total || 0));
     const nonCashReceivable = roundMoney(Number(closingReport?.receivable_collections?.non_cash_total || 0));
+    const nonCashDepositTopup = roundMoney(
+      Number(closingReport?.deposit_topups?.transfer_total || 0)
+      + Number(closingReport?.deposit_topups?.qris_total || 0)
+      + Number(closingReport?.deposit_topups?.other_total || 0),
+    );
     return {
       nonCashSales,
       nonCashReceivable,
-      total: roundMoney(nonCashSales + nonCashReceivable),
+      nonCashDepositTopup,
+      total: roundMoney(nonCashSales + nonCashReceivable + nonCashDepositTopup),
     };
   }, [closingReport]);
   const closingReceivableSettlementRows = useMemo(
@@ -19875,7 +20646,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       auditedCount: 0,
     });
   }, [closingDamageItems]);
-  const buildClosingReportHtml = (reportOverride = null, damageItemsOverride = null, reportDateOverride = null) => {
+  const buildClosingReportHtml = (reportOverride = null, damageItemsOverride = null, reportDateOverride = null, signerOptions = {}) => {
     const report = reportOverride || closingReport;
     if (!report) {
       return '';
@@ -19900,6 +20671,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     const cashInHandSummary = {
       cashSales: roundMoney(Number(report?.payments?.cash_total || 0)),
       cashReceivable: roundMoney(Number(report?.receivable_collections?.cash_total || 0)),
+      cashDepositTopup: roundMoney(Number(report?.deposit_topups?.cash_total ?? report?.deposit_topups?.amount ?? 0)),
       cashIncomeOther: roundMoney(Number(report?.external_cash?.cash_income_total ?? report?.external_cash?.income_total ?? 0)),
       cashExpenseOther: roundMoney(Number(report?.external_cash?.cash_expense_total ?? report?.external_cash?.expense_total ?? 0)),
       expenseTotal: roundMoney(Number(report?.external_cash?.expense_total || 0)),
@@ -19951,42 +20723,60 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       totalEstimatedValue: 0,
       auditedCount: 0,
     });
-    const cashierName = String(currentUser?.name || 'Kasir').trim() || 'Kasir';
+    const cashierName = String(signerOptions?.cashierName || currentUser?.name || 'Kasir').trim() || 'Kasir';
+    const financeName = String(signerOptions?.financeName || 'Finance').trim() || 'Finance';
     const receiptSettings = normalizeReceiptSettings(posSettings);
-    const logoUrl = String(receiptSettings?.receipt_logo_url || '').trim();
+    const logoUrl = String(
+      signerOptions?.logoUrl
+      || resolvePrintAssetUrl(receiptSettings?.receipt_logo_url || resolveDefaultReceiptLogoUrl())
+    ).trim();
     const brandName = String(receiptSettings?.brand_name || 'SIDOMULYO ADVERTISING').trim() || 'SIDOMULYO ADVERTISING';
     const brandTagline = String(receiptSettings?.brand_tagline || '').trim();
+    const maxClosingPrintDetails = 4;
     const paymentLines = paymentRows.length > 0
-      ? paymentRows.map((row) => `<div class="line"><span>${escapeHtml(formatClosingBreakdownLabel(row, bankAccounts))}</span><strong>${escapeHtml(formatRupiah(row?.total_amount || 0))}</strong></div>`).join('')
+      ? [
+        ...paymentRows.slice(0, maxClosingPrintDetails).map((row) => `<div class="line"><span>${escapeHtml(formatClosingBreakdownLabel(row, bankAccounts))}</span><strong>${escapeHtml(formatRupiah(row?.total_amount || 0))}</strong></div>`),
+        paymentRows.length > maxClosingPrintDetails ? `<div class="muted">+ ${paymentRows.length - maxClosingPrintDetails} rincian metode pembayaran lain.</div>` : '',
+      ].filter(Boolean).join('')
       : '<div class="muted">Belum ada pembayaran penjualan hari ini</div>';
     const expensePaymentRows = Array.isArray(report?.external_cash?.expense_payment_breakdown) ? report.external_cash.expense_payment_breakdown : [];
-    const expensePaymentLines = expensePaymentRows.length > 0
-      ? expensePaymentRows
-        .filter((row) => Number(row?.total_amount || 0) > 0)
-        .map((row) => `<div class="line"><span>Pengeluaran ${escapeHtml(String(row?.label || row?.method || 'Metode lain'))}</span><strong>${escapeHtml(formatRupiah(row?.total_amount || 0))}</strong></div>`)
-        .join('')
+    const visibleExpensePaymentRows = expensePaymentRows.filter((row) => Number(row?.total_amount || 0) > 0);
+    const expensePaymentLines = visibleExpensePaymentRows.length > 0
+      ? [
+        ...visibleExpensePaymentRows.slice(0, maxClosingPrintDetails).map((row) => `<div class="line"><span>Pengeluaran ${escapeHtml(String(row?.label || row?.method || 'Metode lain'))}</span><strong>${escapeHtml(formatRupiah(row?.total_amount || 0))}</strong></div>`),
+        visibleExpensePaymentRows.length > maxClosingPrintDetails ? `<div class="muted">+ ${visibleExpensePaymentRows.length - maxClosingPrintDetails} rincian pengeluaran lain.</div>` : '',
+      ].filter(Boolean).join('')
       : '';
     const receivableLines = receivableBreakdownRows.length > 0
-      ? receivableBreakdownRows.map((row) => `<div class="line"><span>${escapeHtml(formatClosingBreakdownLabel(row, bankAccounts))}</span><strong>${escapeHtml(formatRupiah(row?.total_amount || 0))}</strong></div>`).join('')
+      ? [
+        ...receivableBreakdownRows.slice(0, maxClosingPrintDetails).map((row) => `<div class="line"><span>${escapeHtml(formatClosingBreakdownLabel(row, bankAccounts))}</span><strong>${escapeHtml(formatRupiah(row?.total_amount || 0))}</strong></div>`),
+        receivableBreakdownRows.length > maxClosingPrintDetails ? `<div class="muted">+ ${receivableBreakdownRows.length - maxClosingPrintDetails} rincian pelunasan lain.</div>` : '',
+      ].filter(Boolean).join('')
       : '<div class="muted">Belum ada pelunasan piutang hari ini</div>';
     const receivableRefs = receivableSettlementRows.length > 0
-      ? receivableSettlementRows.slice(0, 5).map((row) => `
+      ? [
+        ...receivableSettlementRows.slice(0, maxClosingPrintDetails).map((row) => `
         <div class="mini-item">
           <div><strong>${escapeHtml(String(row?.invoice_no || '-'))}</strong></div>
           <div class="muted">${escapeHtml(String(row?.customer_name || 'Pelanggan umum'))} | ${escapeHtml(formatClosingBreakdownLabel(row, bankAccounts))}</div>
           <div><strong>${escapeHtml(formatRupiah(row?.amount || 0))}</strong></div>
         </div>
-      `).join('')
+      `),
+        receivableSettlementRows.length > maxClosingPrintDetails ? `<div class="muted">+ ${receivableSettlementRows.length - maxClosingPrintDetails} referensi piutang lain.</div>` : '',
+      ].filter(Boolean).join('')
       : '<div class="muted">Tidak ada referensi pelunasan piutang</div>';
     const damageLines = damageItems.length > 0
-      ? damageItems.map((row, index) => `
+      ? [
+        ...damageItems.slice(0, maxClosingPrintDetails).map((row, index) => `
         <div class="mini-item">
           <div><strong>${index + 1}. ${escapeHtml(String(row?.productName || '-'))}</strong></div>
           <div class="muted">Qty: ${escapeHtml(String(row?.qty || 0))} | Estimasi: ${escapeHtml(formatRupiah(row?.estimatedTotalValue || 0))}</div>
           <div class="muted">Status Audit: ${escapeHtml(humanizeStatusLabel(row?.auditStatus || 'reported'))}${row?.responsibility ? ` | Beban: ${escapeHtml(humanizeStatusLabel(row.responsibility))}` : ''}</div>
           <div>${escapeHtml(String(row?.note || '-'))}</div>
         </div>
-      `).join('')
+      `),
+        damageItems.length > maxClosingPrintDetails ? `<div class="muted">+ ${damageItems.length - maxClosingPrintDetails} item reject/rusak lain.</div>` : '',
+      ].filter(Boolean).join('')
       : '<div class="muted">Tidak ada barang reject / rusak yang dilaporkan.</div>';
 
     return `
@@ -19997,19 +20787,20 @@ const SalesScreen = ({ currentUser, onLogout }) => {
   <title>Laporan Close Order ${escapeHtml(reportDate)}</title>
   <style>
     @page {
-      size: 80mm auto;
-      margin: 3mm;
+      size: A4 landscape;
+      margin: 8mm 8mm;
     }
     :root {
-      --ink: #000;
+      --ink: #111827;
       --paper: #fff;
-      --line: #000;
-      --page-width: 80mm;
-      --body-size: 13px;
-      --meta-size: 12px;
-      --detail-size: 11px;
-      --title-size: 18px;
-      --section-size: 13px;
+      --line: #d1d5db;
+      --strong-line: #111827;
+      --page-width: 281mm;
+      --body-size: 9px;
+      --meta-size: 9px;
+      --detail-size: 8px;
+      --title-size: 17px;
+      --section-size: 10px;
     }
     * { box-sizing: border-box; }
     html, body {
@@ -20019,11 +20810,10 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     }
     body {
       color: var(--ink);
-      font-family: Consolas, "DejaVu Sans Mono", "Roboto Mono", "Courier New", monospace;
+      font-family: Arial, "Helvetica Neue", Helvetica, sans-serif;
       font-size: var(--body-size);
-      line-height: 1.28;
-      font-weight: 600;
-      color-adjust: exact;
+      line-height: 1.45;
+      font-weight: 500;
       -webkit-print-color-adjust: exact;
       print-color-adjust: exact;
       display: flex;
@@ -20033,74 +20823,79 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       width: var(--page-width);
       max-width: var(--page-width);
       margin: 0 auto;
-      padding: 2.5mm 2.5mm 3.5mm;
+      padding: 0;
       background: var(--paper);
       color: var(--ink);
-      overflow: hidden;
       flex: 0 0 auto;
     }
     .brand {
-      text-align: center;
-      margin-bottom: 8px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 7px;
+      padding-bottom: 7px;
+      border-bottom: 2px solid var(--strong-line);
     }
     .brand-logo {
-      max-width: min(72%, 140px);
-      max-height: 52px;
+      width: 58px;
+      max-height: 46px;
       object-fit: contain;
-      margin: 0 auto 6px;
       display: block;
     }
     .brand-name {
       margin-bottom: 2px;
-      font-size: 17px;
+      font-size: 14px;
       line-height: 1.15;
-      font-weight: 800;
-      color: #000;
+      font-weight: 900;
+      color: var(--ink);
     }
     .brand-tagline {
       font-size: var(--detail-size);
-      line-height: 1.2;
+      line-height: 1.35;
       font-weight: 700;
-      color: #000;
+      color: #4b5563;
       margin-bottom: 2px;
     }
     h1 {
       margin: 0 0 6px 0;
       font-size: var(--title-size);
       line-height: 1.15;
-      font-weight: 800;
+      font-weight: 900;
       text-align: center;
       text-transform: uppercase;
-      color: #000;
+      color: var(--ink);
     }
     h2 {
-      margin: 10px 0 6px 0;
-      padding-top: 6px;
+      margin: 8px 0 4px 0;
+      padding: 4px 6px;
       font-size: var(--section-size);
       line-height: 1.18;
-      font-weight: 800;
+      font-weight: 900;
       text-transform: uppercase;
-      border-top: 1px solid var(--line);
-      color: #000;
+      border: 1px solid var(--line);
+      background: #f3f4f6;
+      color: var(--ink);
       page-break-after: avoid;
     }
     .meta {
       margin-bottom: 2px;
       font-size: var(--meta-size);
-      line-height: 1.22;
+      line-height: 1.4;
       font-weight: 700;
       text-align: center;
-      color: #000;
+      color: #374151;
     }
     .line {
       display: flex;
       justify-content: space-between;
       align-items: flex-start;
       gap: 8px;
-      margin-bottom: 3px;
+      padding: 2px 5px;
+      margin-bottom: 0;
       font-size: var(--body-size);
-      line-height: 1.24;
-      color: #000;
+      line-height: 1.35;
+      color: var(--ink);
+      border-bottom: 1px solid #edf0f3;
       page-break-inside: avoid;
     }
     .line span {
@@ -20112,26 +20907,101 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     .line strong {
       flex: 0 0 auto;
       font-size: var(--body-size);
-      font-weight: 800;
+      font-weight: 900;
       text-align: right;
-      color: #000;
+      color: var(--ink);
     }
     .muted {
-      margin-bottom: 4px;
+      margin-bottom: 2px;
       font-size: var(--detail-size);
-      line-height: 1.22;
+      line-height: 1.35;
       font-weight: 600;
-      color: #000;
+      color: #4b5563;
     }
     .mini-item {
-      margin-bottom: 6px;
+      margin-bottom: 3px;
+      padding: 4px 5px;
+      border: 1px solid #edf0f3;
+      border-radius: 6px;
       font-size: var(--detail-size);
-      line-height: 1.24;
-      color: #000;
+      line-height: 1.35;
+      color: var(--ink);
       page-break-inside: avoid;
     }
     .mini-item strong {
       font-weight: 800;
+    }
+    .report-meta-box {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 6px;
+      margin: 7px 0 6px;
+    }
+    .report-meta-cell {
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 5px 6px;
+      min-height: 34px;
+    }
+    .report-meta-label {
+      font-size: 7px;
+      color: #6b7280;
+      text-transform: uppercase;
+      font-weight: 900;
+      letter-spacing: .04em;
+      margin-bottom: 2px;
+    }
+    .report-meta-value {
+      font-size: 9px;
+      color: var(--ink);
+      font-weight: 900;
+    }
+    .section-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 6px;
+      align-items: start;
+    }
+    .section-card {
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      overflow: hidden;
+      break-inside: avoid;
+      page-break-inside: avoid;
+    }
+    .section-card h2 {
+      margin: 0;
+      border: 0;
+      border-bottom: 1px solid var(--line);
+      border-radius: 0;
+    }
+    .section-wide {
+      grid-column: auto;
+    }
+    .signature-section {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 22mm;
+      margin-top: 8mm;
+      page-break-inside: avoid;
+    }
+    .signature-box {
+      text-align: center;
+      min-height: 20mm;
+    }
+    .signature-role {
+      font-size: 10px;
+      font-weight: 900;
+      color: var(--ink);
+      margin-bottom: 11mm;
+    }
+    .signature-name {
+      border-bottom: 1.5px solid var(--strong-line);
+      padding: 0 8px 4px;
+      font-size: 10px;
+      font-weight: 900;
+      color: var(--ink);
+      min-height: 20px;
     }
     @media print {
       html, body {
@@ -20147,7 +21017,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         max-width: var(--page-width);
         margin-left: auto;
         margin-right: auto;
-        padding: 2.5mm 2.5mm 3.5mm;
+        padding: 0;
       }
     }
   </style>
@@ -20156,57 +21026,100 @@ const SalesScreen = ({ currentUser, onLogout }) => {
   <div class="wrap">
     <div class="brand">
       ${logoUrl ? `<img class="brand-logo" src="${escapeHtml(logoUrl)}" alt="Logo Toko" />` : ''}
-      <div class="brand-name">${escapeHtml(brandName)}</div>
-      ${brandTagline ? `<div class="brand-tagline">${escapeHtml(brandTagline)}</div>` : ''}
+      <div>
+        <div class="brand-name">${escapeHtml(brandName)}</div>
+        ${brandTagline ? `<div class="brand-tagline">${escapeHtml(brandTagline)}</div>` : ''}
+      </div>
     </div>
-    <h1>Laporan Close Order</h1>
-    <div class="meta">Tanggal: ${escapeHtml(reportDate)}</div>
-    <div class="meta">Kasir: ${escapeHtml(cashierName)}</div>
-    <h2>Omzet</h2>
-    <div class="line"><span>Omzet Total Invoice</span><strong>${escapeHtml(formatRupiah(omzetSummary.gross))}</strong></div>
-    <div class="line"><span>Omset Lunas</span><strong>${escapeHtml(formatRupiah(omzetSummary.lunas))}</strong></div>
-    <div class="line"><span>Omset Piutang</span><strong>${escapeHtml(formatRupiah(omzetSummary.piutang))}</strong></div>
-    <div class="line"><span>Bayar Penjualan Hari Ini</span><strong>${escapeHtml(formatRupiah(report?.sales?.payment_received_total || 0))}</strong></div>
-    <div class="line"><span>Invoice Lunas</span><strong>${escapeHtml(String(omzetSummary.invoiceLunasCount || 0))}</strong></div>
-    <div class="line"><span>Invoice Piutang</span><strong>${escapeHtml(String(omzetSummary.invoicePiutangCount || 0))}</strong></div>
+    <h1>Laporan Final Closing</h1>
+    <div class="report-meta-box">
+      <div class="report-meta-cell">
+        <div class="report-meta-label">Tanggal Closing</div>
+        <div class="report-meta-value">${escapeHtml(reportDate)}</div>
+      </div>
+      <div class="report-meta-cell">
+        <div class="report-meta-label">Kasir Pelapor</div>
+        <div class="report-meta-value">${escapeHtml(cashierName)}</div>
+      </div>
+      <div class="report-meta-cell">
+        <div class="report-meta-label">Finance Penerima</div>
+        <div class="report-meta-value">${escapeHtml(financeName)}</div>
+      </div>
+    </div>
 
-    <h2>Pelunasan Piutang</h2>
-    <div class="line"><span>Total Pelunasan</span><strong>${escapeHtml(formatRupiah(report?.receivable_collections?.total || 0))}</strong></div>
-    <div class="line"><span>Cash</span><strong>${escapeHtml(formatRupiah(report?.receivable_collections?.cash_total || 0))}</strong></div>
-    <div class="line"><span>Non Cash</span><strong>${escapeHtml(formatRupiah(report?.receivable_collections?.non_cash_total || 0))}</strong></div>
-    ${receivableLines}
+    <div class="section-grid">
+      <div class="section-card">
+        <h2>Omzet</h2>
+        <div class="line"><span>Omzet Total Invoice</span><strong>${escapeHtml(formatRupiah(omzetSummary.gross))}</strong></div>
+        <div class="line"><span>Omset Lunas</span><strong>${escapeHtml(formatRupiah(omzetSummary.lunas))}</strong></div>
+        <div class="line"><span>Omset Piutang</span><strong>${escapeHtml(formatRupiah(omzetSummary.piutang))}</strong></div>
+        <div class="line"><span>Bayar Penjualan Hari Ini</span><strong>${escapeHtml(formatRupiah(report?.sales?.payment_received_total || 0))}</strong></div>
+        <div class="line"><span>Top Up Deposit Agen</span><strong>${escapeHtml(formatRupiah(report?.deposit_topups?.amount || 0))}</strong></div>
+        <div class="line"><span>Invoice Lunas</span><strong>${escapeHtml(String(omzetSummary.invoiceLunasCount || 0))}</strong></div>
+        <div class="line"><span>Invoice Piutang</span><strong>${escapeHtml(String(omzetSummary.invoicePiutangCount || 0))}</strong></div>
+      </div>
 
-    <h2>Pembayaran</h2>
-    <div class="line"><span>Cash Sales</span><strong>${escapeHtml(formatRupiah(report?.payments?.cash_total || 0))}</strong></div>
-    <div class="line"><span>Transfer Sales</span><strong>${escapeHtml(formatRupiah(paymentMethodSummary.transfer))}</strong></div>
-    <div class="line"><span>QRIS Sales</span><strong>${escapeHtml(formatRupiah(paymentMethodSummary.qris))}</strong></div>
-    <div class="line"><span>Card Sales</span><strong>${escapeHtml(formatRupiah(paymentMethodSummary.card))}</strong></div>
-    <div class="line"><span>Saldo Pelanggan</span><strong>${escapeHtml(formatRupiah(paymentMethodSummary.customerDeposit))}</strong></div>
-    <div class="line"><span>Non Cash Sales</span><strong>${escapeHtml(formatRupiah(report?.payments?.non_cash_total || 0))}</strong></div>
-    ${paymentMethodSummary.other > 0 ? `<div class="line"><span>Metode Lain</span><strong>${escapeHtml(formatRupiah(paymentMethodSummary.other))}</strong></div>` : ''}
-    ${paymentLines}
-    <div class="line"><span>Pengeluaran</span><strong>${escapeHtml(formatRupiah(cashInHandSummary.expenseTotal))}</strong></div>
-    ${expensePaymentLines}
+      <div class="section-card">
+        <h2>Kasir vs Rekening</h2>
+        <div class="line"><span>Tunai di Kasir</span><strong>${escapeHtml(formatRupiah(cashInHandSummary.physicalCashExpected))}</strong></div>
+        <div class="line"><span>Cash Top Up Deposit</span><strong>${escapeHtml(formatRupiah(cashInHandSummary.cashDepositTopup || 0))}</strong></div>
+        <div class="line"><span>Non Tunai Rekening</span><strong>${escapeHtml(formatRupiah(nonCashSummary.total))}</strong></div>
+      </div>
 
-    <h2>Kasir vs Rekening</h2>
-    <div class="line"><span>Tunai di Kasir</span><strong>${escapeHtml(formatRupiah(cashInHandSummary.physicalCashExpected))}</strong></div>
-    <div class="line"><span>Non Tunai Rekening</span><strong>${escapeHtml(formatRupiah(nonCashSummary.total))}</strong></div>
+      <div class="section-card">
+        <h2>Pelunasan Piutang</h2>
+        <div class="line"><span>Total Pelunasan</span><strong>${escapeHtml(formatRupiah(report?.receivable_collections?.total || 0))}</strong></div>
+        <div class="line"><span>Cash</span><strong>${escapeHtml(formatRupiah(report?.receivable_collections?.cash_total || 0))}</strong></div>
+        <div class="line"><span>Non Cash</span><strong>${escapeHtml(formatRupiah(report?.receivable_collections?.non_cash_total || 0))}</strong></div>
+        ${receivableLines}
+      </div>
 
-    <h2>Barang Reject / Rusak</h2>
-    <div class="line"><span>Jumlah Item</span><strong>${escapeHtml(String(damageSummary.itemCount || 0))}</strong></div>
-    <div class="line"><span>Total Qty</span><strong>${escapeHtml(String(damageSummary.totalQty || 0))}</strong></div>
-    <div class="line"><span>Estimasi Nilai</span><strong>${escapeHtml(formatRupiah(damageSummary.totalEstimatedValue || 0))}</strong></div>
-    <div class="line"><span>Sudah Diaudit</span><strong>${escapeHtml(String(damageSummary.auditedCount || 0))}</strong></div>
-    ${damageLines}
+      <div class="section-card">
+        <h2>Pembayaran</h2>
+        <div class="line"><span>Cash Sales</span><strong>${escapeHtml(formatRupiah(report?.payments?.cash_total || 0))}</strong></div>
+        <div class="line"><span>Transfer Sales</span><strong>${escapeHtml(formatRupiah(paymentMethodSummary.transfer))}</strong></div>
+        <div class="line"><span>QRIS Sales</span><strong>${escapeHtml(formatRupiah(paymentMethodSummary.qris))}</strong></div>
+        <div class="line"><span>Card Sales</span><strong>${escapeHtml(formatRupiah(paymentMethodSummary.card))}</strong></div>
+        <div class="line"><span>Saldo Pelanggan</span><strong>${escapeHtml(formatRupiah(paymentMethodSummary.customerDeposit))}</strong></div>
+        <div class="line"><span>Top Up Deposit Agen</span><strong>${escapeHtml(formatRupiah(report?.deposit_topups?.amount || 0))}</strong></div>
+        <div class="line"><span>Non Cash Sales</span><strong>${escapeHtml(formatRupiah(report?.payments?.non_cash_total || 0))}</strong></div>
+        ${paymentMethodSummary.other > 0 ? `<div class="line"><span>Metode Lain</span><strong>${escapeHtml(formatRupiah(paymentMethodSummary.other))}</strong></div>` : ''}
+        ${paymentLines}
+        <div class="line"><span>Pengeluaran</span><strong>${escapeHtml(formatRupiah(cashInHandSummary.expenseTotal))}</strong></div>
+        ${expensePaymentLines}
+      </div>
 
-    <h2>Referensi Piutang</h2>
-    ${receivableRefs}
+      <div class="section-card section-wide">
+        <h2>Barang Reject / Rusak</h2>
+        <div class="line"><span>Jumlah Item</span><strong>${escapeHtml(String(damageSummary.itemCount || 0))}</strong></div>
+        <div class="line"><span>Total Qty</span><strong>${escapeHtml(String(damageSummary.totalQty || 0))}</strong></div>
+        <div class="line"><span>Estimasi Nilai</span><strong>${escapeHtml(formatRupiah(damageSummary.totalEstimatedValue || 0))}</strong></div>
+        <div class="line"><span>Sudah Diaudit</span><strong>${escapeHtml(String(damageSummary.auditedCount || 0))}</strong></div>
+        ${damageLines}
+      </div>
+
+      <div class="section-card section-wide">
+        <h2>Referensi Piutang</h2>
+        ${receivableRefs}
+      </div>
+    </div>
+
+    <div class="signature-section">
+      <div class="signature-box">
+        <div class="signature-role">Kasir Pelapor</div>
+        <div class="signature-name">${escapeHtml(cashierName)}</div>
+      </div>
+      <div class="signature-box">
+        <div class="signature-role">Finance Penerima</div>
+        <div class="signature-name">${escapeHtml(financeName)}</div>
+      </div>
+    </div>
   </div>
 </body>
 </html>`;
   };
 
-  const handlePrintClosingReport = async (overrideDate = null) => {
+  const buildClosingReportOutput = async (overrideDate = null) => {
     const explicitDate = (typeof overrideDate === 'string' || typeof overrideDate === 'number')
       ? String(overrideDate).trim()
       : '';
@@ -20225,15 +21138,57 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     }
 
     if (!reportToPrint) {
-      openNotice('Laporan Close Order', 'Generate laporan dulu sebelum dicetak.');
-      return;
+      return { html: '', reportDate, error: 'Generate laporan dulu sebelum dicetak.' };
     }
-    const html = buildClosingReportHtml(reportToPrint, damageItemsToPrint, reportDate);
+    const signerUsers = await ensureReportUsersLoaded();
+    const reportReceiptSettings = normalizeReceiptSettings(posSettings);
+    const configuredLogoUrl = await resolvePrintImageDataUrl(
+      reportReceiptSettings?.receipt_logo_url || resolveDefaultReceiptLogoUrl(),
+    );
+    const printableLogoUrl = /^data:image\//i.test(configuredLogoUrl)
+      ? configuredLogoUrl
+      : await resolveDefaultReceiptLogoDataUrl();
+    const html = buildClosingReportHtml(reportToPrint, damageItemsToPrint, reportDate, {
+      cashierName: userDisplayName || extractUserDisplayName(currentUser) || 'Kasir',
+      financeName: resolveFinanceSignerName(signerUsers),
+      logoUrl: printableLogoUrl,
+    });
     if (!html) {
-      openNotice('Laporan Close Order', 'HTML laporan belum berhasil dibuat.');
+      return { html: '', reportDate, error: 'HTML laporan belum berhasil dibuat.' };
+    }
+
+    return { html, reportDate, error: '' };
+  };
+
+  const handlePrintClosingReport = async (overrideDate = null) => {
+    const output = await buildClosingReportOutput(overrideDate);
+    if (output.error) {
+      openNotice('Laporan Close Order', output.error);
       return;
     }
-    printHtmlDocument(html, 'Cetak Laporan Close Order');
+
+    printHtmlDocument(output.html, 'Cetak Laporan Final Closing');
+  };
+
+  const handleExportClosingReportPdf = async (overrideDate = null) => {
+    const output = await buildClosingReportOutput(overrideDate);
+    if (output.error) {
+      openNotice('Export PDF Closing', output.error);
+      return;
+    }
+
+    const printed = printHtmlDocument(output.html, 'Export PDF Final Closing');
+    if (!printed) {
+      openNotice('Export PDF Closing', 'Export PDF tersedia pada aplikasi web/desktop.');
+      return;
+    }
+
+    openNotice(
+      'Export PDF Closing',
+      `Dialog cetak laporan ${output.reportDate || ''} dibuka. Pilih tujuan "Save as PDF" untuk menyimpan file PDF.`,
+      null,
+      { autoCloseMs: 4500 },
+    );
   };
 
   const orderPreviewSnapshot = buildOrderPreviewSnapshot();
@@ -20292,6 +21247,45 @@ const SalesScreen = ({ currentUser, onLogout }) => {
   );
   const processProofingSelectedUser = processProofingTargetUsers.find(
     (user) => Number(user?.id || 0) === Number(selectedProofingTargetUserId || 0),
+  );
+  const detailInvoiceRow = invoiceDetailModal.row || null;
+  const detailInvoiceDueTotal = Number(detailInvoiceRow?.invoice?.due_total || 0) || 0;
+  const detailInvoicePaidTotal = Number(detailInvoiceRow?.invoice?.paid_total || 0) || 0;
+  const detailInvoiceTotal = detailInvoiceRow ? resolveInvoiceRowTotalAmount(detailInvoiceRow) : 0;
+  const detailInvoiceIsDraft = detailInvoiceRow ? isDraftInvoiceRow(detailInvoiceRow) : false;
+  const detailInvoicePaymentLifecycle = detailInvoiceRow ? resolveInvoicePaymentLifecycle(detailInvoiceRow) : null;
+  const detailInvoiceDueMeta = detailInvoiceRow ? resolveReceivableDueMeta(detailInvoiceRow) : null;
+  const detailInvoicePaymentMethodLabel = detailInvoiceRow ? resolveOrderPaymentMethodLabel(detailInvoiceRow) : '';
+  const detailInvoicePaymentTargetLabel = detailInvoiceRow ? resolveOrderPaymentTargetLabel(detailInvoiceRow, bankAccounts) : '';
+  const detailInvoiceProviderSummary = detailInvoiceRow ? resolveInvoiceProviderPaymentSummary(detailInvoiceRow) : null;
+  const detailInvoiceProviderStatus = normalizeDanaQrisStatus(detailInvoiceProviderSummary?.status || '');
+  const detailInvoiceCanOpenProviderPayment = Boolean(
+    detailInvoiceProviderSummary
+    && (
+      detailInvoiceProviderSummary.isActive
+      || ['failed', 'expired', 'cancelled', 'refund_required'].includes(detailInvoiceProviderStatus)
+      || detailInvoiceProviderSummary.checkoutUrl
+      || detailInvoiceProviderSummary.qrContent
+      || detailInvoiceProviderSummary.qrUrl
+      || detailInvoiceProviderSummary.qrImage
+    )
+  );
+  const detailInvoiceCanPayReceivable = Boolean(
+    detailInvoiceRow
+    && !detailInvoiceIsDraft
+    && detailInvoiceDueTotal > 0
+    && detailInvoiceRow?.invoice?.can_pay
+  );
+  const detailInvoiceCanRemindReceivable = Boolean(
+    detailInvoiceRow
+    && !detailInvoiceIsDraft
+    && detailInvoiceDueTotal > 0
+    && detailInvoiceDueMeta?.isOverdue
+  );
+  const detailInvoiceCanPrintBillingNote = Boolean(
+    detailInvoiceRow
+    && detailInvoicePaymentLifecycle?.key !== 'paid'
+    && (detailInvoiceIsDraft || detailInvoiceDueTotal > 0 || detailInvoiceTotal > detailInvoicePaidTotal)
   );
 
   if (isPreparingApp) {
@@ -20400,13 +21394,6 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       onPress: () => setActiveMenu('expense'),
     },
     {
-      key: 'closing_store',
-      label: 'Closing Toko',
-      iconSource: require('../../assets/menu-icons/closing-store.svg'),
-      active: activeMenu === 'closing_store',
-      onPress: () => setActiveMenu('closing_store'),
-    },
-    {
       key: 'closing_archive',
       label: 'Arsip Closing',
       iconSource: require('../../assets/menu-icons/closing-archive.svg'),
@@ -20507,7 +21494,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                   onSelectCustomerId={setSelectedCustomerId}
                   customerTypes={customerTypes}
                   onCreateCustomer={handleCreateCustomer}
-                  backendReady={backendReady}
+                  backendReady={backendReady && !posInputLockedByClosing}
                   customerDepositBalance={customerDepositBalance}
                   onPressDeposit={openDepositModal}
                   loadingDepositBalance={loadingDepositBalance}
@@ -20517,6 +21504,9 @@ const SalesScreen = ({ currentUser, onLogout }) => {
 
                 <View style={styles.tagihanPanel}>
                   <Text style={styles.tagihanText}>Tagihan : {formatRupiah(grandTotal)}</Text>
+                  {posInputLockedByClosing ? (
+                    <Text style={[styles.payloadFlag, styles.payloadFlagError]}>Input order dikunci setelah final closing.</Text>
+                  ) : null}
                   {queueCount > 0 ? <Text style={styles.payloadFlag}>Antrian order offline tersisa: {queueCount}</Text> : null}
                   {lastSyncInfo ? <Text style={styles.payloadFlag}>{lastSyncInfo}</Text> : null}
                   {masterSyncStatus?.label ? (
@@ -20542,6 +21532,16 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                 </View>
               </View>
 
+              {posInputLockedByClosing ? (
+                <View style={styles.closingInputLockCard}>
+                  <Text style={styles.closingInputLockTitle}>Input Order Terkunci</Text>
+                  <Text style={styles.closingInputLockText}>{posInputLockedMessage}</Text>
+                  <Text style={styles.closingInputLockMeta}>
+                    Kasir masih bisa membuka Invoice, Produksi, Laporan, dan Arsip Closing. Transaksi baru dapat dibuat lagi setelah tanggal operasional melewati tanggal closing terkunci.
+                  </Text>
+                </View>
+              ) : (
+              <>
               <ProductForm
                 productName={productName}
                 productPickerTree={productPickerTree}
@@ -20629,8 +21629,6 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                 }}
                 bookPrintRulePreview={bookPrintRulePreview}
                 bookPageValidation={selectedBookPageValidation}
-                pages={pages}
-                onChangePages={(value) => setPages(sanitizeNumericInput(value))}
                 bookPrintRulePrompt={
                   String(bookFinishedSize || '').trim().toUpperCase() === 'CUSTOM'
                     ? (
@@ -20696,28 +21694,42 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                 isSubmitting={isSubmitting}
                 deferPaymentMethodSelection
               />
+              </>
+              )}
             </>
           ) : isInvoiceAreaMenu(activeMenu) ? (
             <View style={styles.draftPanel}>
               <InvoiceWorkspaceHeader
                 sectionMeta={invoiceSectionMeta}
-                onFlushQueue={async () => {
-                  await flushQueuedOrders();
+                onOpenClosingStore={handleDashboardClosingStoreAction}
+                closingStoreActionLabel={dashboardClosingAction.label}
+                closingStoreActionTone={dashboardClosingAction.tone}
+                onRefresh={async () => {
                   await loadDraftInvoices({ area: invoiceFilter, page: 1, forceServer: true });
+                  await loadInvoiceDashboardSummary();
                 }}
-                onRefresh={() => loadDraftInvoices({ area: invoiceFilter, page: 1, forceServer: true })}
                 isLoading={isDraftLoading}
                 invoiceListMeta={invoiceListMeta}
                 invoiceRealtimeState={invoiceRealtimeState}
-                onApplyRealtimeUpdates={() => loadDraftInvoices({ area: invoiceFilter, page: 1, forceServer: true })}
+                onApplyRealtimeUpdates={async () => {
+                  await loadDraftInvoices({ area: invoiceFilter, page: 1, forceServer: true });
+                  await loadInvoiceDashboardSummary();
+                }}
                 invoiceFilter={invoiceFilter}
                 onSelectAreaMenu={openInvoiceAreaMenu}
                 onSelectAreaFilter={openInvoiceAreaFilter}
-                invoiceAreaSummary={invoiceAreaSummary}
+                invoiceAreaSummary={invoiceDashboardAreaSummary}
                 approvalStatusFilter={approvalStatusFilter}
                 onChangeApprovalStatusFilter={setApprovalStatusFilter}
                 invoiceSearch={invoiceSearch}
                 onChangeInvoiceSearch={setInvoiceSearch}
+                invoiceStatusFilter={invoiceStatusFilter}
+                onChangeInvoiceStatusFilter={setInvoiceStatusFilter}
+                invoicePaymentMethodFilter={invoicePaymentMethodFilter}
+                onChangeInvoicePaymentMethodFilter={setInvoicePaymentMethodFilter}
+                invoiceCustomerTypeFilter={invoiceCustomerTypeFilter}
+                onChangeInvoiceCustomerTypeFilter={setInvoiceCustomerTypeFilter}
+                paymentMethodOptions={checkoutPaymentMethodOptions}
                 invoiceCashierId={invoiceCashierId}
                 cashierOptions={invoiceCashierOptions}
                 isCashierLoading={isInvoiceCashierLoading}
@@ -20731,12 +21743,15 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                   setInvoiceDateFrom('');
                   setInvoiceDateTo('');
                 }}
+                activeOperationalSummaryKey={invoiceOperationalSummaryFilter}
+                onSelectOperationalSummary={openInvoiceOperationalSummaryFilter}
               />
               <InvoiceWorkspaceContent
                 filteredSummary={filteredInvoiceSummary}
                 customerSummary={receivableCustomerSummary}
                 portfolioSummary={receivablePortfolioSummary}
                 approvalSummary={approvalPortfolioSummary}
+                listVariant="invoice_success"
                 hasRows={filteredInvoices.length > 0}
                 formatDateText={formatDateText}
                 emptyMessage={
@@ -21040,11 +22055,15 @@ const SalesScreen = ({ currentUser, onLogout }) => {
               isActive={activeMenu === 'closing_store'}
               onNotify={openNotice}
               onPrintReport={handlePrintClosingReport}
+              onExportPdfReport={handleExportClosingReportPdf}
+              autoOpenFinalizeToken={closingAutoFinalizeToken}
             />
           ) : activeMenu === 'closing_archive' ? (
             <ClosingArchivePanel
               isActive={activeMenu === 'closing_archive'}
               onNotify={openNotice}
+              onPrintReport={handlePrintClosingReport}
+              onExportPdfReport={handleExportClosingReportPdf}
             />
           ) : activeMenu === 'report' ? (
             <View style={[styles.draftPanel, styles.reportDashboardPanel]}>
@@ -21170,6 +22189,9 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                   </Pressable>
                   <Pressable style={[styles.refreshButton, styles.reportPrintButton]} onPress={() => handlePrintClosingReport()}>
                     <Text style={styles.refreshButtonText}>Print Laporan</Text>
+                  </Pressable>
+                  <Pressable style={[styles.refreshButton, styles.reportPrintButton]} onPress={() => handleExportClosingReportPdf()}>
+                    <Text style={styles.refreshButtonText}>Export PDF</Text>
                   </Pressable>
                 </View>
               </View>
@@ -21390,6 +22412,10 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                       <Text style={styles.reportSummaryLabel}>Pelunasan Piutang Hari Ini</Text>
                       <Text style={styles.reportSummaryValue}>{formatRupiah(closingReport?.receivable_collections?.total || 0)}</Text>
                     </View>
+                    <View style={[styles.reportSummaryCard, styles.reportSummaryCardAccent]}>
+                      <Text style={styles.reportSummaryLabel}>Top Up Deposit Agen</Text>
+                      <Text style={styles.reportSummaryValue}>{formatRupiah(closingReport?.deposit_topups?.amount || 0)}</Text>
+                    </View>
                     <View style={[styles.reportSummaryCard, styles.reportSummaryCardCash]}>
                       <Text style={styles.reportSummaryLabel}>Kas Masuk Bersih</Text>
                       <Text style={styles.reportSummaryValue}>{formatRupiah(closingReport?.closing?.net_cash_movement || 0)}</Text>
@@ -21441,6 +22467,10 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                     <View style={[styles.reportSummaryCard, styles.reportSummaryCardWarning]}>
                       <Text style={styles.reportSummaryLabel}>Pengeluaran</Text>
                       <Text style={styles.reportSummaryValue}>{formatRupiah(closingCashInHandSummary.expenseTotal)}</Text>
+                    </View>
+                    <View style={[styles.reportSummaryCard, styles.reportSummaryCardAccent]}>
+                      <Text style={styles.reportSummaryLabel}>Top Up Deposit Agen</Text>
+                      <Text style={styles.reportSummaryValue}>{formatRupiah(closingReport?.deposit_topups?.amount || 0)}</Text>
                     </View>
                     {closingExpensePaymentRows.map((row) => (
                       <View key={`expense-method-${row.method}`} style={[styles.reportSummaryCard, row.method === 'cash' ? styles.reportSummaryCardCash : styles.reportSummaryCardNonCash]}>
@@ -21509,6 +22539,12 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                       <Text style={styles.reportLineLabel}>Cash dari pelunasan piutang</Text>
                       <Text style={[styles.reportLineValue, styles.reportCashValue]}>{formatRupiah(closingCashInHandSummary.cashReceivable)}</Text>
                     </View>
+                    {closingCashInHandSummary.cashDepositTopup > 0 ? (
+                      <View style={styles.reportLineRow}>
+                        <Text style={styles.reportLineLabel}>Cash dari top up deposit agen</Text>
+                        <Text style={[styles.reportLineValue, styles.reportCashValue]}>{formatRupiah(closingCashInHandSummary.cashDepositTopup)}</Text>
+                      </View>
+                    ) : null}
                     {closingCashInHandSummary.cashIncomeOther > 0 ? (
                       <View style={styles.reportLineRow}>
                         <Text style={styles.reportLineLabel}>Pemasukan cash non-penjualan</Text>
@@ -21533,6 +22569,12 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                       <Text style={styles.reportLineLabel}>Non tunai pelunasan piutang</Text>
                       <Text style={[styles.reportLineValue, styles.reportNonCashValue]}>{formatRupiah(closingNonCashSummary.nonCashReceivable)}</Text>
                     </View>
+                    {closingNonCashSummary.nonCashDepositTopup > 0 ? (
+                      <View style={styles.reportLineRow}>
+                        <Text style={styles.reportLineLabel}>Non tunai top up deposit agen</Text>
+                        <Text style={[styles.reportLineValue, styles.reportNonCashValue]}>{formatRupiah(closingNonCashSummary.nonCashDepositTopup)}</Text>
+                      </View>
+                    ) : null}
                     <View style={[styles.reportLineRow, styles.reportLineRowEmphasis]}>
                       <Text style={styles.reportLineLabel}>Total non tunai ke rekening</Text>
                       <Text style={[styles.reportLineValue, styles.reportNonCashValueStrong]}>{formatRupiah(closingNonCashSummary.total)}</Text>
@@ -21943,7 +22985,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                     posReceiptSettings.receipt_show_payment_detail ? 'Pembayaran' : null,
                   ].filter(Boolean).join(' | ') || 'Semua baris opsional disembunyikan'}
                 </Text>
-                <Text style={styles.printerTargetSecondary}>Ubah dari Backend: Point Of Sale > Pengaturan POS.</Text>
+                <Text style={styles.printerTargetSecondary}>Ubah dari Backend: Point Of Sale {'>'} Pengaturan POS.</Text>
               </View>
               <Text style={styles.debugText}>{printerProfileSummary}</Text>
               <View style={styles.printerToolsCard}>
@@ -21987,6 +23029,56 @@ const SalesScreen = ({ currentUser, onLogout }) => {
           )}
         </View>
       </ScrollView>
+
+      <Modal
+        visible={isClosingStoreModalVisible}
+        transparent
+        animationType="fade"
+        onRequestClose={closeClosingStoreModal}
+      >
+        <View style={styles.popupBackdrop}>
+          {closingStoreModalMode === 'finalize' ? (
+            <ClosingStorePanel
+              currentUser={currentUser}
+              isActive={isClosingStoreModalVisible}
+              onNotify={openNotice}
+              onPrintReport={handlePrintClosingReport}
+              onExportPdfReport={handleExportClosingReportPdf}
+              autoOpenFinalizeToken={closingAutoFinalizeToken}
+              finalizeOnly
+              onFinalizeModalClose={closeClosingStoreModal}
+              onReviewClosing={reviewClosingFromFinalConfirmation}
+            />
+          ) : (
+            <View style={styles.closingStoreModalCard}>
+              <View style={styles.closingStoreModalHeader}>
+                <View style={styles.closingStoreModalTitleBlock}>
+                  <Text style={styles.closingStoreModalEyebrow}>Closing Toko</Text>
+                  <Text style={styles.closingStoreModalTitle}>{closingStoreModalTitle}</Text>
+                  <Text style={styles.closingStoreModalSubtitle}>
+                    {closingStoreModalSubtitle}
+                  </Text>
+                </View>
+                <Pressable style={styles.closingStoreModalCloseButton} onPress={closeClosingStoreModal}>
+                  <Text style={styles.closingStoreModalCloseText}>Tutup</Text>
+                </Pressable>
+              </View>
+              <ScrollView
+                style={styles.closingStoreModalScroll}
+                contentContainerStyle={styles.closingStoreModalScrollContent}
+              >
+                <ClosingStorePanel
+                  currentUser={currentUser}
+                  isActive={isClosingStoreModalVisible}
+                  onNotify={openNotice}
+                  onPrintReport={handlePrintClosingReport}
+                  onExportPdfReport={handleExportClosingReportPdf}
+                />
+              </ScrollView>
+            </View>
+          )}
+        </View>
+      </Modal>
 
       <Modal
         visible={isPreparingApp}
@@ -23610,50 +24702,159 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       >
         <View style={styles.popupBackdrop}>
           <View style={[styles.popupCard, styles.invoiceDetailCard]}>
-            <Text style={styles.popupTitle}>Detail Invoice</Text>
+            <View style={styles.invoiceDetailHeader}>
+              <View style={styles.invoiceDetailHeaderInfo}>
+                <Text style={styles.invoiceDetailEyebrow}>Detail Invoice</Text>
+                <Text style={styles.invoiceDetailTitle}>{invoiceDetailModal.invoiceNo || '-'}</Text>
+                <Text style={styles.invoiceDetailSubtitle}>{invoiceDetailModal.customerName || 'Pelanggan umum'}</Text>
+              </View>
+              <View style={styles.invoiceDetailHeaderBadge}>
+                <Text style={styles.invoiceDetailHeaderBadgeText}>
+                  {detailInvoiceDueTotal > 0 ? (detailInvoicePaidTotal > 0 ? 'DP / Belum Lunas' : 'Belum Lunas') : 'Lunas'}
+                </Text>
+              </View>
+            </View>
             <ScrollView style={styles.invoiceDetailList} contentContainerStyle={styles.invoiceDetailListContent}>
-              <Text style={styles.popupMessage}>Order ID: {invoiceDetailModal.orderId}</Text>
-              <Text style={styles.popupMessage}>Invoice: {invoiceDetailModal.invoiceNo}</Text>
-              <Text style={styles.popupMessage}>Customer: {invoiceDetailModal.customerName}</Text>
-              {String(invoiceDetailModal.note || '').trim() ? (
-                <Text style={styles.popupMessage}>Catatan: {invoiceDetailModal.note}</Text>
+              <View style={styles.invoiceDetailSection}>
+                <Text style={styles.invoiceDetailSectionTitle}>Identitas Transaksi</Text>
+                <View style={styles.invoiceDetailInfoGrid}>
+                  <View style={styles.invoiceDetailInfoCell}>
+                    <Text style={styles.invoiceDetailInfoLabel}>Order ID</Text>
+                    <Text style={styles.invoiceDetailInfoValue}>{invoiceDetailModal.orderId || '-'}</Text>
+                  </View>
+                  <View style={styles.invoiceDetailInfoCell}>
+                    <Text style={styles.invoiceDetailInfoLabel}>Nomor Invoice</Text>
+                    <Text style={styles.invoiceDetailInfoValue}>{invoiceDetailModal.invoiceNo || '-'}</Text>
+                  </View>
+                  <View style={styles.invoiceDetailInfoCell}>
+                    <Text style={styles.invoiceDetailInfoLabel}>Customer</Text>
+                    <Text style={styles.invoiceDetailInfoValue}>{invoiceDetailModal.customerName || 'Pelanggan umum'}</Text>
+                  </View>
+                  <View style={styles.invoiceDetailInfoCell}>
+                    <Text style={styles.invoiceDetailInfoLabel}>Tanggal</Text>
+                    <Text style={styles.invoiceDetailInfoValue}>{invoiceDetailModal.createdAt || '-'}</Text>
+                  </View>
+                  <View style={styles.invoiceDetailInfoCell}>
+                    <Text style={styles.invoiceDetailInfoLabel}>Total Item</Text>
+                    <Text style={styles.invoiceDetailInfoValue}>{invoiceDetailModal.itemCount || 0} item</Text>
+                  </View>
+                  <View style={styles.invoiceDetailInfoCell}>
+                    <Text style={styles.invoiceDetailInfoLabel}>Total Invoice</Text>
+                    <Text style={styles.invoiceDetailInfoValueStrong}>{formatRupiah(invoiceDetailModal.total)}</Text>
+                  </View>
+                </View>
+                {String(invoiceDetailModal.note || '').trim() ? (
+                  <View style={styles.invoiceDetailNoteBox}>
+                    <Text style={styles.invoiceDetailInfoLabel}>Catatan</Text>
+                    <Text style={styles.invoiceDetailNoteText}>{invoiceDetailModal.note}</Text>
+                  </View>
+                ) : null}
+              </View>
+              {detailInvoiceRow ? (
+                <View style={styles.invoiceDetailPaymentBox}>
+                  <Text style={styles.invoiceDetailSectionTitle}>Info Pembayaran</Text>
+                  <View style={styles.invoiceDetailPaymentSummaryRow}>
+                    <View style={styles.invoiceDetailPaymentMetric}>
+                      <Text style={styles.invoiceDetailInfoLabel}>Status</Text>
+                      <Text style={[
+                        styles.invoiceDetailInfoValueStrong,
+                        detailInvoiceDueTotal > 0 ? styles.invoiceDetailDangerText : styles.invoiceDetailSuccessText,
+                      ]}>
+                        {detailInvoiceDueTotal > 0 ? (detailInvoicePaidTotal > 0 ? 'DP / Belum Lunas' : 'Belum Lunas') : 'Lunas'}
+                      </Text>
+                    </View>
+                    <View style={styles.invoiceDetailPaymentMetric}>
+                      <Text style={styles.invoiceDetailInfoLabel}>Terbayar</Text>
+                      <Text style={styles.invoiceDetailInfoValueStrong}>{formatRupiah(detailInvoicePaidTotal)}</Text>
+                    </View>
+                    <View style={styles.invoiceDetailPaymentMetric}>
+                      <Text style={styles.invoiceDetailInfoLabel}>Sisa Piutang</Text>
+                      <Text style={[
+                        styles.invoiceDetailInfoValueStrong,
+                        detailInvoiceDueTotal > 0 ? styles.invoiceDetailDangerText : null,
+                      ]}>
+                        {detailInvoiceDueTotal > 0 ? formatRupiah(detailInvoiceDueTotal) : '-'}
+                      </Text>
+                    </View>
+                  </View>
+                  <View style={styles.invoiceDetailInfoGrid}>
+                    <View style={styles.invoiceDetailInfoCell}>
+                      <Text style={styles.invoiceDetailInfoLabel}>Metode</Text>
+                      <Text style={styles.invoiceDetailInfoValue}>{detailInvoicePaymentMethodLabel || '-'}</Text>
+                    </View>
+                    <View style={styles.invoiceDetailInfoCell}>
+                      <Text style={styles.invoiceDetailInfoLabel}>Akun / Tujuan</Text>
+                      <Text style={styles.invoiceDetailInfoValue}>{detailInvoicePaymentTargetLabel || '-'}</Text>
+                    </View>
+                    <View style={styles.invoiceDetailInfoCellWide}>
+                      <Text style={styles.invoiceDetailInfoLabel}>Agenda Pelunasan</Text>
+                      <Text
+                        style={[
+                          styles.invoiceDetailInfoValue,
+                          detailInvoiceDueMeta?.isOverdue ? styles.invoiceDetailDangerText : null,
+                        ]}
+                      >
+                        {detailInvoiceDueTotal > 0 ? (detailInvoiceDueMeta?.label || 'Agenda belum diisi') : '-'}
+                        {detailInvoiceDueTotal > 0 && detailInvoiceDueMeta?.statusLabel ? ` | ${detailInvoiceDueMeta.statusLabel}` : ''}
+                      </Text>
+                    </View>
+                  </View>
+                </View>
               ) : null}
-              <Text style={styles.popupMessage}>Status Order: {invoiceDetailModal.orderStatus}</Text>
-              <Text style={styles.popupMessage}>Produksi Ringkas: {invoiceDetailModal.productionSummary}</Text>
+              <View style={styles.invoiceDetailSection}>
+                <Text style={styles.invoiceDetailSectionTitle}>Status Pekerjaan</Text>
+                <View style={styles.invoiceDetailInfoGrid}>
+                  <View style={styles.invoiceDetailInfoCell}>
+                    <Text style={styles.invoiceDetailInfoLabel}>Status Order</Text>
+                    <Text style={styles.invoiceDetailInfoValue}>{invoiceDetailModal.orderStatus || '-'}</Text>
+                  </View>
+                  <View style={styles.invoiceDetailInfoCell}>
+                    <Text style={styles.invoiceDetailInfoLabel}>Produksi</Text>
+                    <Text style={styles.invoiceDetailInfoValue}>{invoiceDetailModal.productionSummary || '-'}</Text>
+                  </View>
+                  <View style={styles.invoiceDetailInfoCell}>
+                    <Text style={styles.invoiceDetailInfoLabel}>Pengambilan</Text>
+                    <Text style={styles.invoiceDetailInfoValue}>{invoiceDetailModal.pickedUpText || '-'}</Text>
+                  </View>
+                </View>
               {String(invoiceDetailModal.proofingSummary || '').trim() ? (
-                <>
-                  <Text style={styles.popupMessage}>
-                    {String(invoiceDetailModal.proofingSummarySectionLabel || 'Proofing Ringkas')}:{' '}
-                    <Text style={{ color: invoiceDetailModal.proofingSummaryColor || '#6b7280' }}>
-                      {invoiceDetailModal.proofingSummary}
-                    </Text>
+                <View style={styles.invoiceDetailNoteBox}>
+                  <Text style={styles.invoiceDetailInfoLabel}>{String(invoiceDetailModal.proofingSummarySectionLabel || 'Proofing Ringkas')}</Text>
+                  <Text style={[styles.invoiceDetailNoteText, { color: invoiceDetailModal.proofingSummaryColor || '#34405f' }]}>
+                    {invoiceDetailModal.proofingSummary}
                   </Text>
                   {String(invoiceDetailModal.proofingSummaryNote || '').trim() ? (
-                    <Text style={styles.popupMessage}>{invoiceDetailModal.proofingSummaryNote}</Text>
+                    <Text style={styles.invoiceDetailNoteText}>{invoiceDetailModal.proofingSummaryNote}</Text>
                   ) : null}
-                </>
+                </View>
               ) : null}
-              <Text style={styles.popupMessage}>Item: {invoiceDetailModal.itemCount} | Total: {formatRupiah(invoiceDetailModal.total)}</Text>
+              </View>
               {invoiceDetailModal.providerPaymentSummary ? (
-                <>
-                  <Text style={styles.popupMessage}>
-                    Payment Online: {invoiceDetailModal.providerPaymentSummary.methodLabel} | {invoiceDetailModal.providerPaymentSummary.statusLabel}
-                  </Text>
+                <View style={styles.invoiceDetailSection}>
+                  <Text style={styles.invoiceDetailSectionTitle}>Payment Online</Text>
+                  <View style={styles.invoiceDetailInfoGrid}>
+                    <View style={styles.invoiceDetailInfoCell}>
+                      <Text style={styles.invoiceDetailInfoLabel}>Metode</Text>
+                      <Text style={styles.invoiceDetailInfoValue}>{invoiceDetailModal.providerPaymentSummary.methodLabel || '-'}</Text>
+                    </View>
+                    <View style={styles.invoiceDetailInfoCell}>
+                      <Text style={styles.invoiceDetailInfoLabel}>Status Provider</Text>
+                      <Text style={styles.invoiceDetailInfoValue}>{invoiceDetailModal.providerPaymentSummary.statusLabel || '-'}</Text>
+                    </View>
+                  </View>
                   {formatDanaProviderPaymentCountdownLabel(invoiceDetailModal.providerPaymentSummary, providerPaymentTick) ? (
-                    <Text style={styles.popupMessage}>
+                    <Text style={styles.invoiceDetailNoteText}>
                       Sisa waktu bayar: {formatDanaProviderPaymentCountdownLabel(invoiceDetailModal.providerPaymentSummary, providerPaymentTick)}
                     </Text>
                   ) : null}
                   {String(invoiceDetailModal.providerPaymentSummary.providerMessage || '').trim() ? (
-                    <Text style={styles.popupMessage}>
+                    <Text style={styles.invoiceDetailNoteText}>
                       Provider: {invoiceDetailModal.providerPaymentSummary.providerStatusCode ? `${invoiceDetailModal.providerPaymentSummary.providerStatusCode} - ` : ''}
                       {invoiceDetailModal.providerPaymentSummary.providerMessage}
                     </Text>
                   ) : null}
-                </>
+                </View>
               ) : null}
-              <Text style={styles.popupMessage}>Pengambilan: {invoiceDetailModal.pickedUpText}</Text>
-              <Text style={styles.popupMessage}>Tanggal: {invoiceDetailModal.createdAt}</Text>
               {Array.isArray(invoiceDetailModal.auditLines) && invoiceDetailModal.auditLines.length > 0 ? (
                 <View style={styles.invoiceAuditBox}>
                   <Text style={styles.invoiceAuditTitle}>Histori Tanggung Jawab</Text>
@@ -23683,7 +24884,9 @@ const SalesScreen = ({ currentUser, onLogout }) => {
               ) : null}
 
               {Array.isArray(invoiceDetailModal.items) && invoiceDetailModal.items.length > 0 ? (
-                invoiceDetailModal.items.map((item, index) => (
+                <View style={styles.invoiceDetailSection}>
+                  <Text style={styles.invoiceDetailSectionTitle}>Detail Item Pesanan</Text>
+                  {invoiceDetailModal.items.map((item, index) => (
                   <View key={`${item.key}-${index}`} style={styles.invoiceItemCard}>
                     <View style={styles.invoiceItemHeader}>
                       <Text style={styles.invoiceItemTitle}>{index + 1}. {item.productName}</Text>
@@ -23786,7 +24989,8 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                     <Text style={styles.invoiceItemMeta}>Catatan: {item.note}</Text>
                     <Text style={styles.invoiceItemTotal}>Total Item: {formatRupiah(item.lineTotal)}</Text>
                   </View>
-                ))
+                  ))}
+                </View>
               ) : (
                 <Text style={styles.invoiceDetailEmpty}>Tidak ada detail item pada invoice ini.</Text>
               )}
@@ -23807,6 +25011,90 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                   }}
                 >
                   <Text style={styles.popupButtonText}>Pengambilan</Text>
+                </Pressable>
+              ) : null}
+              {detailInvoiceCanOpenProviderPayment ? (
+                <Pressable
+                  style={styles.popupButton}
+                  onPress={() => {
+                    const targetRow = detailInvoiceRow;
+                    closeInvoiceDetailModal();
+                    if (targetRow) {
+                      handleOpenProviderPaymentMonitor(targetRow);
+                    }
+                  }}
+                >
+                  <Text style={styles.popupButtonText}>Lihat Pembayaran</Text>
+                </Pressable>
+              ) : null}
+              {detailInvoiceCanPayReceivable ? (
+                <Pressable
+                  style={styles.popupButton}
+                  onPress={() => {
+                    const targetRow = detailInvoiceRow;
+                    closeInvoiceDetailModal();
+                    if (targetRow) {
+                      handleOpenReceivablePaymentModal(targetRow);
+                    }
+                  }}
+                >
+                  <Text style={styles.popupButtonText}>Bayar Piutang</Text>
+                </Pressable>
+              ) : null}
+              {detailInvoiceCanRemindReceivable ? (
+                <Pressable
+                  style={[styles.popupButton, styles.popupButtonSecondary]}
+                  onPress={() => {
+                    const targetRow = detailInvoiceRow;
+                    closeInvoiceDetailModal();
+                    if (targetRow) {
+                      handleRemindReceivableDue(targetRow);
+                    }
+                  }}
+                >
+                  <Text style={[styles.popupButtonText, styles.popupButtonTextSecondary]}>Reminder WA</Text>
+                </Pressable>
+              ) : null}
+              {detailInvoiceCanPrintBillingNote ? (
+                <>
+                  <Pressable
+                    style={styles.popupButton}
+                    onPress={() => {
+                      const targetRow = detailInvoiceRow;
+                      closeInvoiceDetailModal();
+                      if (targetRow) {
+                        handlePrintBillingNote(targetRow);
+                      }
+                    }}
+                  >
+                    <Text style={styles.popupButtonText}>Print Tagihan</Text>
+                  </Pressable>
+                  <Pressable
+                    style={[styles.popupButton, styles.popupButtonSecondary]}
+                    onPress={() => {
+                      const targetRow = detailInvoiceRow;
+                      closeInvoiceDetailModal();
+                      if (targetRow) {
+                        handleShareBillingNote(targetRow);
+                      }
+                    }}
+                  >
+                    <Text style={[styles.popupButtonText, styles.popupButtonTextSecondary]}>Share Tagihan</Text>
+                  </Pressable>
+                </>
+              ) : null}
+              {detailInvoiceRow && !isReceivableApprovalInvoiceRow(detailInvoiceRow) ? (
+                <Pressable
+                  style={[styles.popupButton, styles.popupButtonSecondary]}
+                  onPress={() => {
+                    const targetRow = detailInvoiceRow;
+                    closeInvoiceDetailModal();
+                    if (targetRow) {
+                      handleReprintInvoice(targetRow);
+                    }
+                  }}
+                >
+                  <Text style={[styles.popupButtonText, styles.popupButtonTextSecondary]}>Cetak Ulang</Text>
                 </Pressable>
               ) : null}
             </View>
@@ -24268,6 +25556,32 @@ const styles = StyleSheet.create({
   payloadFlagError: {
     color: '#b42318',
   },
+  closingInputLockCard: {
+    borderWidth: 1,
+    borderColor: '#f2b8a8',
+    backgroundColor: '#fff7f3',
+    borderRadius: 14,
+    padding: 16,
+    gap: 7,
+    marginBottom: 10,
+  },
+  closingInputLockTitle: {
+    color: '#b42318',
+    fontSize: 16,
+    fontWeight: '900',
+  },
+  closingInputLockText: {
+    color: '#7a271a',
+    fontSize: 12,
+    fontWeight: '800',
+    lineHeight: 18,
+  },
+  closingInputLockMeta: {
+    color: '#8a4b3a',
+    fontSize: 11,
+    fontWeight: '700',
+    lineHeight: 16,
+  },
   syncStatusInlineCard: {
     marginTop: 6,
     alignSelf: 'flex-start',
@@ -24594,27 +25908,6 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
     paddingVertical: 9,
     marginBottom: 8,
-  },
-  receivableDueText: {
-    fontSize: 11,
-    fontWeight: '700',
-    color: '#8a6b00',
-  },
-  receivableOverdueText: {
-    color: '#c53333',
-  },
-  receivablePayButton: {
-    borderWidth: 1,
-    borderColor: '#1d7a45',
-    backgroundColor: '#2d9d58',
-    borderRadius: 8,
-    paddingHorizontal: 10,
-    paddingVertical: 7,
-  },
-  receivablePayButtonText: {
-    color: '#ffffff',
-    fontWeight: '800',
-    fontSize: 11,
   },
   receivablePaymentForm: {
     gap: 8,
@@ -25419,81 +26712,114 @@ const styles = StyleSheet.create({
     lineHeight: 18,
     color: '#1d2740',
   },
-  draftCard: {
-    borderWidth: 1,
-    borderColor: '#dce5f4',
-    backgroundColor: '#ffffff',
-    borderRadius: 12,
-    padding: 8,
+  invoiceTableRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'space-between',
     gap: 8,
+    borderWidth: 1,
+    borderColor: '#e2e8f3',
+    backgroundColor: '#ffffff',
+    borderRadius: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 11,
   },
-  draftInfo: {
+  invoiceTableColInvoice: {
+    flex: 2,
+    minWidth: 210,
+  },
+  invoiceTableColStatus: {
     flex: 1,
+    minWidth: 120,
   },
-  draftTitle: {
-    fontSize: 12,
-    fontWeight: '800',
+  invoiceTableColMethod: {
+    flex: 1,
+    minWidth: 120,
+  },
+  invoiceTableColDue: {
+    flex: 1,
+    minWidth: 130,
+  },
+  invoiceTableColAgenda: {
+    flex: 1.2,
+    minWidth: 150,
+  },
+  invoiceTableColAction: {
+    width: 116,
+    gap: 6,
+    alignItems: 'stretch',
+  },
+  invoiceTableInvoiceTitle: {
     color: '#173c87',
-    marginBottom: 2,
+    fontSize: 12,
+    fontWeight: '900',
   },
-  draftMeta: {
-    fontSize: 11,
+  invoiceTableCustomerName: {
     color: '#435674',
+    fontSize: 11,
+    fontWeight: '700',
+    marginTop: 3,
   },
-  draftSnapshotBadge: {
+  invoiceTableStatusBadge: {
     alignSelf: 'flex-start',
     borderWidth: 1,
     borderRadius: 999,
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    marginTop: 5,
-    marginBottom: 2,
+    paddingHorizontal: 9,
+    paddingVertical: 5,
   },
-  draftSnapshotBadgeText: {
+  invoiceTableStatusText: {
     fontSize: 10,
+    fontWeight: '900',
+    textTransform: 'uppercase',
+  },
+  invoiceTableSubText: {
+    color: '#667897',
+    fontSize: 10,
+    fontWeight: '700',
+    marginTop: 4,
+  },
+  invoiceTableDueAmount: {
+    color: '#34405f',
+    fontSize: 12,
+    fontWeight: '900',
+  },
+  invoiceTableDueAmountActive: {
+    color: '#b42318',
+  },
+  invoiceTableAgendaText: {
+    color: '#34405f',
+    fontSize: 11,
     fontWeight: '800',
   },
-  draftStockEmptyBadge: {
-    backgroundColor: '#fef3f2',
-    borderColor: '#b42318',
-  },
-  draftStockEmptyBadgeText: {
+  invoiceTableAgendaOverdue: {
     color: '#b42318',
   },
-  draftExpiryMeta: {
-    marginTop: 3,
-    fontSize: 10,
-    color: '#8a5a0a',
-    fontWeight: '700',
+  invoiceTableDetailButton: {
+    borderWidth: 1,
+    borderColor: '#0755b8',
+    backgroundColor: '#0755b8',
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+    alignItems: 'center',
   },
-  draftExpiryMetaExpired: {
+  invoiceTableDetailButtonText: {
+    color: '#ffffff',
+    fontSize: 11,
+    fontWeight: '900',
+  },
+  invoiceTableTagihButton: {
+    borderWidth: 1,
+    borderColor: '#c53333',
+    backgroundColor: '#fff5f5',
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+    alignItems: 'center',
+  },
+  invoiceTableTagihButtonText: {
     color: '#b42318',
-  },
-  invoiceStatusRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    flexWrap: 'wrap',
-  },
-  invoiceStatusText: {
-    fontWeight: '700',
-  },
-  productionCurrentRow: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    alignItems: 'center',
-  },
-  productionCurrentText: {
-    fontWeight: '700',
-  },
-  invoicePaymentBadgeRow: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 6,
-    marginTop: 5,
-    marginBottom: 2,
+    fontSize: 11,
+    fontWeight: '900',
   },
   invoicePaymentBadge: {
     borderWidth: 1,
@@ -25526,80 +26852,6 @@ const styles = StyleSheet.create({
   },
   invoicePaymentBadgeTextDeposit: {
     color: '#1d6a3c',
-  },
-  invoicePaymentTargetBadge: {
-    borderWidth: 1,
-    borderColor: '#d4d9e6',
-    backgroundColor: '#f7f9fc',
-    borderRadius: 999,
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    maxWidth: '100%',
-  },
-  invoicePaymentTargetBadgeText: {
-    fontSize: 10,
-    fontWeight: '700',
-    color: '#33425f',
-  },
-  draftActionColumn: {
-    gap: 6,
-    minWidth: 104,
-  },
-  continueDraftButton: {
-    borderWidth: 1,
-    borderColor: '#0755b8',
-    backgroundColor: '#0755b8',
-    borderRadius: 8,
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-    alignItems: 'center',
-  },
-  continueDraftButtonText: {
-    color: '#ffffff',
-    fontWeight: '700',
-    fontSize: 11,
-  },
-  approvalCreateButton: {
-    borderWidth: 1,
-    borderColor: '#a16207',
-    backgroundColor: '#f5b928',
-    borderRadius: 8,
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-    alignItems: 'center',
-  },
-  approvalCreateButtonText: {
-    color: '#4a3204',
-    fontWeight: '800',
-    fontSize: 11,
-  },
-  approvalResolveButton: {
-    borderWidth: 1,
-    borderColor: '#1d7a45',
-    backgroundColor: '#2d9d58',
-    borderRadius: 8,
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-    alignItems: 'center',
-  },
-  approvalResolveButtonText: {
-    color: '#ffffff',
-    fontWeight: '800',
-    fontSize: 11,
-  },
-  deleteDraftButton: {
-    borderWidth: 1,
-    borderColor: '#982222',
-    backgroundColor: '#c53333',
-    borderRadius: 8,
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-    alignItems: 'center',
-  },
-  deleteDraftButtonText: {
-    color: '#ffffff',
-    fontWeight: '700',
-    fontSize: 11,
   },
   draftActionDisabled: {
     opacity: 0.55,
@@ -25668,6 +26920,84 @@ const styles = StyleSheet.create({
     padding: 14,
     alignItems: 'center',
   },
+  closingStoreModalCard: {
+    width: '96%',
+    maxWidth: 1180,
+    maxHeight: '92%',
+    borderWidth: 1,
+    borderColor: '#b8cff7',
+    backgroundColor: '#f7fbff',
+    borderRadius: 18,
+    padding: 12,
+    alignItems: 'stretch',
+    ...(Platform.OS === 'web'
+      ? {
+        boxShadow: '0px 18px 42px rgba(16, 36, 70, 0.22)',
+      }
+      : {
+        shadowColor: '#102446',
+        shadowOpacity: 0.22,
+        shadowRadius: 28,
+        shadowOffset: { width: 0, height: 16 },
+        elevation: 10,
+      }),
+  },
+  closingStoreModalHeader: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    justifyContent: 'space-between',
+    gap: 12,
+    borderWidth: 1,
+    borderColor: '#c8d8f2',
+    backgroundColor: '#ffffff',
+    borderRadius: 14,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    marginBottom: 10,
+  },
+  closingStoreModalTitleBlock: {
+    flex: 1,
+    minWidth: 0,
+  },
+  closingStoreModalEyebrow: {
+    color: '#1f5fbf',
+    fontSize: 10,
+    fontWeight: '900',
+    textTransform: 'uppercase',
+    marginBottom: 3,
+  },
+  closingStoreModalTitle: {
+    color: '#101c3d',
+    fontSize: 18,
+    fontWeight: '900',
+  },
+  closingStoreModalSubtitle: {
+    color: '#5b6780',
+    fontSize: 12,
+    lineHeight: 18,
+    fontWeight: '700',
+    marginTop: 4,
+  },
+  closingStoreModalCloseButton: {
+    borderWidth: 1,
+    borderColor: '#b9c8e1',
+    backgroundColor: '#f5f9ff',
+    borderRadius: 10,
+    paddingHorizontal: 13,
+    paddingVertical: 9,
+  },
+  closingStoreModalCloseText: {
+    color: '#174a8c',
+    fontSize: 11,
+    fontWeight: '900',
+  },
+  closingStoreModalScroll: {
+    width: '100%',
+    flexShrink: 1,
+  },
+  closingStoreModalScrollContent: {
+    paddingBottom: 4,
+  },
   popupCardSuccess: {
     maxWidth: 500,
     borderColor: '#bdd9c6',
@@ -25722,8 +27052,59 @@ const styles = StyleSheet.create({
     maxWidth: 520,
   },
   invoiceDetailCard: {
+    width: '94%',
     maxWidth: 760,
     maxHeight: '86%',
+    alignItems: 'stretch',
+  },
+  invoiceDetailHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 12,
+    borderWidth: 1,
+    borderColor: '#b8cff7',
+    backgroundColor: '#eef5ff',
+    borderRadius: 14,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    marginBottom: 10,
+  },
+  invoiceDetailHeaderInfo: {
+    flex: 1,
+    minWidth: 0,
+  },
+  invoiceDetailEyebrow: {
+    color: '#1f5fbf',
+    fontSize: 10,
+    fontWeight: '900',
+    textTransform: 'uppercase',
+    marginBottom: 3,
+  },
+  invoiceDetailTitle: {
+    color: '#101c3d',
+    fontSize: 18,
+    fontWeight: '900',
+  },
+  invoiceDetailSubtitle: {
+    color: '#34405f',
+    fontSize: 12,
+    fontWeight: '800',
+    marginTop: 3,
+  },
+  invoiceDetailHeaderBadge: {
+    borderWidth: 1,
+    borderColor: '#1f5fbf',
+    backgroundColor: '#ffffff',
+    borderRadius: 999,
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+  },
+  invoiceDetailHeaderBadgeText: {
+    color: '#1f5fbf',
+    fontSize: 11,
+    fontWeight: '900',
+    textTransform: 'uppercase',
   },
   proofingSendCard: {
     maxWidth: 640,
@@ -25792,10 +27173,118 @@ const styles = StyleSheet.create({
     backgroundColor: '#ffffff',
     borderRadius: 12,
     paddingHorizontal: 10,
+    width: '100%',
   },
   invoiceDetailListContent: {
-    paddingVertical: 8,
-    gap: 4,
+    paddingVertical: 10,
+    gap: 10,
+  },
+  invoiceDetailSection: {
+    width: '100%',
+    borderWidth: 1,
+    borderColor: '#d7e2f3',
+    backgroundColor: '#fbfdff',
+    borderRadius: 12,
+    padding: 10,
+    gap: 8,
+  },
+  invoiceDetailSectionTitle: {
+    color: '#123d82',
+    fontSize: 12,
+    fontWeight: '900',
+    textTransform: 'uppercase',
+  },
+  invoiceDetailInfoGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+  invoiceDetailInfoCell: {
+    flexGrow: 1,
+    flexShrink: 1,
+    flexBasis: '31%',
+    minWidth: 150,
+    borderWidth: 1,
+    borderColor: '#e0e8f5',
+    backgroundColor: '#ffffff',
+    borderRadius: 10,
+    paddingHorizontal: 10,
+    paddingVertical: 9,
+  },
+  invoiceDetailInfoCellWide: {
+    flexGrow: 1,
+    flexShrink: 1,
+    flexBasis: '64%',
+    minWidth: 260,
+    borderWidth: 1,
+    borderColor: '#e0e8f5',
+    backgroundColor: '#ffffff',
+    borderRadius: 10,
+    paddingHorizontal: 10,
+    paddingVertical: 9,
+  },
+  invoiceDetailInfoLabel: {
+    color: '#667897',
+    fontSize: 10,
+    fontWeight: '900',
+    textTransform: 'uppercase',
+    marginBottom: 4,
+  },
+  invoiceDetailInfoValue: {
+    color: '#26344d',
+    fontSize: 12,
+    fontWeight: '800',
+    lineHeight: 17,
+  },
+  invoiceDetailInfoValueStrong: {
+    color: '#101c3d',
+    fontSize: 13,
+    fontWeight: '900',
+    lineHeight: 18,
+  },
+  invoiceDetailSuccessText: {
+    color: '#067647',
+  },
+  invoiceDetailDangerText: {
+    color: '#b42318',
+  },
+  invoiceDetailNoteBox: {
+    borderWidth: 1,
+    borderColor: '#d7e2f3',
+    backgroundColor: '#ffffff',
+    borderRadius: 10,
+    paddingHorizontal: 10,
+    paddingVertical: 9,
+  },
+  invoiceDetailNoteText: {
+    color: '#34405f',
+    fontSize: 11,
+    fontWeight: '700',
+    lineHeight: 17,
+  },
+  invoiceDetailPaymentBox: {
+    width: '100%',
+    padding: 10,
+    borderWidth: 1,
+    borderColor: '#c7d7ef',
+    backgroundColor: '#f7fbff',
+    borderRadius: 10,
+    gap: 9,
+  },
+  invoiceDetailPaymentSummaryRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+  invoiceDetailPaymentMetric: {
+    flex: 1,
+    minWidth: 150,
+    borderWidth: 1,
+    borderColor: '#cfe0fb',
+    backgroundColor: '#ffffff',
+    borderRadius: 10,
+    paddingHorizontal: 10,
+    paddingVertical: 9,
   },
   invoiceAuditBox: {
     width: '100%',

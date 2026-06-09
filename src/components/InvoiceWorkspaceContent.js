@@ -9,6 +9,7 @@ const InvoiceWorkspaceContent = ({
   emptyMessage = '',
   hasRows = false,
   formatDateText,
+  listVariant = 'card',
   children,
 }) => (
   <>
@@ -97,6 +98,16 @@ const InvoiceWorkspaceContent = ({
       <Text style={styles.emptyText}>{emptyMessage}</Text>
     ) : (
       <View style={styles.list}>
+        {listVariant === 'invoice_success' ? (
+          <View style={styles.invoiceTableHeader}>
+            <Text style={[styles.invoiceTableHeadText, styles.invoiceTableColInvoice]}>Invoice / Customer</Text>
+            <Text style={[styles.invoiceTableHeadText, styles.invoiceTableColStatus]}>Status</Text>
+            <Text style={[styles.invoiceTableHeadText, styles.invoiceTableColMethod]}>Metode</Text>
+            <Text style={[styles.invoiceTableHeadText, styles.invoiceTableColDue]}>Sisa / Piutang</Text>
+            <Text style={[styles.invoiceTableHeadText, styles.invoiceTableColAgenda]}>Agenda Pelunasan</Text>
+            <Text style={[styles.invoiceTableHeadText, styles.invoiceTableColAction]}>Aksi</Text>
+          </View>
+        ) : null}
         {children}
       </View>
     )}
@@ -149,6 +160,45 @@ const styles = StyleSheet.create({
   },
   list: {
     gap: 8,
+  },
+  invoiceTableHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    borderRadius: 10,
+    backgroundColor: '#0f4f9f',
+    paddingHorizontal: 12,
+    paddingVertical: 11,
+  },
+  invoiceTableHeadText: {
+    color: '#ffffff',
+    fontSize: 11,
+    fontWeight: '900',
+    textTransform: 'uppercase',
+  },
+  invoiceTableColInvoice: {
+    flex: 2,
+    minWidth: 210,
+  },
+  invoiceTableColStatus: {
+    flex: 1,
+    minWidth: 120,
+  },
+  invoiceTableColMethod: {
+    flex: 1,
+    minWidth: 120,
+  },
+  invoiceTableColDue: {
+    flex: 1,
+    minWidth: 130,
+  },
+  invoiceTableColAgenda: {
+    flex: 1.2,
+    minWidth: 150,
+  },
+  invoiceTableColAction: {
+    width: 116,
+    textAlign: 'center',
   },
 });
 
