@@ -376,6 +376,96 @@ test('invoice belum lunas tetap masuk invoice sukses dan piutang', () => {
   assert.equal(isReceivableInvoiceRow(row), true);
 });
 
+test('invoice final tetap masuk sukses walau status order lama masih draft', () => {
+  const row = {
+    id: 1009,
+    status: 'draft',
+    notes: 'Mode: Proses Orderan',
+    cashier: { id: cashierA.id, name: cashierA.name },
+    invoice: {
+      id: 509,
+      invoice_no: 'INV-LEGACY-DRAFT-ORDER',
+      status: 'paid',
+      total: 250000,
+      paid_total: 250000,
+      due_total: 0,
+    },
+  };
+
+  assert.equal(isDraftCandidate(row), false);
+  assert.equal(isSuccessfulInvoiceRow(row), true);
+  assert.equal(isReceivableInvoiceRow(row), false);
+});
+
+test('invoice success dari payload transaksi flat tetap tampil di nota penjualan tercatat', () => {
+  const row = {
+    invoice_id: 601,
+    invoice_no: 'INV-FLAT-SUKSES',
+    invoice_status: 'paid',
+    invoice_total: 150000,
+    invoice_paid_total: 150000,
+    invoice_due_total: 0,
+    customer_name: 'Pelanggan Flat',
+    payment_status: 'paid',
+  };
+
+  assert.equal(isSuccessfulInvoiceRow(row), true);
+  assert.equal(isReceivableInvoiceRow(row), false);
+});
+
+test('invoice piutang dari payload transaksi flat tetap masuk sukses dan piutang', () => {
+  const row = {
+    invoice_id: 602,
+    invoice_no: 'INV-FLAT-PIUTANG',
+    invoice_status: 'unpaid',
+    invoice_total: 300000,
+    invoice_paid_total: 50000,
+    invoice_due_total: 250000,
+    customer_name: 'Pelanggan Piutang Flat',
+  };
+
+  assert.equal(isSuccessfulInvoiceRow(row), true);
+  assert.equal(isReceivableInvoiceRow(row), true);
+});
+
+test('invoice beban management tidak dianggap piutang walau belum lunas', () => {
+  const row = {
+    id: 1010,
+    status: 'processing',
+    customer: { name: 'BEBAN MANAGEMENT' },
+    invoice: {
+      id: 610,
+      invoice_no: 'INV-BM-001',
+      status: 'unpaid',
+      total: 300000,
+      paid_total: 0,
+      due_total: 300000,
+    },
+  };
+
+  assert.equal(isSuccessfulInvoiceRow(row), true);
+  assert.equal(isReceivableInvoiceRow(row), false);
+});
+
+test('invoice kesalahan produksi tetap dianggap piutang karena akan dibayar karyawan', () => {
+  const row = {
+    id: 1011,
+    status: 'processing',
+    customer: { name: 'KESALAHAN PRODUKSI' },
+    invoice: {
+      id: 611,
+      invoice_no: 'INV-KP-001',
+      status: 'unpaid',
+      total: 200000,
+      paid_total: 0,
+      due_total: 200000,
+    },
+  };
+
+  assert.equal(isSuccessfulInvoiceRow(row), true);
+  assert.equal(isReceivableInvoiceRow(row), true);
+});
+
 test('invoice dibatalkan tidak masuk invoice sukses', () => {
   const row = {
     id: 1008,

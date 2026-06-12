@@ -3645,6 +3645,8 @@ const normalizeInvoiceOrderStatus = (row) => {
   const invoiceStatus = normalizeText(
     row?.invoice?.status
     || row?.invoice?.payment_status
+    || row?.invoice_status
+    || row?.invoiceStatus
     || '',
   );
   if (resolveInvoiceStatusKey(invoiceStatus) === 'draft') {
@@ -3656,6 +3658,8 @@ const normalizeInvoiceOrderStatus = (row) => {
     || row?.order_status
     || row?.order?.status
     || row?.invoice?.status
+    || row?.invoice_status
+    || row?.invoiceStatus
     || '',
   );
 };
@@ -3663,8 +3667,11 @@ const resolveInvoiceRowTotalAmount = (row) => {
   const queuedItems = Array.isArray(row?.items) ? row.items : [];
   return roundMoney(Number(
     row?.invoice?.total
+    || row?.invoice_total
+    || row?.invoiceTotal
     || row?.total
     || row?.grand_total
+    || row?.grandTotal
     || row?.approval?.amount
     || row?.__queue_total
     || calculateDraftItemsTotal(queuedItems)
@@ -6199,10 +6206,7 @@ const resolveDefaultInvoiceDateFilter = (referenceDate = new Date()) => {
     to: formatIsoDate(today),
   };
 };
-const DEFAULT_INVOICE_DATE_FILTER = {
-  from: '',
-  to: '',
-};
+const DEFAULT_INVOICE_DATE_FILTER = resolveDefaultInvoiceDateFilter();
 const resolveInvoiceDateRange = (dateFrom, dateTo) => {
   const startAt = parseIsoDateTimestamp(dateFrom, 'start');
   const endAt = parseIsoDateTimestamp(dateTo, 'end');
@@ -6219,8 +6223,13 @@ const resolveInvoiceDateRange = (dateFrom, dateTo) => {
 const resolveInvoiceRowDateText = (row) => {
   return String(
     row?.invoice?.invoice_date
+    || row?.invoice_date
+    || row?.invoiceDate
     || row?.invoice?.created_at
+    || row?.invoice_created_at
+    || row?.invoiceCreatedAt
     || row?.created_at
+    || row?.createdAt
     || row?.order?.created_at
     || row?.order?.updated_at
     || '',
@@ -7057,6 +7066,7 @@ const INVOICE_AREA_FILTER_MENU_MAP = Object.freeze({
 });
 
 const INVOICE_ACTIVE_WORK_AREAS = new Set(['draft', 'approval', 'receivable']);
+const INVOICE_SERVER_BATCH_AREAS = new Set(['draft', 'success', 'approval', 'receivable']);
 const DRAFT_WORKSPACE_PER_PAGE = 100;
 const DRAFT_WORKSPACE_MAX_PAGES = 20;
 const INVOICE_ACTIVE_WORKSPACE_PER_PAGE = 100;
@@ -12474,14 +12484,16 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     () => mapPaymentStatusToTransactionType(paymentStatus),
     [paymentStatus],
   );
-  const showReceivableDueDateInput = isReceivableTransactionType(transactionType)
-    && !isCustomerDepositPaymentMethod(paymentMethod);
-  const receivableDueDateRequired = showReceivableDueDateInput
-    && String(paymentMethod || '').trim() !== '';
   const selectedCustomer = useMemo(
     () => customers.find((row) => Number(row.id) === Number(selectedCustomerId)) || null,
     [customers, selectedCustomerId],
   );
+  const isSelectedCustomerManagementBurden = normalizeText(selectedCustomer?.name) === 'beban management';
+  const showReceivableDueDateInput = isReceivableTransactionType(transactionType)
+    && !isCustomerDepositPaymentMethod(paymentMethod)
+    && !isSelectedCustomerManagementBurden;
+  const receivableDueDateRequired = showReceivableDueDateInput
+    && String(paymentMethod || '').trim() !== '';
   useEffect(() => {
     const customerId = Number(selectedCustomerId || 0);
     if (!(customerId > 0) || !backendReady) {
@@ -14125,9 +14137,9 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         try {
           const shouldLoadActiveWorkspaceBatch = !searchMode && (
             invoiceSuccessDateFilterActive
-            || INVOICE_ACTIVE_WORK_AREAS.has(invoiceRequestOptions.area)
+            || INVOICE_SERVER_BATCH_AREAS.has(invoiceRequestOptions.area)
           );
-          const shouldDeepSearchActiveWorkspace = searchMode && INVOICE_ACTIVE_WORK_AREAS.has(invoiceRequestOptions.area);
+          const shouldDeepSearchActiveWorkspace = searchMode && INVOICE_SERVER_BATCH_AREAS.has(invoiceRequestOptions.area);
           if (shouldLoadActiveWorkspaceBatch || shouldDeepSearchActiveWorkspace) {
             const baseRequest = {
               ...invoiceRequestOptions,
@@ -14161,9 +14173,9 @@ const SalesScreen = ({ currentUser, onLogout }) => {
           try {
             const shouldLoadActiveWorkspaceBatch = !searchMode && (
               invoiceSuccessDateFilterActive
-              || INVOICE_ACTIVE_WORK_AREAS.has(invoiceRequestOptions.area)
+              || INVOICE_SERVER_BATCH_AREAS.has(invoiceRequestOptions.area)
             );
-            const shouldDeepSearchActiveWorkspace = searchMode && INVOICE_ACTIVE_WORK_AREAS.has(invoiceRequestOptions.area);
+            const shouldDeepSearchActiveWorkspace = searchMode && INVOICE_SERVER_BATCH_AREAS.has(invoiceRequestOptions.area);
             if (shouldLoadActiveWorkspaceBatch || shouldDeepSearchActiveWorkspace) {
               const baseRequest = {
                 ...invoiceRequestOptions,
@@ -17661,6 +17673,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     if (
       mode !== 'draft'
       && !isProviderPaymentIntent
+      && !isSelectedCustomerManagementBurden
       && isReceivableTransactionType(paymentTypeForValidation)
     ) {
       const dueDate = String(receivableDueDate || '').trim();
@@ -18093,6 +18106,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         && !isProofingWithoutPaymentMode
         && !usingDanaQris
         && !usingDanaGateway
+        && !isSelectedCustomerManagementBurden
         && isReceivableTransactionType(paymentTransactionType)
         ? String(receivableDueDate || '').trim()
         : null;
@@ -18505,7 +18519,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         const queuedPayload = payload || {
           customer_id: null,
           ...(mode === 'draft' ? { status: 'draft' } : {}),
-          due_at: mode !== 'draft' && isReceivableTransactionType(transactionType)
+          due_at: mode !== 'draft' && !isSelectedCustomerManagementBurden && isReceivableTransactionType(transactionType)
             ? String(receivableDueDate || '').trim() || null
             : null,
           note: paymentNotes || null,
@@ -19630,10 +19644,10 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       if (!successKeyword) {
         return true;
       }
-      const customerName = normalizeText(row?.customer?.name || '');
-      const customerPhone = normalizeText(row?.customer?.phone || '');
-      const invoiceNo = normalizeText(row?.invoice?.invoice_no || '');
-      const orderId = normalizeText(row?.id || row?.order?.id || '');
+      const customerName = normalizeText(row?.customer?.name || row?.customer_name || row?.customerName || '');
+      const customerPhone = normalizeText(row?.customer?.phone || row?.customer_phone || row?.customerPhone || '');
+      const invoiceNo = normalizeText(row?.invoice?.invoice_no || row?.invoice_no || row?.invoiceNo || '');
+      const orderId = normalizeText(row?.id || row?.order?.id || row?.order_id || row?.orderId || '');
       const approvalLabel = normalizeText(row?.approval?.requestLabel || '');
       const approvalType = normalizeText(row?.approval?.typeLabel || row?.approval?.type || '');
       const approvalContext = normalizeText(row?.approval?.contextLabel || '');
@@ -19990,7 +20004,8 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         invoiceFilter === 'success' ? invoiceCashierId : '',
       )
       : [];
-    const rows = INVOICE_ACTIVE_WORK_AREAS.has(invoiceFilter)
+    const shouldMergeAreaSnapshot = INVOICE_ACTIVE_WORK_AREAS.has(invoiceFilter) || invoiceFilter === 'success';
+    const rows = shouldMergeAreaSnapshot
       ? mergeInvoiceRows(
         Array.isArray(areaSnapshotRows) ? areaSnapshotRows : [],
         visibleRows,
@@ -19999,10 +20014,10 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     const keyword = invoiceFilter === 'success' ? normalizeText(invoiceSearch) : '';
     const searchedRows = keyword
       ? rows.filter((row) => {
-        const customerName = normalizeText(row?.customer?.name || '');
-        const customerPhone = normalizeText(row?.customer?.phone || '');
-        const invoiceNo = normalizeText(row?.invoice?.invoice_no || '');
-        const orderId = normalizeText(row?.id || '');
+        const customerName = normalizeText(row?.customer?.name || row?.customer_name || row?.customerName || '');
+        const customerPhone = normalizeText(row?.customer?.phone || row?.customer_phone || row?.customerPhone || '');
+        const invoiceNo = normalizeText(row?.invoice?.invoice_no || row?.invoice_no || row?.invoiceNo || '');
+        const orderId = normalizeText(row?.id || row?.order?.id || row?.order_id || row?.orderId || '');
         const approvalLabel = normalizeText(row?.approval?.requestLabel || '');
         const approvalType = normalizeText(row?.approval?.typeLabel || row?.approval?.type || '');
         const approvalContext = normalizeText(row?.approval?.contextLabel || '');
@@ -20019,6 +20034,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       : rows;
     const successFilteredRows = invoiceFilter === 'success'
       ? searchedRows
+        .filter((row) => isInvoiceRowInDateRange(row, invoiceDateFrom, invoiceDateTo))
         .filter((row) => {
           if (invoiceStatusFilter === 'all') {
             return true;
@@ -21942,8 +21958,9 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                 onChangeInvoiceDateFrom={setInvoiceDateFrom}
                 onChangeInvoiceDateTo={setInvoiceDateTo}
                 onClearInvoiceDateFilter={() => {
-                  setInvoiceDateFrom('');
-                  setInvoiceDateTo('');
+                  const todayFilter = resolveDefaultInvoiceDateFilter();
+                  setInvoiceDateFrom(todayFilter.from);
+                  setInvoiceDateTo(todayFilter.to);
                 }}
                 activeOperationalSummaryKey={invoiceOperationalSummaryFilter}
                 onSelectOperationalSummary={openInvoiceOperationalSummaryFilter}
@@ -21986,9 +22003,9 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                       );
                     const displayId = isApprovalRow
                       ? String(approvalInfo?.requestLabel || buildReceivableApprovalRequestLabel(row?.__approval_request_id))
-                      : String(row?.id || '-');
-                    const invoiceNo = String(row?.invoice?.invoice_no || '').trim() || (isApprovalRow ? 'Belum ada invoice' : '-');
-                    const customerName = String(row?.customer?.name || 'Pelanggan umum');
+                      : String(row?.id || row?.order?.id || row?.order_id || row?.orderId || row?.invoice?.id || row?.invoice_id || row?.invoiceId || '-');
+                    const invoiceNo = String(row?.invoice?.invoice_no || row?.invoice_no || row?.invoiceNo || '').trim() || (isApprovalRow ? 'Belum ada invoice' : '-');
+                    const customerName = String(row?.customer?.name || row?.customer_name || row?.customerName || 'Pelanggan umum');
                     const total = resolveInvoiceRowTotalAmount(row);
                     const itemCount = getInvoiceRowItemCount(row);
                     const isDeleting = String(isDeletingDraftId || '') === String(row?.id || '');
@@ -22052,10 +22069,10 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                         ? invoiceStatus
                         : 'approved',
                     );
-                    const orderId = Number(row?.id || row?.order?.id || 0) || 0;
-                    const invoiceId = Number(row?.invoice?.id || row?.approval?.invoiceId || 0) || 0;
-                    const dueTotal = Number(row?.invoice?.due_total || 0) || 0;
-                    const paidTotal = Number(row?.invoice?.paid_total || 0) || 0;
+                    const orderId = Number(row?.id || row?.order?.id || row?.order_id || row?.orderId || 0) || 0;
+                    const invoiceId = Number(row?.invoice?.id || row?.invoice_id || row?.invoiceId || row?.approval?.invoiceId || 0) || 0;
+                    const dueTotal = Number(row?.invoice?.due_total || row?.invoice?.dueTotal || row?.invoice_due_total || row?.invoiceDueTotal || row?.due_total || row?.dueTotal || 0) || 0;
+                    const paidTotal = Number(row?.invoice?.paid_total || row?.invoice?.paidTotal || row?.invoice_paid_total || row?.invoicePaidTotal || row?.paid_total || row?.paidTotal || 0) || 0;
                     const receivableDueMeta = resolveReceivableDueMeta(row);
                     const canPayReceivable = !isDraftRow && Boolean(row?.invoice?.can_pay);
                     const canRemindReceivable = !isDraftRow && dueTotal > 0 && Boolean(receivableDueMeta?.isOverdue);

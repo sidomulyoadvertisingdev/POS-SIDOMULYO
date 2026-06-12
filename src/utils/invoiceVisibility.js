@@ -274,17 +274,32 @@ const hasLegacyDraftSnapshot = (row) => {
 
 const normalizeInvoiceStatusText = (row) => (
   normalizeText(
-    row?.status
-    || row?.order_status
-    || row?.order?.status
-    || row?.invoice?.status
+    row?.invoice?.status
     || row?.invoice?.payment_status
+    || row?.invoice_status
+    || row?.invoiceStatus
     || row?.payment_status
+    || row?.paymentStatus
     || row?.payment?.status
     || row?.payment?.payment_status
+    || row?.status
+    || row?.order_status
+    || row?.order?.status
     || '',
   )
 );
+
+const hasFinalInvoiceStatus = (row) => {
+  const invoiceStatusKey = resolveInvoiceStatusKey(
+    row?.invoice?.status
+    || row?.invoice?.payment_status
+    || row?.invoice_status
+    || row?.invoiceStatus,
+  );
+
+  return invoiceStatusKey !== ''
+    && !['draft', 'pending', 'new', 'open', 'queued_offline'].includes(invoiceStatusKey);
+};
 
 const isApprovalLikeRow = (row) => {
   if (normalizeText(row?.__source) === 'receivable_approval') {
@@ -314,6 +329,10 @@ const isDraftCandidate = (row) => {
 
   if (normalizeText(row?.__workspace_area) === 'draft') {
     return true;
+  }
+
+  if (hasFinalInvoiceStatus(row)) {
+    return false;
   }
 
   if (hasExplicitDraftFlag(row)) {
@@ -363,6 +382,9 @@ const isDraftInvoiceRow = (row) => {
   if (normalizeText(row?.__workspace_area) === 'draft') {
     return true;
   }
+  if (hasFinalInvoiceStatus(row)) {
+    return false;
+  }
   if (hasExplicitDraftFlag(row)) {
     return true;
   }
@@ -373,29 +395,57 @@ const isDraftInvoiceRow = (row) => {
 };
 const isApprovalInvoiceRow = (row) => isApprovalLikeRow(row);
 const hasInvoiceTransactionReference = (row) => {
-  return [
+  const referenceIds = [
     row?.id,
     row?.invoice?.id,
+    row?.invoice_id,
+    row?.invoiceId,
     row?.order?.id,
+    row?.order_id,
+    row?.orderId,
+    row?.transaction_id,
+    row?.transactionId,
+    row?.payment_transaction_id,
+    row?.paymentTransactionId,
     row?.approval?.orderId,
-  ].some((value) => toPositiveId(value) > 0);
+  ];
+  const referenceLabels = [
+    row?.invoice?.invoice_no,
+    row?.invoice_no,
+    row?.invoiceNo,
+  ];
+
+  return referenceIds.some((value) => toPositiveId(value) > 0)
+    || referenceLabels.some((value) => String(value || '').trim().length > 0);
 };
 
 const getInvoiceAmounts = (row) => {
   const total = readFirstMoney(
     row?.invoice?.total,
+    row?.invoice_total,
+    row?.invoiceTotal,
     row?.total,
     row?.grand_total,
+    row?.grandTotal,
   );
   const paid = readFirstMoney(
     row?.invoice?.paid_total,
+    row?.invoice?.paidTotal,
+    row?.invoice_paid_total,
+    row?.invoicePaidTotal,
     row?.paid_total,
+    row?.paidTotal,
     row?.payment?.paid_total,
+    row?.payment?.paidTotal,
     row?.payment?.amount,
   );
   const explicitDue = readFirstMoney(
     row?.invoice?.due_total,
+    row?.invoice?.dueTotal,
+    row?.invoice_due_total,
+    row?.invoiceDueTotal,
     row?.due_total,
+    row?.dueTotal,
   );
   const due = explicitDue > 0
     ? explicitDue
@@ -404,8 +454,25 @@ const getInvoiceAmounts = (row) => {
   return { total, paid, due };
 };
 
+const isManagementBurdenCustomerRow = (row) => {
+  const customerName = normalizeText(
+    row?.customer?.name
+    || row?.customer_name
+    || row?.customerName
+    || row?.order?.customer?.name
+    || row?.invoice?.customer?.name
+    || '',
+  );
+
+  return customerName === 'beban management';
+};
+
 const isReceivableInvoiceRow = (row) => {
   if (!row || isDraftInvoiceRow(row) || isApprovalInvoiceRow(row)) {
+    return false;
+  }
+
+  if (isManagementBurdenCustomerRow(row)) {
     return false;
   }
 

@@ -772,9 +772,11 @@ const InvoiceWorkspaceHeader = ({
   };
 
   const handleClearDateFilter = () => {
-    setDraftDateFrom('');
-    setDraftDateTo('');
+    const today = toIsoDate(new Date());
+    setDraftDateFrom(today);
+    setDraftDateTo(today);
     setActiveDateField('from');
+    setCalendarCursor(startOfLocalMonth(today));
     onClearInvoiceDateFilter?.();
   };
 
