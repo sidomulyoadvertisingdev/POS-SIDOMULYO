@@ -18,6 +18,11 @@ const CartRow = ({ item, index, onDeleteItem }) => {
             Rule {pricingSummary.billingGroup}{Number(pricingSummary.rollWidth || 0) > 0 ? ` | Roll ${pricingSummary.rollWidth} m` : ''}
           </Text>
         ) : null}
+        {pricingSummary?.materialMarginText ? (
+          <Text style={styles.metaText} numberOfLines={2}>
+            {pricingSummary.materialMarginText}
+          </Text>
+        ) : null}
         {item?.isGroupProduct ? (
           <Text style={styles.bundleMetaText} numberOfLines={2}>
             Paket{item?.groupSummary ? ` | ${item.groupSummary}` : ''}
@@ -226,6 +231,3 @@ const styles = StyleSheet.create({
 });
 
 export default CartList;
-
-
-

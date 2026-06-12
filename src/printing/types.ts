@@ -103,6 +103,7 @@ export interface ReceiptData {
   items: ReceiptItem[];
   summary: ReceiptSummary;
   payment?: ReceiptPayment;
+  payments?: ReceiptPayment[];
   layout?: ReceiptLayout;
   detail?: ReceiptDetailSection;
   qrCode?: string;

@@ -172,6 +172,9 @@ const renderStructuredReceipt = (
   const proofingLines = Array.isArray(receipt.detail?.proofingNotes)
     ? receipt.detail.proofingNotes.filter((item) => hasValue(item))
     : [];
+  const paymentRows = Array.isArray(receipt.payments) && receipt.payments.length > 0
+    ? receipt.payments
+    : (receipt.payment?.method ? [receipt.payment] : []);
   const summaryRows = [
     renderSummaryRow('Sub Total', receipt.summary.subtotal, true),
     renderSummaryRow('Diskon', receipt.summary.discount || 0),
@@ -181,8 +184,13 @@ const renderStructuredReceipt = (
     typeof receipt.summary.serviceCharge === 'number' && receipt.summary.serviceCharge > 0
       ? renderSummaryRow('Biaya Layanan', receipt.summary.serviceCharge)
       : '',
-    receipt.payment?.method
-      ? renderSummaryRow(`Pembayaran ${receipt.payment.method}`, receipt.payment.amount || receipt.summary.grandTotal, true)
+    ...paymentRows.map((payment) => (
+      payment?.method
+        ? renderSummaryRow(`Pembayaran ${payment.method}`, payment.amount || receipt.summary.grandTotal, true)
+        : ''
+    )),
+    paymentRows.length > 1
+      ? renderSummaryRow('Total Bayar', paymentRows.reduce((sum, payment) => sum + (Number(payment?.amount || 0) || 0), 0), true)
       : '',
     renderSummaryRow('Total', receipt.summary.grandTotal, true, 'receipt-summary-row-total'),
     typeof receipt.summary.change === 'number' && receipt.summary.change > 0

@@ -88,6 +88,9 @@ const ProductPricingPanel = ({
             {Number(pricingSummary.rollWidth || 0) > 0 ? ` | Lebar Roll ${pricingSummary.rollWidth} m` : ''}
           </Text>
         ) : null}
+        {pricingSummary?.materialMarginText ? (
+          <Text style={styles.previewSummaryLine}>{pricingSummary.materialMarginText}</Text>
+        ) : null}
         {pricingSummary?.stickerNotice ? (
           <Text style={styles.previewWarningLine}>{pricingSummary.stickerNotice}</Text>
         ) : null}

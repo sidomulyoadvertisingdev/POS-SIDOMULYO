@@ -1554,6 +1554,27 @@ const resolvePricingBreakdownBundleDiscount = (pricing = null) => {
   }, 0);
   return roundMoney(derived);
 };
+const resolveMaterialMarginSummary = (pricing = null) => {
+  const rule = pricing?.rule && typeof pricing.rule === 'object' ? pricing.rule : null;
+  if (!rule) {
+    return '';
+  }
+  const widthCm = Number(rule.margin_total_width_cm || 0);
+  const heightCm = Number(rule.margin_total_height_cm || 0);
+  if (widthCm <= 0 && heightCm <= 0) {
+    return '';
+  }
+
+  const parts = [];
+  if (widthCm > 0) {
+    parts.push(`lebar +${formatMeterNumber(widthCm)} cm`);
+  }
+  if (heightCm > 0) {
+    parts.push(`panjang +${formatMeterNumber(heightCm)} cm`);
+  }
+
+  return `Lebihan bahan: ${parts.join(', ')}`;
+};
 const buildPricingDisplaySummary = ({
   pricing = null,
   materialText = '',
@@ -1607,6 +1628,7 @@ const buildPricingDisplaySummary = ({
     stickerRule,
     fallbackInputLengthM: designLengthM,
   });
+  const materialMarginText = resolveMaterialMarginSummary(pricing);
   const summaryParts = [];
   if (billingGroup) {
     summaryParts.push(`Rule ${billingGroup}`);
@@ -1619,6 +1641,9 @@ const buildPricingDisplaySummary = ({
   }
   if (negotiation?.isApplied) {
     summaryParts.push(`Nego ${formatRupiah(negotiatedSubtotal)}`);
+  }
+  if (materialMarginText) {
+    summaryParts.push(materialMarginText);
   }
   return {
     subtotal,
@@ -1635,6 +1660,7 @@ const buildPricingDisplaySummary = ({
     billedLengthM,
     billingMinLengthM,
     stickerNotice,
+    materialMarginText,
     isNegotiated: Boolean(negotiation?.isApplied),
     negotiatedSubtotal,
     bottomPrice: roundMoney(Number(negotiation?.bottomPrice || 0)),
@@ -6173,7 +6199,10 @@ const resolveDefaultInvoiceDateFilter = (referenceDate = new Date()) => {
     to: formatIsoDate(today),
   };
 };
-const DEFAULT_INVOICE_DATE_FILTER = resolveDefaultInvoiceDateFilter(new Date());
+const DEFAULT_INVOICE_DATE_FILTER = {
+  from: '',
+  to: '',
+};
 const resolveInvoiceDateRange = (dateFrom, dateTo) => {
   const startAt = parseIsoDateTimestamp(dateFrom, 'start');
   const endAt = parseIsoDateTimestamp(dateTo, 'end');
@@ -6687,6 +6716,29 @@ const isDraftCandidate = (row) => {
     && isDraftCompatibleStatus(row?.status || row?.order_status || row?.order?.status)
     && isDraftCompatibleStatus(row?.invoice?.status)
     && hasLegacyDraftSnapshot;
+};
+const shouldKeepDraftWorkspaceRow = (row) => {
+  if (!row || isReceivableApprovalInvoiceRow(row)) {
+    return false;
+  }
+  if (String(row?.__source || '').toLowerCase() === 'queue') {
+    return true;
+  }
+
+  const draftCompatibleStatus = (status) => {
+    const key = resolveInvoiceStatusKey(status);
+    return key === '' || key === 'pending' || key === 'draft' || key === 'queued_offline';
+  };
+  const invoiceStatus = row?.invoice?.status || row?.invoice_status || '';
+  if (!draftCompatibleStatus(invoiceStatus)) {
+    return false;
+  }
+  const orderStatus = row?.status || row?.order_status || row?.order?.status || '';
+  if (!draftCompatibleStatus(orderStatus)) {
+    return false;
+  }
+
+  return isDraftInvoiceRow(row) || isDraftCandidate(row);
 };
 const hasSnapshotObjectShape = (value) => Boolean(
   value
@@ -7437,6 +7489,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
   const [discountMode, setDiscountMode] = useState('percent');
   const [selectedPaymentMethod, setSelectedPaymentMethod] = useState('');
   const [paymentAmount, setPaymentAmount] = useState('');
+  const [checkoutSplitPayments, setCheckoutSplitPayments] = useState([]);
   const [paymentNotes, setPaymentNotes] = useState('');
   const [receivableDueDate, setReceivableDueDate] = useState('');
   const [selectedProofingChoice, setSelectedProofingChoice] = useState(PROOFING_CHOICE_PROOFING);
@@ -10457,6 +10510,37 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       || sourceRow?.payment?.payment_method
       || ''
     );
+    const sourcePaymentRows = Array.isArray(sourceRow?.invoice?.payments)
+      ? sourceRow.invoice.payments
+      : (Array.isArray(sourceRow?.payments) ? sourceRow.payments : []);
+    const receiptPaymentRows = sourcePaymentRows
+      .filter((payment) => {
+        const meta = parseJsonObject(payment?.meta) || {};
+        const status = normalizeText(meta?.status || payment?.status || '');
+        return !['reversed', 'voided', 'cancelled', 'canceled'].includes(status);
+      })
+      .map((payment) => {
+        const method = normalizePaymentMethodLabel(
+          payment?.payment_method?.name
+          || payment?.paymentMethod?.name
+          || payment?.method
+          || ''
+        );
+        const targetAccount = String(
+          payment?.payment_account?.name
+          || payment?.paymentAccount?.name
+          || [payment?.bank_account?.kode_akun, payment?.bank_account?.nama_akun].filter(Boolean).join(' - ')
+          || [payment?.bankAccount?.kode_akun, payment?.bankAccount?.nama_akun].filter(Boolean).join(' - ')
+          || ''
+        ).trim();
+
+        return {
+          method,
+          amount: roundMoney(Number(payment?.amount || 0) || 0),
+          targetAccount,
+        };
+      })
+      .filter((payment) => payment.method && payment.amount > 0);
     const paymentStatusLabel = dueTotal > 0
       ? (paidTotal > 0 ? 'DP / Piutang' : 'Piutang')
       : (paidTotal > 0 ? 'Lunas' : '');
@@ -10505,6 +10589,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         amount: paidTotal,
         targetAccount: paymentTargetName,
       } : undefined,
+      payments: receiptPaymentRows.length > 0 ? receiptPaymentRows : undefined,
       layout: {
         showOrderId: Boolean(receiptSettings.receipt_show_order_id),
         showCashier: Boolean(receiptSettings.receipt_show_cashier),
@@ -12327,14 +12412,28 @@ const SalesScreen = ({ currentUser, onLogout }) => {
 
   const grandTotal = useMemo(() => Math.max(subtotal - finalDiscount, 0), [subtotal, finalDiscount]);
   const paidAmount = useMemo(() => parseMoneyAmountInput(paymentAmount), [paymentAmount]);
+  const checkoutSplitTotal = useMemo(
+    () => roundMoney((Array.isArray(checkoutSplitPayments) ? checkoutSplitPayments : [])
+      .reduce((sum, row) => sum + (Number(row?.amount || 0) || 0), 0)),
+    [checkoutSplitPayments],
+  );
+  const checkoutSplitRemaining = useMemo(
+    () => roundMoney(Math.max(0, Number(grandTotal || 0) - checkoutSplitTotal)),
+    [checkoutSplitTotal, grandTotal],
+  );
   const changeAmount = useMemo(() => Math.max(paidAmount - grandTotal, 0), [paidAmount, grandTotal]);
   const paymentStatus = useMemo(() => {
+    if (checkoutSplitPayments.length > 0) {
+      if (checkoutSplitTotal <= 0) return 'Belum Bayar';
+      if (checkoutSplitTotal >= grandTotal) return 'Lunas';
+      return 'DP';
+    }
     if (!String(paymentMethod || '').trim()) return 'Pilih saat Proses';
     if (isCustomerDepositPaymentMethod(paymentMethod)) return 'Lunas via Saldo';
     if (paidAmount <= 0) return 'Belum Bayar';
     if (paidAmount >= grandTotal) return 'Lunas';
     return 'DP';
-  }, [paidAmount, grandTotal, paymentMethod]);
+  }, [checkoutSplitPayments.length, checkoutSplitTotal, paidAmount, grandTotal, paymentMethod]);
   const checkoutDepositShortage = useMemo(() => {
     if (!isCustomerDepositPaymentMethod(paymentMethod)) {
       return false;
@@ -13775,11 +13874,12 @@ const SalesScreen = ({ currentUser, onLogout }) => {
             : row
         ));
         if (options?.source === 'orders') {
-          const draftRows = normalizedRows.filter((row) => isDraftInvoiceRow(row));
+          const draftRows = normalizedRows.filter((row) => shouldKeepDraftWorkspaceRow(row));
           if (draftRows.length > 0) {
-            draftServerRowsRef.current = mergeInvoiceRows(draftServerRowsRef.current, draftRows);
+            draftServerRowsRef.current = mergeInvoiceRows(draftServerRowsRef.current, draftRows)
+              .filter((row) => shouldKeepDraftWorkspaceRow(row));
             const nextDraftRows = draftServerRowsRef.current;
-            setDraftInvoices((prev) => mergeInvoiceRows(prev, nextDraftRows));
+            setDraftInvoices((prev) => mergeInvoiceRows(prev, nextDraftRows).filter((row) => shouldKeepDraftWorkspaceRow(row)));
             updateInvoiceWorkspaceAreaSnapshot(nextDraftRows, {
               area: 'draft',
               replaceAreas: ['draft'],
@@ -13876,7 +13976,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     );
     const incomingRows = Array.isArray(rows) ? rows : [];
     const nextByArea = {
-      draft: incomingRows.filter((row) => isDraftInvoiceRow(row)),
+      draft: incomingRows.filter((row) => shouldKeepDraftWorkspaceRow(row)),
       success: incomingRows.filter((row) => isInvoiceSuccessRow(row)),
       approval: incomingRows.filter((row) => isReceivableApprovalInvoiceRow(row)),
       receivable: incomingRows.filter((row) => isReceivableInvoiceRow(row)),
@@ -13978,7 +14078,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       const snapshotRows = Array.isArray(invoiceWorkspaceRowsByArea?.draft)
         ? invoiceWorkspaceRowsByArea.draft
         : [];
-      const previewRows = mergeInvoiceRows(queueRows, snapshotRows).filter((row) => isDraftInvoiceRow(row));
+      const previewRows = mergeInvoiceRows(queueRows, snapshotRows).filter((row) => shouldKeepDraftWorkspaceRow(row));
       if (previewRows.length > 0) {
         setDraftInvoices(previewRows);
         hydrateDanaInvoiceMonitorsFromRows(previewRows);
@@ -14117,7 +14217,11 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         ? draftServerRowsRef.current
         : rows;
       const mergedRows = mergeInvoiceRows(baseRows, [...queueRows, ...approvalListRows, ...effectiveRows])
-        .filter((row) => invoiceRequestOptions.area !== 'draft' || !isReceivableApprovalInvoiceRow(row));
+        .filter((row) => (
+          invoiceRequestOptions.area === 'draft'
+            ? shouldKeepDraftWorkspaceRow(row)
+            : !isReceivableApprovalInvoiceRow(row)
+        ));
       const nextSuccessCache = syncInvoiceSuccessCacheFromRows(mergedRows);
       if (mergedRows.length > 0 || invoiceRequestOptions.area !== 'draft' || !invoiceLoadError) {
         setDraftInvoices(mergedRows);
@@ -14152,6 +14256,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       }
       const fallbackRows = invoiceRequestOptions.area === 'draft'
         ? mergeInvoiceRows(Array.isArray(draftInvoices) ? draftInvoices : [], queueRows)
+          .filter((row) => shouldKeepDraftWorkspaceRow(row))
         : queueRows;
       setDraftInvoices(fallbackRows);
       updateInvoiceWorkspaceAreaSnapshot(fallbackRows, { area: invoiceRequestOptions.area || 'draft' });
@@ -14258,7 +14363,9 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         Array.isArray(approvalRows) ? approvalRows : [],
         '',
       );
-      const safeDraftRows = Array.isArray(draftRows) ? draftRows : [];
+      const safeDraftRows = Array.isArray(draftRows)
+        ? draftRows.filter((row) => shouldKeepDraftWorkspaceRow(row))
+        : [];
       const safeSuccessRows = Array.isArray(successRows) ? successRows : [];
       const safeReceivableRows = Array.isArray(receivableRows) ? receivableRows : [];
       const approvalListRows = safeApprovalRows.filter((row) => {
@@ -16738,6 +16845,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     setDiscountMode('percent');
     setPaymentMethod('');
     setPaymentAmount('');
+    setCheckoutSplitPayments([]);
     setPaymentNotes('');
     setReceivableDueDate('');
     setSelectedProofingChoice(PROOFING_CHOICE_PROOFING);
@@ -16754,6 +16862,78 @@ const SalesScreen = ({ currentUser, onLogout }) => {
 
   const handleChangePaymentAmount = (value) => {
     setPaymentAmount(normalizeMoneyAmountInput(value));
+  };
+
+  const handleUseRemainingAsPaymentAmount = () => {
+    const remaining = checkoutSplitPayments.length > 0 ? checkoutSplitRemaining : grandTotal;
+    setPaymentAmount(formatMoneyAmountInput(remaining));
+  };
+
+  const handleAddCheckoutSplitPayment = async () => {
+    const methodLabel = normalizePaymentMethodLabel(paymentMethod);
+    const methodConfig = findPaymentMethodConfig(paymentMethodConfigs, methodLabel);
+    const amount = roundMoney(parseMoneyAmountInput(paymentAmount));
+    const remaining = checkoutSplitPayments.length > 0 ? checkoutSplitRemaining : grandTotal;
+
+    if (!methodLabel) {
+      openNotice('Split Payment', 'Pilih metode pembayaran dulu.');
+      return;
+    }
+    if (!methodConfig || methodConfig.isAvailable === false) {
+      openNotice('Split Payment', methodConfig?.availabilityMessage || 'Metode pembayaran ini belum siap dipakai.');
+      return;
+    }
+    if (amount <= 0) {
+      openNotice('Split Payment', 'Nominal pembayaran harus lebih dari 0.');
+      return;
+    }
+    if (amount > remaining) {
+      openNotice('Split Payment', 'Nominal pembayaran melebihi sisa tagihan.');
+      return;
+    }
+
+    let accountRow = selectedBankAccountRow;
+    if (!isCustomerDepositPaymentMethod(methodLabel)) {
+      const methodType = normalizePaymentMethodType(methodConfig?.type || methodConfig?.code || methodLabel);
+      if (methodConfig?.requiresPaymentAccount || methodType !== 'cash') {
+        const options = await loadPaymentAccountOptionsForMethod(methodLabel).catch(() => []);
+        const currentAccountId = Number(selectedBankAccountId || 0);
+        accountRow = options.find((row) => Number(row?.id || 0) === currentAccountId)
+          || options[0]
+          || selectedBankAccountRow
+          || null;
+        setBankAccounts(options);
+        setSelectedBankAccountId(Number(accountRow?.id || 0) || null);
+        if (!(Number(accountRow?.id || 0) > 0)) {
+          openNotice('Split Payment', 'Akun pembayaran wajib dipilih untuk metode ini.');
+          return;
+        }
+      }
+    }
+
+    const nextRow = {
+      id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      methodLabel,
+      method: String(methodConfig?.code || mapPaymentMethodToBackend(methodLabel) || '').trim(),
+      payment_method_id: Number(methodConfig?.id || 0) || null,
+      payment_account_id: isCustomerDepositPaymentMethod(methodLabel) ? null : (Number(accountRow?.id || 0) || null),
+      bank_account_id: isCustomerDepositPaymentMethod(methodLabel)
+        ? null
+        : (Number(accountRow?.accountingAccountId || accountRow?.accounting_account_id || 0) || null),
+      accountLabel: isCustomerDepositPaymentMethod(methodLabel)
+        ? 'Saldo Customer'
+        : String(accountRow?.displayTitle || accountRow?.displayName || '').trim(),
+      amount,
+      note: paymentNotes || null,
+      reference_no: '',
+    };
+
+    setCheckoutSplitPayments((prev) => [...(Array.isArray(prev) ? prev : []), nextRow]);
+    setPaymentAmount(formatMoneyAmountInput(Math.max(0, remaining - amount)));
+  };
+
+  const handleRemoveCheckoutSplitPayment = (rowId) => {
+    setCheckoutSplitPayments((prev) => (Array.isArray(prev) ? prev : []).filter((row) => row.id !== rowId));
   };
 
   const handleChangeReceivableDueDate = (value) => {
@@ -17898,6 +18078,14 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         });
       });
 
+      const checkoutPaymentRowsForSubmit = !isDraftMode && !isProofingWithoutPaymentMode && !usingDanaQris && !usingDanaGateway
+        ? (Array.isArray(checkoutSplitPayments) ? checkoutSplitPayments : [])
+            .filter((row) => roundMoney(Number(row?.amount || 0)) > 0)
+        : [];
+      const hasCheckoutSplitPayments = checkoutPaymentRowsForSubmit.length > 0;
+      const checkoutSplitPaidTotalForSubmit = roundMoney(
+        checkoutPaymentRowsForSubmit.reduce((sum, row) => sum + (Number(row?.amount || 0) || 0), 0),
+      );
       const paymentTransactionType = isDraftMode || isProofingWithoutPaymentMode || usingDanaQris || usingDanaGateway
         ? 'unpaid'
         : transactionType;
@@ -17910,12 +18098,14 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         : null;
       const paymentAmountPayload = isDraftMode || isProofingWithoutPaymentMode || usingDanaQris || usingDanaGateway
         ? 0
-        : transactionType === 'full'
+        : hasCheckoutSplitPayments
+          ? checkoutSplitPaidTotalForSubmit
+          : transactionType === 'full'
             ? grandTotal
             : transactionType === 'dp'
               ? Math.min(paidAmount, grandTotal)
               : 0;
-      if (!isDraftMode && !usingCustomerDeposit && selectedMethodConfig?.requiresPaymentAccount && (paymentAmountPayload > 0 || usingDanaQris || usingDanaGateway) && !(resolvedPaymentAccountId > 0)) {
+      if (!isDraftMode && !hasCheckoutSplitPayments && !usingCustomerDeposit && selectedMethodConfig?.requiresPaymentAccount && (paymentAmountPayload > 0 || usingDanaQris || usingDanaGateway) && !(resolvedPaymentAccountId > 0)) {
         openNotice('Akun Pembayaran', 'Akun pembayaran wajib dipilih sebelum proses order.');
         return null;
       }
@@ -17973,6 +18163,18 @@ const SalesScreen = ({ currentUser, onLogout }) => {
           reference_no: '',
           paid_at: new Date().toISOString(),
         },
+        ...(hasCheckoutSplitPayments ? {
+          payments: checkoutPaymentRowsForSubmit.map((row) => ({
+            method: row.method,
+            payment_method_id: row.payment_method_id || null,
+            payment_account_id: row.payment_account_id || null,
+            bank_account_id: row.bank_account_id || null,
+            amount: roundMoney(Number(row.amount || 0)),
+            note: row.note || paymentNotes || null,
+            reference_no: row.reference_no || '',
+            paid_at: new Date().toISOString(),
+          })),
+        } : {}),
       };
       setLastPayloadPreview(payload);
 
@@ -19157,11 +19359,11 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     }
   };
 
-  const isProcessOrderMethodMissing = !String(paymentMethod || '').trim();
+  const isProcessOrderMethodMissing = checkoutSplitPayments.length <= 0 && !String(paymentMethod || '').trim();
   const processOrderNeedsReceivableDueDate = showReceivableDueDateInput
     && !/^\d{4}-\d{2}-\d{2}$/.test(String(receivableDueDate || '').trim());
   const isProcessOrderBlocked = isProcessOrderMethodMissing
-    || processOrderNeedsAccountSelection
+    || (checkoutSplitPayments.length <= 0 && processOrderNeedsAccountSelection)
     || processOrderNeedsReceivableDueDate;
 
   const handleDownloadPreviewReceiptPdf = async () => {
@@ -19468,8 +19670,8 @@ const SalesScreen = ({ currentUser, onLogout }) => {
 
     return {
       draft: normalizeRows(
-        mergeInvoiceRows(snapshot.draft, visibleRows.filter((row) => isDraftInvoiceRow(row))),
-        (row) => isDraftInvoiceRow(row),
+        mergeInvoiceRows(snapshot.draft, visibleRows.filter((row) => shouldKeepDraftWorkspaceRow(row))),
+        (row) => shouldKeepDraftWorkspaceRow(row),
       ),
       success: normalizeRows(
         successRows,
@@ -19837,7 +20039,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         })
       : searchedRows;
     if (invoiceFilter === 'draft') {
-      return searchedRows.filter((row) => isDraftInvoiceRow(row));
+      return searchedRows.filter((row) => shouldKeepDraftWorkspaceRow(row));
     }
     if (invoiceFilter === 'success') {
       return successFilteredRows.filter((row) => isInvoiceSuccessRow(row));
@@ -23497,30 +23699,91 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                 })}
               </View>
               <Text style={styles.receivableHelperText}>{paymentMethodHelperText}</Text>
+              <Text style={styles.reportInputLabel}>Nominal Pembayaran</Text>
+              <View style={styles.processOrderSelectionRow}>
+                <TextInput
+                  value={paymentAmount}
+                  onChangeText={handleChangePaymentAmount}
+                  keyboardType="decimal-pad"
+                  placeholder="0"
+                  placeholderTextColor="#6c7485"
+                  style={[styles.reportInput, { flex: 1 }]}
+                  editable={!isSubmitting && !isCustomerDepositPaymentMethod(paymentMethod)}
+                />
+                <Pressable
+                  style={[styles.popupButton, styles.popupButtonSecondary, styles.processOrderActionButtonCompact]}
+                  disabled={isSubmitting}
+                  onPress={handleUseRemainingAsPaymentAmount}
+                >
+                  <Text style={[styles.popupButtonText, styles.popupButtonTextSecondary]}>Sisa</Text>
+                </Pressable>
+                <Pressable
+                  style={[styles.popupButton, styles.processOrderActionButtonCompact]}
+                  disabled={isSubmitting}
+                  onPress={() => { handleAddCheckoutSplitPayment().catch(() => {}); }}
+                >
+                  <Text style={styles.popupButtonText}>Tambah</Text>
+                </Pressable>
+              </View>
+              {checkoutSplitPayments.length > 0 ? (
+                <View style={styles.processOrderSummaryCard}>
+                  <View style={styles.processOrderSummaryRow}>
+                    <Text style={styles.processOrderSummaryLabel}>Total Bayar</Text>
+                    <Text style={styles.processOrderSummaryValue}>{formatRupiah(checkoutSplitTotal)}</Text>
+                  </View>
+                  <View style={styles.processOrderSummaryRow}>
+                    <Text style={styles.processOrderSummaryLabel}>Sisa</Text>
+                    <Text style={styles.processOrderSummaryValue}>{formatRupiah(checkoutSplitRemaining)}</Text>
+                  </View>
+                  {checkoutSplitPayments.map((row) => (
+                    <View key={row.id} style={styles.processOrderSelectionRow}>
+                      <View style={{ flex: 1 }}>
+                        <Text style={styles.processOrderSelectionValue}>{row.methodLabel} - {formatRupiah(row.amount)}</Text>
+                        <Text style={styles.processOrderSelectionHint}>{row.accountLabel || 'Akun otomatis backend'}</Text>
+                      </View>
+                      <Pressable
+                        style={[styles.popupButton, styles.popupButtonSecondary, styles.processOrderActionButtonCompact]}
+                        disabled={isSubmitting}
+                        onPress={() => handleRemoveCheckoutSplitPayment(row.id)}
+                      >
+                        <Text style={[styles.popupButtonText, styles.popupButtonTextSecondary]}>Hapus</Text>
+                      </Pressable>
+                    </View>
+                  ))}
+                </View>
+              ) : null}
             </View>
             <View
               style={[
                 styles.processOrderSelectionCard,
-                !String(paymentMethod || '').trim()
+                checkoutSplitPayments.length <= 0 && !String(paymentMethod || '').trim()
                   ? styles.processOrderSelectionCardWarning
-                  : processOrderNeedsAccountSelection
+                  : checkoutSplitPayments.length <= 0 && processOrderNeedsAccountSelection
                     ? styles.processOrderSelectionCardCaution
                     : styles.processOrderSelectionCardReady,
               ]}
             >
               <Text style={styles.processOrderSelectionTitle}>
-                {!String(paymentMethod || '').trim()
+                {checkoutSplitPayments.length > 0
+                  ? 'Split payment siap diproses'
+                  : !String(paymentMethod || '').trim()
                   ? 'Metode pembayaran belum dipilih'
                   : 'Metode pembayaran terpilih'}
               </Text>
               <View style={styles.processOrderSelectionRow}>
                 <Text style={styles.processOrderSelectionLabel}>Metode</Text>
-                <Text style={styles.processOrderSelectionValue}>{processOrderSelectedMethodLabel}</Text>
+                <Text style={styles.processOrderSelectionValue}>
+                  {checkoutSplitPayments.length > 0
+                    ? checkoutSplitPayments.map((row) => row.methodLabel).join(' + ')
+                    : processOrderSelectedMethodLabel}
+                </Text>
               </View>
               <View style={styles.processOrderSelectionRow}>
                 <Text style={styles.processOrderSelectionLabel}>Tujuan</Text>
                 <Text style={styles.processOrderSelectionValue}>
-                  {processOrderSelectedAccountLabel || (
+                  {checkoutSplitPayments.length > 0
+                    ? `${checkoutSplitPayments.length} baris pembayaran`
+                    : processOrderSelectedAccountLabel || (
                     isCustomerDepositPaymentMethod(paymentMethod)
                       ? 'Saldo Customer'
                       : 'Belum ada akun tujuan aktif'
@@ -23529,7 +23792,11 @@ const SalesScreen = ({ currentUser, onLogout }) => {
               </View>
               <View style={styles.processOrderSelectionRow}>
                 <Text style={styles.processOrderSelectionLabel}>Nominal</Text>
-                <Text style={styles.processOrderSelectionValue}>{formatRupiah(orderPreviewSnapshot.grandTotal)}</Text>
+                <Text style={styles.processOrderSelectionValue}>
+                  {checkoutSplitPayments.length > 0
+                    ? `${formatRupiah(checkoutSplitTotal)} / ${formatRupiah(orderPreviewSnapshot.grandTotal)}`
+                    : formatRupiah(orderPreviewSnapshot.grandTotal)}
+                </Text>
               </View>
               {showReceivableDueDateInput ? (
                 <View style={styles.processOrderSelectionRow}>
@@ -23540,7 +23807,11 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                 </View>
               ) : null}
               <Text style={styles.processOrderSelectionHint}>
-                {!String(paymentMethod || '').trim()
+                {checkoutSplitPayments.length > 0
+                  ? (checkoutSplitRemaining <= 0
+                    ? 'Total pembayaran sudah memenuhi tagihan.'
+                    : `Pembayaran akan tercatat sebagai DP/piutang. Sisa ${formatRupiah(checkoutSplitRemaining)}.`)
+                  : !String(paymentMethod || '').trim()
                   ? 'Kasir wajib memilih metode pembayaran sebelum tombol proses dan cetak nota aktif.'
                   : processOrderNeedsAccountSelection
                     ? 'Metode sudah dipilih, tetapi backend belum menyediakan akun tujuan aktif untuk metode ini.'
@@ -24974,6 +25245,9 @@ const SalesScreen = ({ currentUser, onLogout }) => {
                     ) : null}
                     {item?.pricingSummary?.billingGroup ? (
                       <Text style={styles.invoiceItemMeta}>Rule Sticker: {item.pricingSummary.billingGroup}{item.pricingSummary.rollWidth > 0 ? ` | Lebar Roll: ${item.pricingSummary.rollWidth} m` : ''}</Text>
+                    ) : null}
+                    {item?.pricingSummary?.materialMarginText ? (
+                      <Text style={styles.invoiceItemMeta}>{item.pricingSummary.materialMarginText}</Text>
                     ) : null}
                     {item?.pricingSummary?.stickerNotice ? (
                       <Text style={styles.invoiceItemMeta}>{item.pricingSummary.stickerNotice}</Text>

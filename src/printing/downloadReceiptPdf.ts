@@ -168,8 +168,17 @@ export const buildReceiptPdfLines = (receipt: ReceiptData, profile: PrinterProfi
   if (typeof receipt.summary.serviceCharge === 'number' && receipt.summary.serviceCharge > 0) {
     lines.push({ text: `Biaya Layanan\t${formatReceiptAmount(receipt.summary.serviceCharge)}` });
   }
-  if (receipt.payment?.method) {
-    lines.push({ text: `Pembayaran ${receipt.payment.method}\t${formatReceiptAmount(receipt.payment.amount || receipt.summary.grandTotal)}`, bold: true });
+  const paymentRows = Array.isArray(receipt.payments) && receipt.payments.length > 0
+    ? receipt.payments
+    : (receipt.payment?.method ? [receipt.payment] : []);
+  paymentRows.forEach((payment) => {
+    if (payment?.method) {
+      lines.push({ text: `Pembayaran ${payment.method}\t${formatReceiptAmount(payment.amount || receipt.summary.grandTotal)}`, bold: true });
+    }
+  });
+  if (paymentRows.length > 1) {
+    const totalPaid = paymentRows.reduce((sum, payment) => sum + (Number(payment?.amount || 0) || 0), 0);
+    lines.push({ text: `Total Bayar\t${formatReceiptAmount(totalPaid)}`, bold: true });
   }
   lines.push({ text: `Total\t${formatReceiptAmount(receipt.summary.grandTotal)}`, bold: true });
   if (typeof receipt.summary.change === 'number' && receipt.summary.change > 0) {

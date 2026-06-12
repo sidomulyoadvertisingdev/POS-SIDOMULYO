@@ -135,11 +135,23 @@ export const renderReceiptText = (receipt: ReceiptData, printerProfile: PrinterP
   if (typeof receipt.summary.serviceCharge === 'number' && receipt.summary.serviceCharge > 0) {
     lines.push(leftRight('Biaya Layanan', formatReceiptAmount(receipt.summary.serviceCharge), width));
   }
-  if (showPaymentDetail && hasValue(receipt.payment?.method)) {
-    lines.push(leftRight(`Pembayaran ${String(receipt.payment?.method || '').trim()}`, formatReceiptAmount(receipt.payment?.amount || receipt.summary.grandTotal), width));
-    if (hasValue(receipt.payment?.targetAccount)) {
-      lines.push('Akun Tujuan :');
-      pushWrapped(lines, String(receipt.payment?.targetAccount || '').trim(), width);
+  const paymentRows = Array.isArray(receipt.payments) && receipt.payments.length > 0
+    ? receipt.payments
+    : (hasValue(receipt.payment?.method) ? [receipt.payment] : []);
+  if (showPaymentDetail && paymentRows.length > 0) {
+    paymentRows.forEach((payment) => {
+      if (!hasValue(payment?.method)) {
+        return;
+      }
+      lines.push(leftRight(`Pembayaran ${String(payment?.method || '').trim()}`, formatReceiptAmount(payment?.amount || receipt.summary.grandTotal), width));
+      if (hasValue(payment?.targetAccount)) {
+        lines.push('Akun Tujuan :');
+        pushWrapped(lines, String(payment?.targetAccount || '').trim(), width);
+      }
+    });
+    if (paymentRows.length > 1) {
+      const totalPaid = paymentRows.reduce((sum, payment) => sum + (Number(payment?.amount || 0) || 0), 0);
+      lines.push(leftRight('Total Bayar', formatReceiptAmount(totalPaid), width));
     }
   }
   lines.push(leftRight('Total', formatReceiptAmount(receipt.summary.grandTotal), width));
