@@ -6264,16 +6264,19 @@ const buildSpecialReceivableTodaySummary = (rows = []) => {
   };
 
   (Array.isArray(rows) ? rows : []).forEach((row) => {
-    if (!isReceivableInvoiceRow(row) || !isInvoiceRowInputToday(row)) {
+    if (!isInvoiceRowInputToday(row)) {
       return;
     }
     const amount = resolveInvoiceRowTotalAmount(row);
     if (isInvoiceSpecialCustomerRow(row, 'BEBAN MANAGEMENT')) {
+      if (!isInvoiceSuccessRow(row)) {
+        return;
+      }
       totals.managementCount += 1;
       totals.managementAmount += amount;
       return;
     }
-    if (isInvoiceSpecialCustomerRow(row, 'KESALAHAN PRODUKSI')) {
+    if (isReceivableInvoiceRow(row) && isInvoiceSpecialCustomerRow(row, 'KESALAHAN PRODUKSI')) {
       totals.productionCount += 1;
       totals.productionAmount += amount;
     }
@@ -19724,6 +19727,9 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       totals.draftAmount += totalAmount;
     });
     (Array.isArray(summaryRows.success) ? summaryRows.success : []).forEach((row) => {
+      if (isInvoiceSpecialCustomerRow(row, 'BEBAN MANAGEMENT')) {
+        return;
+      }
       totals.successCount += 1;
       totals.successAmount += resolveInvoiceRowTotalAmount(row);
     });
@@ -19769,7 +19775,10 @@ const SalesScreen = ({ currentUser, onLogout }) => {
       && typeof invoiceDashboardSummary.purchases.breakdown === 'object'
       ? invoiceDashboardSummary.purchases.breakdown
       : {};
-    const specialTodaySummary = buildSpecialReceivableTodaySummary(invoiceSummaryRowsByArea?.receivable);
+    const specialTodaySummary = buildSpecialReceivableTodaySummary([
+      ...(Array.isArray(invoiceSummaryRowsByArea?.success) ? invoiceSummaryRowsByArea.success : []),
+      ...(Array.isArray(invoiceSummaryRowsByArea?.receivable) ? invoiceSummaryRowsByArea.receivable : []),
+    ]);
     const breakdownAmount = (breakdown, key) => roundMoney(Number(breakdown?.[key]?.amount || 0) || 0);
     const breakdownCount = (breakdown, key) => Number(breakdown?.[key]?.count || 0) || 0;
     const firstNumber = (...candidates) => {
@@ -20004,10 +20013,19 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         invoiceFilter === 'success' ? invoiceCashierId : '',
       )
       : [];
+    const managementSnapshotRows = invoiceFilter === 'receivable' && invoiceOperationalSummaryFilter === 'management'
+      ? filterInvoiceRowsByCashier(
+        invoiceWorkspaceRowsByArea?.success,
+        '',
+      )
+      : [];
     const shouldMergeAreaSnapshot = INVOICE_ACTIVE_WORK_AREAS.has(invoiceFilter) || invoiceFilter === 'success';
     const rows = shouldMergeAreaSnapshot
       ? mergeInvoiceRows(
-        Array.isArray(areaSnapshotRows) ? areaSnapshotRows : [],
+        mergeInvoiceRows(
+          Array.isArray(areaSnapshotRows) ? areaSnapshotRows : [],
+          Array.isArray(managementSnapshotRows) ? managementSnapshotRows : [],
+        ),
         visibleRows,
       )
       : visibleRows;
@@ -20074,6 +20092,10 @@ const SalesScreen = ({ currentUser, onLogout }) => {
     }
     if (invoiceFilter === 'receivable') {
       const receivableRows = searchedRows.filter((row) => isReceivableInvoiceRow(row));
+      const managementBurdenRows = searchedRows.filter((row) => (
+        isInvoiceSuccessRow(row)
+        && isInvoiceSpecialCustomerRow(row, 'BEBAN MANAGEMENT')
+      ));
       if (invoiceOperationalSummaryFilter === 'due_today') {
         return receivableRows.filter((row) => {
           const dueMeta = resolveReceivableDueMeta(row);
@@ -20084,7 +20106,7 @@ const SalesScreen = ({ currentUser, onLogout }) => {
         return receivableRows.filter((row) => Boolean(resolveReceivableDueMeta(row)?.isOverdue));
       }
       if (invoiceOperationalSummaryFilter === 'management') {
-        return receivableRows.filter((row) => isInvoiceSpecialCustomerRow(row, 'BEBAN MANAGEMENT'));
+        return managementBurdenRows;
       }
       if (invoiceOperationalSummaryFilter === 'production') {
         return receivableRows.filter((row) => isInvoiceSpecialCustomerRow(row, 'KESALAHAN PRODUKSI'));
